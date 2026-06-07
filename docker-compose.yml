@@ -1,0 +1,255 @@
+# Author: Ravi Sharma
+# Copyright (c) 2026 Ravi Sharma
+# SPDX-License-Identifier: MIT
+#
+# Docker Compose stack for the Migration Platform.
+# All services have healthchecks and restart:unless-stopped (L-10).
+
+version: "3.9"
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: uvicorn apps.api.main:app --host 0.0.0.0 --port 8508 --reload
+    ports:
+      - "8508:8508"
+    volumes:
+      - .:/app
+      - /app/__pycache__
+    # NOTE: Source (SQL Server) and destination (PostgreSQL) connections are NOT
+    # configured here. They are added at runtime through the application — see the
+    # Connections page in the UI or POST /connections. Credentials are encrypted by
+    # SecretsManager and referenced by connection_id; nothing is hard-coded in the stack.
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONPATH=/app
+      - REDIS_URL=redis://redis:6379/0
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8508/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: temporal-worker
+    volumes:
+      - .:/app
+      - /app/__pycache__
+    # Like the api service, the worker resolves source/destination connections at
+    # runtime from the encrypted connection store — no DB credentials are baked in.
+    environment:
+      - PYTHONPATH=/app
+      - TEMPORAL_HOST=temporal:7233
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+    restart: unless-stopped
+
+  migration-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile.migration-engine
+    environment:
+      - MIGRATION_MASTER_KEY=${MIGRATION_MASTER_KEY:-}
+      - MIGRATION_DATABASE_METADATA_URL=postgresql://postgres:postgres@postgres_checklist:5432/migration_checklist
+      - MIGRATION_QUEUE_PATH=/tmp/migration_queue.bbolt
+      - MIGRATION_LOGGING_FORMAT=text
+    depends_on:
+      postgres_checklist:
+        condition: service_healthy
+    restart: unless-stopped
+
+  cli:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    entrypoint: python -m apps.cli.main
+    environment:
+      - PYTHONPATH=/app
+      - API_URL=http://api:8508
+    depends_on:
+      api:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # Sample source/destination databases — DEMO ONLY (opt-in).
+  #
+  # These are throwaway databases for trying the platform locally. They are NOT
+  # the platform's own datastore and are NOT wired into the api/worker services.
+  # Real source and destination servers are added through the application
+  # (UI Connections page / POST /connections), where credentials are encrypted.
+  #
+  # They only start when explicitly requested:
+  #   docker-compose --profile sample-dbs up
+  # ---------------------------------------------------------------------------
+  postgres_target:
+    profiles: ["sample-dbs"]
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: migration_target
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_target_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  postgres_checklist:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: migration_checklist
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5555:5432"
+    volumes:
+      - pg_checklist_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  sqlserver_source:
+    profiles: ["sample-dbs"]   # DEMO ONLY — see note above postgres_target
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "YourPassword123!"
+      MSSQL_PID: Developer
+    ports:
+      - "1433:1433"
+    volumes:
+      - sqlserver_data:/var/opt/mssql
+    restart: unless-stopped
+    healthcheck:
+      # sqlcmd is bundled in the mssql image
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P '$$MSSQL_SA_PASSWORD' -C -Q 'SELECT 1' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  temporal:
+    image: temporalio/auto-setup:1.23
+    ports:
+      - "7233:7233"
+    environment:
+      - DB=postgresql
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_SEEDS=postgres_checklist
+    depends_on:
+      postgres_checklist:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "tctl cluster health 2>&1 | grep -q SERVING || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  temporal-admin:
+    image: temporalio/admin-tools:1.23
+    depends_on:
+      temporal:
+        condition: service_started
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    ports:
+      - "4318:4318"
+      - "8889:8889"
+    volumes:
+      - ./deployments/otel-collector.yml:/etc/otel-collector.yml
+    command: ["--config=/etc/otel-collector.yml"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:13133/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deployments/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3508:3000"
+    volumes:
+      - ./deployments/grafana-dashboards:/etc/grafana/provisioning/dashboards
+      - ./deployments/grafana-datasources:/etc/grafana/provisioning/datasources
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      prometheus:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  redis_data:
+  pg_target_data:
+  pg_checklist_data:
+  sqlserver_data:
+  prometheus_data:
+  grafana_data:

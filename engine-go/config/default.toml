@@ -1,0 +1,41 @@
+# Migration Engine — default configuration
+# Copyright (c) 2026 Ravi Sharma. MIT License.
+#
+# All values can be overridden via environment variables using the pattern:
+#   MIGRATION_<SECTION>_<KEY>  (e.g. MIGRATION_DATABASE_METADATA_URL)
+
+[database]
+# URL of the shared PostgreSQL metadata DB (same DB the Python API writes to).
+metadata_url    = "postgresql://postgres:postgres@localhost:5432/migration_platform"
+# Command poll interval in milliseconds when no NOTIFY arrives.
+command_poll_ms = 500
+
+[queue]
+# Filesystem path for the embedded bbolt key-value store (replaces RocksDB).
+path = "/tmp/migration_queue.bbolt"
+
+[workers]
+# Parallel extraction goroutines.
+extractor_count = 4
+# Parallel loading goroutines.
+loader_count    = 4
+
+[chunks]
+# Initial chunk size in rows.
+initial_size = 10000
+# Target extraction time per chunk in milliseconds (adaptive sizer target).
+target_ms    = 2000
+min_size     = 1000
+max_size     = 100000
+
+[metrics]
+# OpenTelemetry OTLP gRPC endpoint (host:port). Leave empty to disable metrics export.
+otlp_endpoint        = ""
+# Metric export interval in seconds.
+export_interval_secs = 10
+
+[logging]
+# log level: debug | info | warn | error
+level  = "info"
+# format: json (structured) | text (human-readable)
+format = "json"

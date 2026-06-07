@@ -1,0 +1,61 @@
+replicaCount: 1
+
+image:
+  api:
+    repository: sql-optima/api
+    tag: "0.2.0"
+    pullPolicy: IfNotPresent
+  ui:
+    repository: sql-optima/ui
+    tag: "0.2.0"
+    pullPolicy: IfNotPresent
+
+service:
+  api:
+    type: ClusterIP
+    port: 8508
+  ui:
+    type: ClusterIP
+    port: 3508
+
+ingress:
+  enabled: false
+  className: nginx
+  hosts:
+    - host: sql-optima.local
+      paths:
+        - path: /api
+          service: api
+        - path: /
+          service: ui
+
+env:
+  MIGRATION_EDITION: enterprise
+  MIGRATION_DEPLOYMENT: kubernetes
+  MIGRATION_ENV: production
+  # Set via secret in production — never commit real keys
+  MIGRATION_LICENSE_KEY: ""
+  MIGRATION_JWT_SECRET: ""
+  MIGRATION_MASTER_KEY: ""
+  METADATA_DB_URL: "postgresql+asyncpg://postgres:postgres@metadata-db:5432/sql_optima"
+
+resources:
+  api:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  ui:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+metadataDb:
+  enabled: true
+  image: postgres:16-alpine
+  storage: 10Gi

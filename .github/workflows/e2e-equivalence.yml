@@ -1,0 +1,63 @@
+name: E2E Equivalence
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * 1"
+
+jobs:
+  procedure-query-equivalence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Start sample databases
+        run: docker compose --profile sample-dbs up -d sqlserver_source postgres_target
+
+      - name: Wait for SQL Server
+        run: |
+          for i in $(seq 1 40); do
+            docker compose exec -T sqlserver_source \
+              /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'YourPassword123!' -C -Q 'SELECT 1' \
+              && exit 0
+            sleep 5
+          done
+          exit 1
+
+      - name: Wait for PostgreSQL
+        run: |
+          for i in $(seq 1 20); do
+            docker compose exec -T postgres_target pg_isready -U postgres && exit 0
+            sleep 3
+          done
+          exit 1
+
+      - name: Run live equivalence tests
+        env:
+          MIGRATION_E2E_PROC_EQ: "1"
+          MIGRATION_SOURCE_HOST: localhost
+          MIGRATION_SOURCE_PORT: "1433"
+          MIGRATION_SOURCE_DATABASE: master
+          MIGRATION_SOURCE_USER: sa
+          MIGRATION_SOURCE_PASSWORD: YourPassword123!
+          MIGRATION_TARGET_HOST: localhost
+          MIGRATION_TARGET_PORT: "5432"
+          MIGRATION_TARGET_DATABASE: migration_target
+          MIGRATION_TARGET_USER: postgres
+          MIGRATION_TARGET_PASSWORD: postgres
+        run: |
+          python -m pytest tests/integration/test_procedure_equivalence_live.py -v --tb=short
+          MIGRATION_E2E_INTEGRITY=1 python -m pytest tests/e2e/test_data_integrity.py -v --tb=short
+
+      - name: Tear down
+        if: always()
+        run: docker compose --profile sample-dbs down -v

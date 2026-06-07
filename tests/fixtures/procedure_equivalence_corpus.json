@@ -1,0 +1,37 @@
+{
+  "cases": [
+    {
+      "name": "simple_scalar_add",
+      "source_sql": "CREATE PROCEDURE dbo.usp_add\n  @a INT, @b INT\nAS\nBEGIN\n  SELECT @a + @b AS result;\nEND",
+      "source_call": "EXEC dbo.usp_add @a=2, @b=3",
+      "target_call": "SELECT * FROM dbo.usp_add(2, 3)",
+      "expected_rows": [[5]],
+      "skip_runtime": false,
+      "notes": "Basic arithmetic — live deploy path when MIGRATION_E2E_PROC_EQ=1"
+    },
+    {
+      "name": "string_concat",
+      "source_sql": "CREATE PROCEDURE dbo.usp_greet @name NVARCHAR(100)\nAS\nBEGIN\n  SELECT 'Hello, ' + @name AS greeting;\nEND",
+      "source_call": "EXEC dbo.usp_greet @name=N'World'",
+      "target_call": "SELECT * FROM dbo.usp_greet('World')",
+      "expected_rows": [["Hello, World"]],
+      "skip_runtime": true
+    },
+    {
+      "name": "datediff_seconds",
+      "source_sql": "CREATE PROCEDURE dbo.usp_elapsed\nAS\nBEGIN\n  SELECT DATEDIFF(SECOND, '2026-01-01', '2026-01-01 00:02:00') AS secs;\nEND",
+      "source_call": "EXEC dbo.usp_elapsed",
+      "expected_rows": [[120]],
+      "skip_runtime": true,
+      "notes": "Validates DATEDIFF(SECOND) EPOCH conversion (§3.3 regression)"
+    },
+    {
+      "name": "charindex_strpos",
+      "source_sql": "CREATE PROCEDURE dbo.usp_find\nAS\nBEGIN\n  SELECT CHARINDEX('world', 'hello world') AS pos;\nEND",
+      "source_call": "EXEC dbo.usp_find",
+      "expected_rows": [[7]],
+      "skip_runtime": true,
+      "notes": "Validates CHARINDEX→STRPOS arg order (§3.1 regression)"
+    }
+  ]
+}

@@ -1,0 +1,811 @@
+#!/usr/bin/env python3
+"""
+Migration Platform — Cross-platform one-command launcher.
+Supports Windows (PowerShell), Linux, and macOS.
+
+Usage:
+    python start.py              # Interactive menu
+    python start.py --all        # Start API + UI (default)
+    python start.py --api        # Start API server only
+    python start.py --ui         # Start UI dev server only
+    python start.py --setup      # Install deps only (no server start)
+    python start.py --test       # Run tests
+    python start.py --help       # Show this help
+Author: Ravi Sharma
+Copyright (c) 2026 Ravi Sharma
+SPDX-License-Identifier: MIT
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+UI_DIR = ROOT / "apps" / "ui"
+ENGINE_DIR = ROOT / "engine-go"
+DATA_DIR = ROOT / "data"
+ENV_FILE = ROOT / ".env"
+PYPROJECT = ROOT / "pyproject.toml"
+REQUIREMENTS = ROOT / "requirements.txt"
+
+IS_WINDOWS = sys.platform == "win32"
+PYTHON = sys.executable
+NPM = shutil.which("npm") or shutil.which("npm.cmd")
+
+# ── Colors ────────────────────────────────────────────────────────────
+
+class C:
+    HEADER = "\033[95m"
+    BLUE = "\033[94m"
+    CYAN = "\033[96m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    RED = "\033[91m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    END = "\033[0m"
+
+def _c(code: str, text: str) -> str:
+    if not sys.stdout.isatty():
+        return text
+    return f"{code}{text}{C.END}"
+
+
+def print_banner():
+    banner = rf"""{C.CYAN}
+  ___  ___  _       ___       _   _               __  __ _               _   _
+ / __|/ _ \| |     / _ \ _ __| |_(_)_ __  __ _  |  \/  (_)__ _ _ _ __ _| |_(_)___ _ _
+ \__ \ (_) | |__  | (_) | '_ \  _| | '  \/ _` | | |\/| | / _` | '_/ _` |  _| / _ \ ' \
+ |___/\__\_\____|  \___/| .__/\__|_|_|_|_\__,_| |_|  |_|_\__, |_| \__,_|\__|_\___/_||_|
+                        |_|                               |___/
+{C.CYAN}{C.DIM}  SQL Server → PostgreSQL  |  DDD + Clean Arch  |  v0.1.0{C.END}
+    """
+    print(banner)
+
+
+# ── Prerequisites ─────────────────────────────────────────────────────
+
+def check_python() -> bool:
+    v = sys.version_info
+    if v.major < 3 or (v.major == 3 and v.minor < 11):
+        print(f" {C.RED}✗{C.END} Python >= 3.11 required (found {v.major}.{v.minor}.{v.micro})")
+        return False
+    print(f" {C.GREEN}✓{C.END} Python {v.major}.{v.minor}.{v.micro}")
+    return True
+
+
+def check_node() -> bool:
+    if not NPM:
+        print(f" {C.YELLOW}⚠{C.END} Node.js/npm not found — UI will not start")
+        return False
+    try:
+        out = subprocess.check_output([NPM, "--version"], text=True).strip()
+        print(f" {C.GREEN}✓{C.END} npm v{out}")
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print(f" {C.YELLOW}⚠{C.END} npm not available — UI will not start")
+        return False
+
+
+def check_go() -> bool:
+    go = shutil.which("go")
+    if not go:
+        print(f" {C.YELLOW}⚠{C.END} Go toolchain not found — migration-engine will not start")
+        print(f"   Install Go 1.23+ from https://go.dev/dl/")
+        return False
+    try:
+        out = subprocess.check_output([go, "version"], text=True).strip()
+        print(f" {C.GREEN}✓{C.END} {out}")
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print(f" {C.YELLOW}⚠{C.END} Go not available — migration-engine will not start")
+        return False
+
+
+# ── Environment ───────────────────────────────────────────────────────
+
+DEFAULT_ENV = """# SQL Optima Migration — Environment Configuration
+# Copy this to .env and adjust for your environment.
+
+MIGRATION_MASTER_KEY={master_key}
+MIGRATION_JWT_SECRET={jwt_secret}
+
+# Source (SQL Server)
+MIGRATION_SOURCE_HOST=localhost
+MIGRATION_SOURCE_PORT=1433
+MIGRATION_SOURCE_DATABASE=source_db
+MIGRATION_SOURCE_USER=sa
+MIGRATION_SOURCE_PASSWORD=
+# Set to true for SQL Server instances with self-signed TLS certificates (dev/test only)
+MIGRATION_SOURCE_TRUST_CERT=false
+
+# Target (PostgreSQL)
+MIGRATION_TARGET_HOST=localhost
+MIGRATION_TARGET_PORT=5432
+MIGRATION_TARGET_DATABASE=target_db
+MIGRATION_TARGET_USER=postgres
+MIGRATION_TARGET_PASSWORD=
+
+# Optional
+MIGRATION_JOBS_FILE=migration_jobs.json
+
+# Metadata database (postgres_checklist container — auto-started by start.py)
+METADATA_DB_URL=postgresql+asyncpg://postgres:postgres@localhost:5555/migration_checklist
+
+# Go migration-engine (start.py backfills if missing)
+MIGRATION_DATABASE_METADATA_URL=postgresql://postgres:postgres@localhost:5555/migration_checklist
+MIGRATION_QUEUE_PATH=data/migration_queue.bbolt
+"""
+
+
+def _random_key(length: int = 32) -> str:
+    import base64
+    import secrets
+    return base64.urlsafe_b64encode(secrets.token_bytes(length)).decode()
+
+
+_ENV_BACKFILL: dict[str, str] = {
+    "MIGRATION_SOURCE_TRUST_CERT": "false",
+    "METADATA_DB_URL": "postgresql+asyncpg://postgres:postgres@localhost:5555/migration_checklist",
+    "MIGRATION_DATABASE_METADATA_URL": "postgresql://postgres:postgres@localhost:5555/migration_checklist",
+    "MIGRATION_QUEUE_PATH": "data/migration_queue.bbolt",
+}
+
+
+def _backfill_env_keys() -> list[str]:
+    """Append missing template keys to an existing .env without overwriting values."""
+    if not ENV_FILE.exists():
+        return []
+    lines = ENV_FILE.read_text().splitlines()
+    existing = {
+        ln.partition("=")[0].strip()
+        for ln in lines
+        if ln.strip() and not ln.strip().startswith("#") and "=" in ln
+    }
+    added: list[str] = []
+    for key, default in _ENV_BACKFILL.items():
+        if key in existing:
+            continue
+        lines.append(f"{key}={default}")
+        added.append(key)
+    if added:
+        ENV_FILE.write_text("\n".join(lines) + "\n")
+    return added
+
+
+def ensure_env():
+    if ENV_FILE.exists():
+        added = _backfill_env_keys()
+        print(f" {C.GREEN}✓{C.END} .env file exists")
+        if added:
+            print(f" {C.YELLOW}✦{C.END} Added missing keys to .env: {', '.join(added)}")
+        return
+
+    master_key = _random_key()
+    jwt_secret = _random_key()
+    ENV_FILE.write_text(DEFAULT_ENV.format(master_key=master_key, jwt_secret=jwt_secret))
+    print(f" {C.YELLOW}✦{C.END} Created .env with generated keys")
+    print(f"   MIGRATION_MASTER_KEY={master_key}")
+    print(f"   MIGRATION_JWT_SECRET={jwt_secret}")
+    print(f"   Open the app in your browser to complete first-time admin setup.")
+
+
+def load_env():
+    """Load .env into os.environ (simple parser, no dotenv dependency)."""
+    if not ENV_FILE.exists():
+        return
+    for line in ENV_FILE.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip().strip("\"'")
+        if key:
+            os.environ.setdefault(key, val)
+    _sync_go_engine_env()
+
+
+def _metadata_url_for_go() -> str:
+    """Return a lib/pq-compatible URL for the Go engine."""
+    explicit = os.environ.get("MIGRATION_DATABASE_METADATA_URL", "").strip()
+    if explicit:
+        return explicit
+    py_url = os.environ.get("METADATA_DB_URL", "").strip()
+    if py_url.startswith("postgresql+asyncpg://"):
+        return "postgresql://" + py_url.split("://", 1)[1]
+    if py_url.startswith("postgresql://"):
+        return py_url
+    return "postgresql://postgres:postgres@localhost:5555/migration_checklist"
+
+
+def _queue_path_for_go() -> str:
+    raw = os.environ.get("MIGRATION_QUEUE_PATH", "data/migration_queue.bbolt").strip()
+    path = Path(raw)
+    if not path.is_absolute():
+        path = ROOT / path
+    return str(path)
+
+
+def _sync_go_engine_env() -> None:
+    """Ensure Go engine env vars align with Python metadata settings."""
+    os.environ.setdefault("MIGRATION_DATABASE_METADATA_URL", _metadata_url_for_go())
+    queue = _queue_path_for_go()
+    os.environ.setdefault("MIGRATION_QUEUE_PATH", queue)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    Path(queue).parent.mkdir(parents=True, exist_ok=True)
+
+
+# ── Setup ─────────────────────────────────────────────────────────────
+
+def install_python_deps():
+    print(f"\n {C.BOLD}Installing Python dependencies...{C.END}")
+    try:
+        subprocess.check_call(
+            [PYTHON, "-m", "pip", "install", "-e", ".[dev]"],
+            cwd=ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+        )
+        print(f" {C.GREEN}✓{C.END} Python dependencies installed")
+    except subprocess.CalledProcessError:
+        # Fallback to requirements.txt
+        try:
+            subprocess.check_call(
+                [PYTHON, "-m", "pip", "install", "-r", "requirements.txt"],
+                cwd=ROOT,
+                stdout=subprocess.DEVNULL,
+            )
+            print(f" {C.GREEN}✓{C.END} Python dependencies installed (from requirements.txt)")
+        except subprocess.CalledProcessError as e:
+            print(f" {C.RED}✗{C.END} Failed to install Python deps: {e}")
+            sys.exit(1)
+
+
+def install_ui_deps():
+    if not NPM:
+        print(f" {C.YELLOW}⚠{C.END} Skipping UI deps (npm not found)")
+        return False
+    print(f"\n {C.BOLD}Installing UI dependencies...{C.END}")
+    try:
+        subprocess.check_call([NPM, "install", "--silent"], cwd=UI_DIR, stdout=subprocess.DEVNULL)
+        print(f" {C.GREEN}✓{C.END} UI dependencies installed")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f" {C.YELLOW}⚠{C.END} UI install failed: {e}")
+        return False
+
+
+def warm_go_modules() -> None:
+    """Pre-fetch Go module deps so the engine starts faster."""
+    if not shutil.which("go") or not ENGINE_DIR.is_dir():
+        return
+    print(f"\n {C.BOLD}Fetching Go module dependencies...{C.END}")
+    try:
+        subprocess.check_call(
+            ["go", "mod", "download"],
+            cwd=ENGINE_DIR,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        print(f" {C.GREEN}✓{C.END} Go modules ready")
+    except subprocess.CalledProcessError:
+        print(f" {C.YELLOW}⚠{C.END} go mod download failed — engine may still compile on first run")
+
+
+# ── Docker services ───────────────────────────────────────────────────
+
+def _docker_available() -> bool:
+    try:
+        subprocess.run(
+            ["docker", "info"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True,
+        )
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
+def ensure_postgres_checklist() -> bool:
+    """Start the postgres_checklist container if it isn't already running.
+
+    Returns True when the container is healthy, False if Docker is unavailable
+    or startup fails (caller may still proceed — app will error on connect).
+    """
+    print(f"\n {C.BOLD}Checking metadata database (postgres_checklist)...{C.END}")
+
+    if not _docker_available():
+        print(f" {C.YELLOW}⚠{C.END} Docker not available — skipping postgres_checklist auto-start")
+        return False
+
+    # Check if already running and healthy
+    try:
+        out = subprocess.check_output(
+            ["docker", "inspect", "--format", "{{.State.Health.Status}}", "postgres_checklist"],
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+        if out == "healthy":
+            print(f" {C.GREEN}✓{C.END} postgres_checklist already running")
+            return True
+        if out in ("starting", "unhealthy", "none"):
+            pass  # fall through to start/wait
+    except subprocess.CalledProcessError:
+        pass  # container doesn't exist yet
+
+    # Start (or restart) via docker-compose
+    print(f" {C.CYAN}→{C.END} Starting postgres_checklist container...")
+    try:
+        subprocess.check_call(
+            ["docker", "compose", "up", "postgres_checklist", "-d", "--wait"],
+            cwd=ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+        )
+    except subprocess.CalledProcessError:
+        # Fallback: older docker-compose v1
+        try:
+            subprocess.check_call(
+                ["docker-compose", "up", "postgres_checklist", "-d"],
+                cwd=ROOT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.STDOUT,
+            )
+        except subprocess.CalledProcessError as e:
+            print(f" {C.RED}✗{C.END} Failed to start postgres_checklist: {e}")
+            return False
+
+    # Wait up to 30 s for pg_isready on port 5555
+    import socket
+    for attempt in range(30):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(1)
+            result = s.connect_ex(("127.0.0.1", 5555))
+            s.close()
+            if result == 0:
+                print(f" {C.GREEN}✓{C.END} postgres_checklist is ready on port 5555")
+                return True
+        except OSError:
+            pass
+        time.sleep(1)
+
+    print(f" {C.YELLOW}⚠{C.END} postgres_checklist did not become ready within 30s — proceeding anyway")
+    return False
+
+
+def cleanup_stale_sqlite() -> None:
+    """Remove legacy SQLite metadata DB when PostgreSQL is configured.
+
+    A leftover migration_platform.db causes confusion when METADATA_DB_URL points
+    at postgres_checklist but an old zero-config SQLite file still exists.
+    """
+    load_env()
+    url = os.environ.get("METADATA_DB_URL", "")
+    if "postgresql" not in url:
+        return
+    stale = ROOT / "migration_platform.db"
+    if stale.exists():
+        stale.unlink()
+        print(f" {C.YELLOW}✦{C.END} Removed stale {stale.name} (using PostgreSQL metadata store)")
+
+
+def run_metadata_migrations() -> bool:
+    """Bootstrap the metadata schema before the API starts."""
+    load_env()
+    url = os.environ.get("METADATA_DB_URL", "")
+    if "postgresql" not in url:
+        return True
+
+    print(f"\n {C.BOLD}Applying metadata database migrations...{C.END}")
+    try:
+        import asyncio
+
+        from infrastructure.metadata_db.session import init_db
+
+        asyncio.run(init_db())
+        print(f" {C.GREEN}✓{C.END} Metadata schema is ready")
+        return True
+    except Exception as e:
+        print(f" {C.RED}✗{C.END} Metadata database setup failed: {e}")
+        print(f"   Ensure postgres_checklist is running and METADATA_DB_URL is correct.")
+        print(f"   Fresh reset: docker compose down postgres_checklist && docker volume rm sqlserver_to_postgres_pg_checklist_data")
+        return False
+
+
+# ── Servers ───────────────────────────────────────────────────────────
+
+processes: list[subprocess.Popen] = []
+
+
+def start_go_engine() -> subprocess.Popen | None:
+    """Start the Go migration-engine worker."""
+    if not shutil.which("go"):
+        print(f" {C.YELLOW}⚠{C.END} Go toolchain not found — skipping migration-engine")
+        return None
+    if not ENGINE_DIR.is_dir():
+        print(f" {C.RED}✗{C.END} engine-go/ not found — skipping migration-engine")
+        return None
+
+    load_env()
+    _sync_go_engine_env()
+
+    print(f"\n {C.BOLD}Starting Go migration-engine...{C.END}")
+    env = os.environ.copy()
+    env["MIGRATION_DATABASE_METADATA_URL"] = _metadata_url_for_go()
+    env["MIGRATION_QUEUE_PATH"] = _queue_path_for_go()
+    if not env.get("MIGRATION_MASTER_KEY"):
+        print(f" {C.YELLOW}⚠{C.END} MIGRATION_MASTER_KEY not set — password decryption will fail")
+
+    try:
+        proc = subprocess.Popen(
+            ["go", "run", "./cmd/migration-engine"],
+            cwd=ENGINE_DIR,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            encoding="utf-8",
+            bufsize=1,
+            env=env,
+        )
+        processes.append(proc)
+
+        import threading
+
+        def stream_output():
+            if not proc or not proc.stdout:
+                return
+            for line in iter(proc.stdout.readline, ""):
+                if not line:
+                    break
+                l = line.rstrip()
+                low = l.lower()
+                if any(k in low for k in ("error", "fatal", "panic")):
+                    print(f"  [engine] {l}")
+
+        threading.Thread(target=stream_output, daemon=True).start()
+        time.sleep(1.5)
+        if proc.poll() is not None:
+            print(f" {C.RED}✗{C.END} migration-engine exited immediately (code {proc.returncode})")
+            return None
+        print(f" {C.GREEN}✓{C.END} Go migration-engine started")
+        print(f"   metadata: {env['MIGRATION_DATABASE_METADATA_URL']}")
+        print(f"   queue:    {env['MIGRATION_QUEUE_PATH']}")
+        return proc
+    except Exception as e:
+        print(f" {C.RED}✗{C.END} Failed to start migration-engine: {e}")
+        return None
+
+
+def start_api() -> subprocess.Popen | None:
+    """Start the FastAPI server and stream its output to console."""
+    print(f"\n {C.BOLD}Starting API server...{C.END}")
+    try:
+        proc = subprocess.Popen(
+            [PYTHON, "-m", "uvicorn", "apps.api.main:app",
+             "--host", "0.0.0.0", "--port", "8508", "--reload",
+             "--log-level", "warning"],
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            encoding='utf-8',
+            bufsize=1,
+        )
+        processes.append(proc)
+
+        import threading
+
+        def stream_output():
+            if not proc or not proc.stdout:
+                return
+            for line in iter(proc.stdout.readline, ""):
+                if not line:
+                    break
+                l = line.rstrip()
+                low = l.lower()
+                if any(k in low for k in ("error", "warning", "warn", "critical", "exception", "traceback", "failed")):
+                    print(f"  {l}")
+
+        t = threading.Thread(target=stream_output, daemon=True)
+        t.start()
+
+        # Wait for startup via health endpoint
+        import urllib.request
+        for _ in range(60):
+            if proc.poll() is not None:
+                break
+            try:
+                resp = urllib.request.urlopen("http://localhost:8508/health", timeout=1)
+                if resp.status == 200:
+                    print(f" {C.GREEN}✓{C.END} API running at {C.BOLD}http://localhost:8508{C.END}")
+                    return proc
+            except Exception:
+                pass
+            time.sleep(0.5)
+        print(f" {C.YELLOW}⚠{C.END} API started (may still be loading)")
+        return proc
+    except Exception as e:
+        print(f" {C.RED}✗{C.END} Failed to start API: {e}")
+        return None
+
+
+def start_ui() -> subprocess.Popen | None:
+    """Start the Next.js dev server and stream its output to console."""
+    if not NPM:
+        return None
+    print(f"\n {C.BOLD}Starting UI dev server...{C.END}")
+    try:
+        proc = subprocess.Popen(
+            [NPM, "run", "dev"],
+            cwd=UI_DIR,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            encoding='utf-8',
+            bufsize=1,
+        )
+        processes.append(proc)
+
+        import threading
+
+        def stream_output():
+            if not proc or not proc.stdout:
+                return
+            for line in iter(proc.stdout.readline, ""):
+                if not line:
+                    break
+                l = line.rstrip()
+                low = l.lower()
+                if any(k in low for k in ("error", "warning", "warn", "critical", "exception", "traceback", "failed")):
+                    print(f"  {l}")
+
+        t = threading.Thread(target=stream_output, daemon=True)
+        t.start()
+
+        # Wait for it to bind
+        for _ in range(30):
+            if proc.poll() is not None:
+                break
+            try:
+                import socket
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                result = s.connect_ex(("127.0.0.1", 3508))
+                s.close()
+                if result == 0:
+                    print(f" {C.GREEN}✓{C.END} UI running at {C.BOLD}http://localhost:3508{C.END}")
+                    return proc
+            except Exception:
+                pass
+            time.sleep(0.5)
+        if proc.poll() is None:
+            print(f" {C.GREEN}✓{C.END} UI running at {C.BOLD}http://localhost:3508{C.END}")
+        return proc
+    except Exception as e:
+        print(f" {C.RED}✗{C.END} Failed to start UI: {e}")
+        return None
+
+
+def _kill_proc_tree(proc: subprocess.Popen) -> None:
+    """Kill a process and all its children (cross-platform)."""
+    if IS_WINDOWS:
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    else:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def shutdown(signum=None, frame=None):
+    print(f"\n\n {C.YELLOW}Shutting down...{C.END}")
+    for proc in processes:
+        if proc and proc.poll() is None:
+            _kill_proc_tree(proc)
+    print(f" {C.GREEN}✓{C.END} All services stopped")
+    sys.exit(0)
+
+
+# ── Tests ─────────────────────────────────────────────────────────────
+
+def run_tests():
+    print(f"\n {C.BOLD}Running tests...{C.END}")
+    result = subprocess.run(
+        [PYTHON, "-m", "pytest", "tests/", "-q", "--tb=short"],
+        cwd=ROOT,
+    )
+    if result.returncode == 0:
+        print(f"\n {C.GREEN}✓{C.END} All tests passed")
+    else:
+        print(f"\n {C.RED}✗{C.END} Some tests failed (exit code {result.returncode})")
+    return result.returncode
+
+
+# ── Main ──────────────────────────────────────────────────────────────
+
+def setup():
+    print(f"\n {C.BOLD}{'='*50}{C.END}")
+    print(f" {C.BOLD}  Prerequisites Check{C.END}")
+    print(f" {C.BOLD}{'='*50}{C.END}")
+    ok = check_python()
+    has_node = check_node()
+    has_go = check_go()
+    if not ok:
+        sys.exit(1)
+
+    ensure_env()
+    load_env()
+
+    print(f"\n {C.BOLD}{'='*50}{C.END}")
+    print(f" {C.BOLD}  Installing Dependencies{C.END}")
+    print(f" {C.BOLD}{'='*50}{C.END}")
+    install_python_deps()
+    ui_ok = install_ui_deps()
+    if has_go:
+        warm_go_modules()
+
+    return has_node and ui_ok
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Migration Platform — one-command launcher",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python start.py              Interactive menu
+  python start.py --all        Start API + UI + Go engine (recommended)
+  python start.py --engine     Start Go migration-engine only
+  python start.py --api          Start API only
+  python start.py --ui           Start UI only
+  python start.py --setup        Install dependencies only
+  python start.py --test         Run the test suite
+  python start.py 1              Start all (no prompt)
+        """,
+    )
+    parser.add_argument("--all", action="store_true", help="Start API + UI + Go engine")
+    parser.add_argument("--api", action="store_true", help="Start API server only")
+    parser.add_argument("--ui", action="store_true", help="Start UI dev server only")
+    parser.add_argument("--engine", action="store_true", help="Start Go migration-engine only")
+    parser.add_argument("--setup", action="store_true", help="Install dependencies only")
+    parser.add_argument("--test", action="store_true", help="Run tests")
+    parser.add_argument("--no-ui", action="store_true", help="Skip UI setup/start")
+    parser.add_argument("option", nargs="?", type=int, choices=[1, 2, 3, 4, 5],
+                        help="Menu option: 1=all, 2=API, 3=UI, 4=tests, 5=exit")
+
+    args = parser.parse_args()
+    print_banner()
+
+    # ── Setup-only ──
+    if args.setup:
+        setup()
+        print(f"\n {C.GREEN}✓{C.END} Setup complete. Run {C.BOLD}python start.py{C.END} to start.")
+        return
+
+    # ── Tests ──
+    if args.test:
+        setup()
+        sys.exit(run_tests())
+
+    # ── Interactive menu ──
+    ui_ok = setup()
+
+    if not args.api and not args.ui and not args.all and not args.engine:
+        if args.option is not None:
+            choice = str(args.option)
+        else:
+            print(f"\n {C.BOLD}{'='*50}{C.END}")
+            print(f" {C.BOLD}  What would you like to do?{C.END}")
+            print(f" {C.BOLD}{'='*50}{C.END}")
+            print(f"  {C.CYAN}1{C.END})  Start everything (API + UI + Go engine)")
+            print(f"  {C.CYAN}2{C.END})  Start API server only")
+            if ui_ok:
+                print(f"  {C.CYAN}3{C.END})  Start UI dev server only")
+            print(f"  {C.CYAN}4{C.END})  Run tests")
+            print(f"  {C.CYAN}5{C.END})  Exit")
+            print()
+            try:
+                choice = input(f"  {C.BOLD}Choice [1]{C.END}: ").strip() or "1"
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return
+
+        if choice == "2":
+            args.api = True
+        elif choice == "3" and ui_ok:
+            args.ui = True
+        elif choice == "4":
+            sys.exit(run_tests())
+        elif choice == "5":
+            return
+        else:
+            args.all = True
+
+    # ── Start services ──
+    load_env()
+    import signal
+    signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
+
+    started = False
+
+    if args.all or args.api or args.engine:
+        ensure_postgres_checklist()
+
+    if args.all or args.api:
+        cleanup_stale_sqlite()
+        if not run_metadata_migrations():
+            sys.exit(1)
+        api_proc = start_api()
+        if api_proc:
+            started = True
+
+    if args.engine or args.all:
+        engine_proc = start_go_engine()
+        if engine_proc:
+            started = True
+        elif args.engine:
+            print(f"\n {C.RED}Go engine failed to start.{C.END}")
+            return
+
+    if args.all or args.ui:
+        ui_proc = start_ui()
+        if ui_proc:
+            started = True
+
+    if not started:
+        print(f"\n {C.YELLOW}No services started.{C.END}")
+        return
+
+    # Detect local network IP for sharing across the network
+    local_ip = "localhost"
+    try:
+        import socket as _sock
+        with _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM) as _s:
+            _s.connect(("8.8.8.8", 80))
+            local_ip = _s.getsockname()[0]
+    except Exception:
+        pass
+
+    print(f"\n {C.BOLD}{'='*55}{C.END}")
+    print(f" {C.GREEN}  SQL Optima Migration is running!{C.END}")
+    print(f" {C.BOLD}{'='*55}{C.END}")
+    if args.api or args.all:
+        print(f"   API  (local):   {C.CYAN}http://localhost:8508{C.END}")
+        print(f"   API  (network): {C.CYAN}http://{local_ip}:8508{C.END}")
+        print(f"   Docs:           {C.CYAN}http://localhost:8508/docs{C.END}")
+    if args.engine or args.all:
+        print(f"   Engine:         {C.GREEN}Go migration-engine running{C.END}")
+    if (args.ui or args.all) and ui_ok:
+        print(f"   UI   (local):   {C.CYAN}http://localhost:3508{C.END}")
+        print(f"   UI   (network): {C.CYAN}http://{local_ip}:3508{C.END}")
+    print(f"\n   Press {C.BOLD}Ctrl+C{C.END} to stop all services")
+
+    # Open the dashboard in the default browser once the UI is ready
+    if (args.ui or args.all) and ui_ok:
+        import webbrowser
+        dashboard_url = "http://localhost:3508"
+        print(f"\n {C.CYAN}→{C.END} Opening dashboard in your browser...")
+        webbrowser.open(dashboard_url)
+
+    try:
+        while True:
+            time.sleep(1)
+            # Check if any process died
+            for i, proc in enumerate(processes):
+                if proc and proc.poll() is not None:
+                    print(f" {C.YELLOW}⚠{C.END} A process exited unexpectedly (code {proc.returncode})")
+                    shutdown()
+    except KeyboardInterrupt:
+        shutdown()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,30 @@
+name: UI Accessibility
+
+on:
+  pull_request:
+    paths:
+      - "apps/ui/**"
+      - ".github/workflows/ui-a11y.yml"
+  workflow_dispatch:
+
+jobs:
+  vitest-axe:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/ui
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/ui/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run axe accessibility tests
+        run: npm run test -- src/components/ui/__tests__/login-form-a11y.test.tsx

@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sql-optima.fullname" . }}-ui
+  labels:
+    {{- include "sql-optima.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ui
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "sql-optima.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: ui
+  template:
+    metadata:
+      labels:
+        {{- include "sql-optima.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: ui
+    spec:
+      containers:
+        - name: ui
+          image: "{{ .Values.image.ui.repository }}:{{ .Values.image.ui.tag }}"
+          imagePullPolicy: {{ .Values.image.ui.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.ui.port }}
+          env:
+            - name: NEXT_PUBLIC_API_URL
+              value: "http://{{ include "sql-optima.fullname" . }}-api:{{ .Values.service.api.port }}"
+          resources:
+            {{- toYaml .Values.resources.ui | nindent 12 }}

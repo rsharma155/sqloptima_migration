@@ -1,0 +1,25 @@
+# Go migration-engine data plane
+# Author: Ravi Sharma
+# Copyright (c) 2026 Ravi Sharma
+# SPDX-License-Identifier: MIT
+
+FROM golang:1.23-alpine AS build
+
+WORKDIR /src
+COPY engine-go/go.mod engine-go/go.sum ./
+RUN go mod download
+
+COPY engine-go/ ./
+RUN CGO_ENABLED=0 go build -o /migration-engine ./cmd/migration-engine
+
+FROM alpine:3.20
+
+RUN apk add --no-cache ca-certificates
+
+WORKDIR /app
+COPY --from=build /migration-engine .
+COPY engine-go/config/default.toml ./config/default.toml
+
+ENV MIGRATION_QUEUE_PATH=/tmp/migration_queue.bbolt
+
+CMD ["./migration-engine"]

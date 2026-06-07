@@ -1,0 +1,35 @@
+name: UI E2E (Playwright)
+
+on:
+  pull_request:
+    paths:
+      - "apps/ui/**"
+      - ".github/workflows/ui-e2e.yml"
+  workflow_dispatch:
+
+jobs:
+  playwright:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/ui
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/ui/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+
+      - name: Run Playwright smoke tests
+        run: npm run test:e2e
+        env:
+          CI: "1"

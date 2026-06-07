@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sql-optima.fullname" . }}-api
+  labels:
+    {{- include "sql-optima.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "sql-optima.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        {{- include "sql-optima.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+    spec:
+      containers:
+        - name: api
+          image: "{{ .Values.image.api.repository }}:{{ .Values.image.api.tag }}"
+          imagePullPolicy: {{ .Values.image.api.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.api.port }}
+          env:
+            - name: MIGRATION_EDITION
+              value: {{ .Values.env.MIGRATION_EDITION | quote }}
+            - name: MIGRATION_DEPLOYMENT
+              value: {{ .Values.env.MIGRATION_DEPLOYMENT | quote }}
+            - name: MIGRATION_ENV
+              value: {{ .Values.env.MIGRATION_ENV | quote }}
+            - name: METADATA_DB_URL
+              value: {{ .Values.env.METADATA_DB_URL | quote }}
+            - name: MIGRATION_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "sql-optima.fullname" . }}-secrets
+                  key: jwt-secret
+                  optional: true
+            - name: MIGRATION_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "sql-optima.fullname" . }}-secrets
+                  key: master-key
+                  optional: true
+            - name: MIGRATION_LICENSE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "sql-optima.fullname" . }}-secrets
+                  key: license-key
+                  optional: true
+          resources:
+            {{- toYaml .Values.resources.api | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.service.api.port }}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.service.api.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10

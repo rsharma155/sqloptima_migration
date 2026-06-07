@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "sql-optima.fullname" . }}-api
+  labels:
+    {{- include "sql-optima.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  type: {{ .Values.service.api.type }}
+  ports:
+    - port: {{ .Values.service.api.port }}
+      targetPort: {{ .Values.service.api.port }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "sql-optima.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "sql-optima.fullname" . }}-ui
+  labels:
+    {{- include "sql-optima.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ui
+spec:
+  type: {{ .Values.service.ui.type }}
+  ports:
+    - port: {{ .Values.service.ui.port }}
+      targetPort: {{ .Values.service.ui.port }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "sql-optima.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: ui

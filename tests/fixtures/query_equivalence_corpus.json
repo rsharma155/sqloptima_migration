@@ -1,0 +1,24 @@
+{
+  "cases": [
+    {
+      "name": "datediff_seconds",
+      "source_sql": "SELECT DATEDIFF(SECOND, '2026-01-01', '2026-01-01 00:02:00') AS secs",
+      "notes": "§3.3 EPOCH conversion"
+    },
+    {
+      "name": "charindex_pos",
+      "source_sql": "SELECT CHARINDEX('world', 'hello world') AS pos",
+      "notes": "§3.1 STRPOS arg order"
+    },
+    {
+      "name": "isnull_coalesce",
+      "source_sql": "SELECT ISNULL(NULL, 42) AS val",
+      "notes": "NULL handling"
+    },
+    {
+      "name": "string_concat",
+      "source_sql": "SELECT 'Hello' + ', ' + 'World' AS greeting",
+      "notes": "T-SQL + concat"
+    }
+  ]
+}
