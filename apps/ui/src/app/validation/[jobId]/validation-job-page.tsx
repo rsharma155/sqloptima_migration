@@ -185,12 +185,13 @@ function RunCard({
             )}
             {report && report.results.length > 0 && (
               <div className="max-h-56 overflow-y-auto">
-                {run.level === 2 && report.results[0]?.details?.aggregate_functions && (
+                {run.level === 2 &&
+                  Array.isArray(report.results[0]?.details?.aggregate_functions) && (
                   <p className="px-2 py-1.5 text-[10px] text-muted-foreground border-b bg-muted/10">
                     Checks per column:{" "}
-                    {(report.results[0].details.aggregate_functions as string[]).join(", ")}
-                    {report.results[0].details.columns_checked && (
-                      <> · columns: {(report.results[0].details.columns_checked as string[]).join(", ")}</>
+                    {(report.results[0].details!.aggregate_functions as string[]).join(", ")}
+                    {Array.isArray(report.results[0].details?.columns_checked) && (
+                      <> · columns: {(report.results[0].details!.columns_checked as string[]).join(", ")}</>
                     )}
                   </p>
                 )}

@@ -14,7 +14,7 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+/lib/
 lib64/
 parts/
 sdist/
@@ -88,7 +88,8 @@ Thumbs.db
 *.bak
 *~
 
-# ── Node.js / Next.js ─────────────────────────────────────────────────────────
+*.tsbuildinfo
+
 node_modules/
 npm-debug.log*
 yarn-debug.log*
