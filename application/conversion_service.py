@@ -150,7 +150,6 @@ class ConversionService:
             not result.success
             or not result.postgres_syntax_valid
             or bool(result.errors)
-            or result.body_transform_fallback
             or (result.repair_exhausted and not result.postgres_syntax_valid)
         )
         return result

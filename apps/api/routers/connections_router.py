@@ -104,7 +104,35 @@ class CreateDatabaseResponse(BaseModel):
     database: str
 
 
+class PrivilegeScriptResponse(BaseModel):
+    engine: str
+    title: str
+    recommended_login: str | None = None
+    recommended_role: str | None = None
+    default_schema: str | None = None
+    privileges: list[str]
+    capabilities: list[str]
+    not_granted: list[str]
+    file: str
+    purpose: str
+    variables: dict[str, str]
+    run_example: str
+    content: str
+
+
+class PrivilegeScriptBundleResponse(BaseModel):
+    source: PrivilegeScriptResponse
+    target: PrivilegeScriptResponse
+
+
 # ---- Endpoints ----
+
+@router.get("/connections/privilege-scripts", response_model=PrivilegeScriptBundleResponse)
+async def get_connection_privilege_scripts(_: dict = require_role(UserRole.VIEWER)):
+    """Return least-privilege bootstrap SQL for source (SQL Server) and target (PostgreSQL)."""
+    from infrastructure.sql_scripts.script_catalog import get_privilege_script_bundle
+
+    return get_privilege_script_bundle()
 
 @router.get("/connections", response_model=list[ConnectionResponse])
 async def list_connections(
@@ -225,10 +253,18 @@ async def test_raw_connection(req: TestRawConnectionRequest, _: dict = require_r
                 trust_server_certificate=req.trust_server_certificate,
             ))
         else:
-            from infrastructure.postgres.postgres_connector import PostgresConnectionConfig, PostgresConnector
-            connector = PostgresConnector(PostgresConnectionConfig(
-                host=req.host, port=req.port, database=req.database,
-                username=req.username, password=req.password,
+            from infrastructure.postgres.postgres_connector import (
+                PostgresConnector,
+                postgres_config_from_entry,
+            )
+            connector = PostgresConnector(postgres_config_from_entry(
+                {
+                    "host": req.host,
+                    "port": req.port,
+                    "database": req.database,
+                    "username": req.username,
+                },
+                password=req.password,
             ))
         await connector.connect()
         await connector.disconnect()

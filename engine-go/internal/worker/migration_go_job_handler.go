@@ -122,6 +122,7 @@ func (h *MigrationGoJobHandler) Run(ctx context.Context, job *QueuedJob) error {
 
 	var totalRows int64
 	tablesDone := 0
+	tablesFailed := 0
 	for _, table := range cfg.Tables {
 		if err := commandCtrl.CheckBeforeChunk(runCtx); err != nil {
 			if errors.Is(err, ErrJobStopped) {
@@ -135,19 +136,50 @@ func (h *MigrationGoJobHandler) Run(ctx context.Context, job *QueuedJob) error {
 			fmt.Sprintf("Migrating %s.%s → %s.%s",
 				table.SourceSchema, table.TableName, table.TargetSchema, table.TableName))
 
-		result, err := tableMover.Move(runCtx, jobID, srcCfg, pgURL, table)
+		if table.SkipDataLoad {
+			_ = h.meta.AppendMigrationJobLog(runCtx, jobID, "info",
+				fmt.Sprintf("Skipping data load for %s.%s — target table already populated (use_existing)",
+					table.TargetSchema, table.TableName))
+			_ = h.meta.UpdateTablePlanProgress(runCtx, jobID, table.TableName, "completed", 0)
+			tablesDone++
+			continue
+		}
+
+		result, err := tableMover.Move(runCtx, jobID, srcCfg, pgURL, table, JobProgressBase{
+			RowsMigrated: totalRows,
+			TablesDone:   tablesDone,
+		}, cfg.SourceThrottle)
 		if err != nil {
 			if errors.Is(err, ErrJobStopped) {
 				return nil
 			}
-			h.failJob(runCtx, jobID, err.Error())
-			return err
+			tablesFailed++
+			continue
 		}
 		totalRows += result.RowsMigrated
 		tablesDone++
 	}
 
 	_ = h.meta.UpdateMigrationJobTotals(runCtx, jobID, totalRows, tablesDone)
+	totalTables := len(cfg.Tables)
+	if tablesFailed == totalTables {
+		msg := fmt.Sprintf("Migration failed — all %d table(s) failed", totalTables)
+		h.failJob(runCtx, jobID, msg)
+		return fmt.Errorf("%s", msg)
+	}
+	if tablesFailed > 0 {
+		msg := fmt.Sprintf(
+			"Migration completed with %d table failure(s) — %d/%d table(s) migrated successfully, %d total row(s)",
+			tablesFailed, tablesDone, totalTables, totalRows,
+		)
+		if cfg.SnapshotRef != nil && *cfg.SnapshotRef != "" {
+			msg += fmt.Sprintf(" (snapshot_ref=%s)", *cfg.SnapshotRef)
+		}
+		_ = h.meta.SetMigrationJobError(runCtx, jobID, msg)
+		_ = h.meta.AppendMigrationJobLog(runCtx, jobID, "warning", msg)
+		_ = h.meta.SetMigrationJobStatus(runCtx, jobID, "partial")
+		return nil
+	}
 	completeMsg := fmt.Sprintf("Migration completed successfully — %d total row(s) across %d table(s)",
 		totalRows, tablesDone)
 	if cfg.SnapshotRef != nil && *cfg.SnapshotRef != "" {

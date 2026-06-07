@@ -20,6 +20,7 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -464,6 +465,35 @@ class MigrationWaveRecord(Base):
     __table_args__ = (
         Index("ix_migration_waves_program_number", "migration_program_id", "wave_number"),
     )
+
+
+class PlatformMigrationSettingsRecord(Base):
+    __tablename__ = "platform_migration_settings"
+
+    settings_id = Column(String(36), primary_key=True, default="platform-default")
+    source_throttle_enabled = Column(Boolean, nullable=False, default=True)
+    small_table_delay_sec = Column(Float, nullable=False, default=1.0)
+    large_table_delay_sec = Column(Float, nullable=False, default=4.0)
+    large_table_row_threshold = Column(Integer, nullable=False, default=100_000)
+    large_table_size_mb_threshold = Column(Float, nullable=False, default=50.0)
+    max_tables_per_job = Column(Integer, nullable=False, default=25)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now)
+
+
+class PlatformNotificationSettingsRecord(Base):
+    __tablename__ = "platform_notification_settings"
+
+    settings_id = Column(String(36), primary_key=True, default="platform-default")
+    webhook_enabled = Column(Boolean, nullable=False, default=False)
+    webhook_url_encrypted = Column(Text, nullable=False, default="")
+    email_enabled = Column(Boolean, nullable=False, default=False)
+    smtp_host = Column(String(255), nullable=False, default="")
+    smtp_port = Column(Integer, nullable=False, default=587)
+    smtp_user = Column(String(255), nullable=False, default="")
+    smtp_password_encrypted = Column(Text, nullable=False, default="")
+    alert_email_to = Column(String(255), nullable=False, default="")
+    alert_email_from = Column(String(255), nullable=False, default="")
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now)
 
 
 class ReplicationStreamRecord(Base):

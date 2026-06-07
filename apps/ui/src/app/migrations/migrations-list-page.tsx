@@ -28,6 +28,7 @@ import {
   Table2,
   RefreshCw,
   ClipboardCheck,
+  Sparkles,
 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -50,6 +51,7 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
+import Link from "next/link";
 import { toast } from "sonner";
 import { useConnections, type Connection } from "@/lib/ConnectionContext";
 import { fetchAndSyncConnections, loadConnections } from "@/lib/connection-store";
@@ -57,14 +59,24 @@ import {
   assessDatabase,
   discoverSchema,
   listSchemas,
+  preflightMigration,
   startMigration,
   testConnection,
   getMigrations,
+  getMigrationSettings,
+  previewProceduralMigration,
   type TableAssessment,
   type DatabaseAssessment,
+  type MigrationPreflightResponse,
+  type TargetTablePolicy,
+  type ProceduralPreviewItem,
 } from "@/lib/api";
+import { TargetTableConflictDialog } from "@/components/migrations/target-table-conflict-dialog";
+import { ProceduralMigrationPanel } from "@/components/migrations/procedural-migration-panel";
 import {
   canStartMigrationFromAssessment,
+  summarizeProceduralPreview,
+  proceduralPreviewGate,
   summarizeSelectedTables,
   type MigrationWizardStep,
 } from "@/lib/migration-readiness";
@@ -80,6 +92,7 @@ import {
   MIGRATION_ENV_UPDATED_EVENT,
   type MigrationEnvironment,
 } from "@/lib/migration-snapshot";
+import { resolveTargetSchema } from "@/lib/schema-mapping";
 
 interface DiscoveredObject {
   name: string;
@@ -114,11 +127,12 @@ function formatJobTimestamp(iso: string): string {
 // ---------------------------------------------------------------------------
 
 const ACTIVE_STATUSES = ["running", "in_progress", "paused", "starting", "pending"];
-const HISTORY_STATUSES = ["completed", "failed", "stopped"];
+const HISTORY_STATUSES = ["completed", "partial", "failed", "stopped"];
 
 function statusIcon(status: string) {
   switch (status.toLowerCase()) {
     case "completed": return <CheckCircle2 className="h-4 w-4 text-emerald-500" />;
+    case "partial":   return <AlertTriangle className="h-4 w-4 text-amber-500" />;
     case "failed":    return <XCircle className="h-4 w-4 text-destructive" />;
     case "running":
     case "in_progress": return <Loader2 className="h-4 w-4 text-blue-500 animate-spin" />;
@@ -129,6 +143,7 @@ function statusIcon(status: string) {
 function statusBadgeClass(status: string): string {
   switch (status.toLowerCase()) {
     case "completed":   return "bg-emerald-500/10 text-emerald-500 border-emerald-500/20";
+    case "partial":     return "bg-amber-500/10 text-amber-500 border-amber-500/20";
     case "failed":      return "bg-destructive/10 text-destructive border-destructive/20";
     case "running":
     case "in_progress": return "bg-blue-500/10 text-blue-500 border-blue-500/20";
@@ -142,29 +157,40 @@ function statusBadgeClass(status: string): string {
 // ---------------------------------------------------------------------------
 
 function JobRow({ job }: { job: MigrationJob }) {
+  const completed = job.status.toLowerCase() === "completed";
   return (
-    <a
-      href={`/migrations/${job.job_id}`}
-      className="flex items-center gap-3 px-4 py-3 hover:bg-muted/50 cursor-pointer @container"
-    >
-      <div className="flex h-8 w-8 items-center justify-center rounded-md bg-primary/5 shrink-0">
-        {statusIcon(job.status)}
-      </div>
-      <div className="flex-1 min-w-0">
-        <p className="text-xs font-mono truncate">{job.job_id}</p>
-        <p className="text-xs text-muted-foreground">
-          {job.table_count} table{job.table_count !== 1 ? "s" : ""}
-          {" · "}
-          <span title={job.created_at}>{formatJobTimestamp(job.created_at)}</span>
-        </p>
-      </div>
-      <Badge
-        variant="outline"
-        className={`text-[10px] shrink-0 ${statusBadgeClass(job.status)}`}
+    <div className="flex items-center gap-2 px-4 py-3 hover:bg-muted/50 @container">
+      <Link
+        href={`/migrations/${job.job_id}`}
+        className="flex flex-1 items-center gap-3 min-w-0"
       >
-        {job.status}
-      </Badge>
-    </a>
+        <div className="flex h-8 w-8 items-center justify-center rounded-md bg-primary/5 shrink-0">
+          {statusIcon(job.status)}
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-xs font-mono truncate">{job.job_id}</p>
+          <p className="text-xs text-muted-foreground">
+            {job.table_count} table{job.table_count !== 1 ? "s" : ""}
+            {" · "}
+            <span title={job.created_at}>{formatJobTimestamp(job.created_at)}</span>
+          </p>
+        </div>
+        <Badge
+          variant="outline"
+          className={`text-[10px] shrink-0 ${statusBadgeClass(job.status)}`}
+        >
+          {job.status}
+        </Badge>
+      </Link>
+      {completed && (
+        <Button size="sm" variant="outline" className="shrink-0 text-xs h-8" asChild>
+          <Link href={`/migrations/${job.job_id}/post-migration`}>
+            <Sparkles className="h-3.5 w-3.5 mr-1" />
+            Finalize
+          </Link>
+        </Button>
+      )}
+    </div>
   );
 }
 
@@ -344,10 +370,29 @@ export default function MigrationsPage() {
   const [sourceConnError, setSourceConnError] = useState<string | null>(null);
   const [targetConnError, setTargetConnError] = useState<string | null>(null);
   const [schemasLoading, setSchemasLoading] = useState(false);
+  const [preflight, setPreflight] = useState<MigrationPreflightResponse | null>(null);
+  const [showConflictDialog, setShowConflictDialog] = useState(false);
+  const [tablePolicies, setTablePolicies] = useState<Record<string, TargetTablePolicy>>({});
+  const [preflighting, setPreflighting] = useState(false);
+  const [columnTypeOverrides, setColumnTypeOverrides] = useState<Record<string, string>>({});
+  const [discoveredProceduralObjects, setDiscoveredProceduralObjects] = useState<DiscoveredObject[]>([]);
+  const [selectedProcedures, setSelectedProcedures] = useState<Set<string>>(new Set());
+  const [selectedFunctions, setSelectedFunctions] = useState<Set<string>>(new Set());
+  const [proceduralPreviewItems, setProceduralPreviewItems] = useState<ProceduralPreviewItem[]>([]);
+  const [proceduralPreviewLoading, setProceduralPreviewLoading] = useState(false);
+  const [proceduralPreviewError, setProceduralPreviewError] = useState<string | null>(null);
+  const wizardScrollRef = useRef<HTMLDivElement>(null);
 
   const { sourceConnections, targetConnections, refreshConnections } = useConnections();
   const [migrationEnv, setMigrationEnv] = useState<MigrationEnvironment>("development");
   const snapshotWarning = getMigrationSnapshotWarning(migrationEnv);
+
+  const { data: migrationSettings } = useQuery({
+    queryKey: ["migration-settings"],
+    queryFn: getMigrationSettings,
+    staleTime: 60_000,
+  });
+  const maxTablesPerJob = migrationSettings?.max_tables_per_job ?? 25;
 
   useEffect(() => {
     setMigrationEnv(loadMigrationEnvironment());
@@ -470,13 +515,26 @@ export default function MigrationsPage() {
       setTargetConnError(null);
       setSourceHealth({ status: "unknown", message: "" });
       setTargetHealth({ status: "unknown", message: "" });
+      setColumnTypeOverrides({});
+      setDiscoveredProceduralObjects([]);
+      setSelectedProcedures(new Set());
+      setSelectedFunctions(new Set());
+      setProceduralPreviewItems([]);
+      setProceduralPreviewError(null);
+      setProceduralPreviewLoading(false);
     }
   }, [showNewDialog]);
 
-  // Default target schema to same name as source schema
+  // Review step shows readiness/blockers at the top — scroll up when entering it.
   useEffect(() => {
-    if (schema && schema !== "dbo") setTargetSchema(schema);
-    else setTargetSchema("public");
+    if (showNewDialog && wizardStep === "review") {
+      wizardScrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  }, [showNewDialog, wizardStep]);
+
+  // Default target schema: dbo → public, other schemas keep the same name
+  useEffect(() => {
+    setTargetSchema(resolveTargetSchema(schema || "dbo"));
   }, [schema]);
 
   const handleDiscover = useCallback(async () => {
@@ -490,17 +548,32 @@ export default function MigrationsPage() {
     setDiscoverError(null);
     setDiscoveredTables([]);
     setSelectedTables(new Set());
+    setDiscoveredProceduralObjects([]);
+    setSelectedProcedures(new Set());
+    setSelectedFunctions(new Set());
     setTableAssessments({});
     setDatabaseAssessment(null);
     setWizardStep("setup");
     try {
       const result = await discoverSchema(sourceConn.id, schema || "dbo");
-      const tables = (result.items as DiscoveredObject[]).filter(
-        (o) => o.type.toLowerCase() === "table",
-      );
+      const allItems = result.items as DiscoveredObject[];
+      const tables = allItems.filter((o) => o.type.toLowerCase() === "table");
+      const procedural = allItems.filter((o) => {
+        const t = o.type.toLowerCase();
+        return t === "procedure" || t === "function" || t.includes("function");
+      });
       setDiscoveredTables(tables);
-      if (tables.length === 0) {
-        setDiscoverError(`No tables found in schema "${schema || "dbo"}". Try a different schema name.`);
+      setDiscoveredProceduralObjects(procedural);
+      setSelectedProcedures(new Set());
+      setSelectedFunctions(new Set());
+      if (tables.length === 0 && procedural.length === 0) {
+        setDiscoverError(
+          `No tables, procedures, or functions found in schema "${schema || "dbo"}". Try a different schema name.`,
+        );
+      } else if (tables.length === 0) {
+        toast.success(
+          `Discovered ${procedural.length} routine(s) — select procedures/functions to migrate`,
+        );
       } else {
         toast.success(`Discovered ${tables.length} tables — running migration assessment…`);
         setAssessing(true);
@@ -543,26 +616,171 @@ export default function MigrationsPage() {
   const toggleTable = (name: string) => {
     setSelectedTables((prev) => {
       const next = new Set(prev);
-      next.has(name) ? next.delete(name) : next.add(name);
+      if (next.has(name)) {
+        next.delete(name);
+        return next;
+      }
+      if (next.size >= maxTablesPerJob) {
+        toast.error(
+          `You can select at most ${maxTablesPerJob} tables per job. Increase the limit in Settings → Migration.`,
+        );
+        return prev;
+      }
+      next.add(name);
       return next;
     });
   };
 
+  const handleSelectAllTables = () => {
+    const names = discoveredTables.map((t) => t.name);
+    if (names.length <= maxTablesPerJob) {
+      setSelectedTables(new Set(names));
+      return;
+    }
+    setSelectedTables(new Set(names.slice(0, maxTablesPerJob)));
+    toast.message(
+      `Selected first ${maxTablesPerJob} tables (platform limit). Adjust in Settings → Migration.`,
+    );
+  };
+
   const assessmentComplete = Object.keys(tableAssessments).length > 0;
+  const selectedRoutineCount = selectedProcedures.size + selectedFunctions.size;
+  const hasMigrationSelection = selectedTables.size > 0 || selectedRoutineCount > 0;
+  const discoveryComplete =
+    discoveredTables.length > 0 || discoveredProceduralObjects.length > 0;
+
+  const proceduralPreviewSummary = useMemo(
+    () =>
+      proceduralPreviewItems.length > 0
+        ? summarizeProceduralPreview(proceduralPreviewItems)
+        : null,
+    [proceduralPreviewItems],
+  );
+
+  const fetchProceduralPreview = useCallback(async () => {
+    if (!sourceConn || selectedRoutineCount === 0) {
+      setProceduralPreviewItems([]);
+      setProceduralPreviewError(null);
+      return;
+    }
+    setProceduralPreviewLoading(true);
+    setProceduralPreviewError(null);
+    try {
+      const resolvedTargetSchema = resolveTargetSchema(schema || "dbo", targetSchema);
+      const previewObjects = [
+        ...Array.from(selectedProcedures).map((name) => ({
+          name,
+          object_type: "procedure" as const,
+        })),
+        ...Array.from(selectedFunctions).map((name) => ({
+          name,
+          object_type: "function" as const,
+        })),
+      ];
+      const result = await previewProceduralMigration({
+        source_connection_id: sourceConn.id,
+        schema: schema || "dbo",
+        target_schema: resolvedTargetSchema,
+        objects: previewObjects,
+      });
+      setProceduralPreviewItems(result.items);
+    } catch (err) {
+      setProceduralPreviewItems([]);
+      setProceduralPreviewError(err instanceof Error ? err.message : "Conversion preview failed");
+    } finally {
+      setProceduralPreviewLoading(false);
+    }
+  }, [
+    sourceConn,
+    schema,
+    targetSchema,
+    selectedRoutineCount,
+    selectedProcedures,
+    selectedFunctions,
+  ]);
+
+  useEffect(() => {
+    if (wizardStep !== "review" || selectedRoutineCount === 0) {
+      return;
+    }
+    void fetchProceduralPreview();
+  }, [wizardStep, selectedRoutineCount, fetchProceduralPreview]);
 
   const selectionSummary = useMemo(
-    () => summarizeSelectedTables(selectedTables, tableAssessments),
-    [selectedTables, tableAssessments],
+    () => summarizeSelectedTables(selectedTables, tableAssessments, columnTypeOverrides),
+    [selectedTables, tableAssessments, columnTypeOverrides],
   );
 
-  const migrationGate = useMemo(
-    () =>
-      canStartMigrationFromAssessment(selectionSummary, {
-        assessmentComplete,
-        selectedCount: selectedTables.size,
-      }),
-    [selectionSummary, assessmentComplete, selectedTables.size],
-  );
+  const migrationGate = useMemo(() => {
+    if (selectedTables.size > maxTablesPerJob) {
+      return {
+        allowed: false,
+        reason: `Select at most ${maxTablesPerJob} tables per job (Settings → Migration).`,
+      };
+    }
+    const tableGate = canStartMigrationFromAssessment(selectionSummary, {
+      assessmentComplete,
+      selectedTableCount: selectedTables.size,
+      selectedRoutineCount,
+      columnTypeOverrides,
+    });
+    if (!tableGate.allowed) {
+      return tableGate;
+    }
+    return proceduralPreviewGate({
+      selectedTableCount: selectedTables.size,
+      selectedRoutineCount,
+      loading: proceduralPreviewLoading,
+      error: proceduralPreviewError,
+      summary: proceduralPreviewSummary,
+    });
+  }, [
+    selectionSummary,
+    assessmentComplete,
+    selectedTables.size,
+    selectedRoutineCount,
+    columnTypeOverrides,
+    maxTablesPerJob,
+    proceduralPreviewLoading,
+    proceduralPreviewError,
+    proceduralPreviewSummary,
+  ]);
+
+  const runMigration = useCallback(async (policies: Record<string, TargetTablePolicy>) => {
+    if (!sourceConn || !targetConn) return;
+    setMigrating(true);
+    const resolvedTargetSchema = resolveTargetSchema(schema || "dbo", targetSchema);
+    try {
+      const result = await startMigration({
+        source_connection_id: sourceConn.id,
+        target_connection_id: targetConn.id,
+        tables: Array.from(selectedTables),
+        schema: schema || "dbo",
+        target_schema: resolvedTargetSchema,
+        strategy: "chunked",
+        chunk_size: 10000,
+        parallel_workers: 4,
+        validate_after: selectedTables.size > 0,
+        require_target_snapshot:
+          selectedTables.size > 0 && snapshotWarning.requireTargetSnapshot,
+        table_policies: policies,
+        column_type_overrides:
+          Object.keys(columnTypeOverrides).length > 0 ? columnTypeOverrides : undefined,
+        procedures: selectedProcedures.size > 0 ? Array.from(selectedProcedures) : undefined,
+        functions: selectedFunctions.size > 0 ? Array.from(selectedFunctions) : undefined,
+        migrate_procedural_after_tables: true,
+      });
+      toast.success(`Migration started: ${result.message}`);
+      setShowConflictDialog(false);
+      setShowNewDialog(false);
+      setPreflight(null);
+      qc.invalidateQueries({ queryKey: ["migrations"] });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Migration failed to start");
+    } finally {
+      setMigrating(false);
+    }
+  }, [sourceConn, targetConn, selectedTables, schema, targetSchema, snapshotWarning.requireTargetSnapshot, qc, columnTypeOverrides, selectedProcedures, selectedFunctions]);
 
   const handleStartMigration = useCallback(async () => {
     if (!sourceConn || !targetConn) { toast.error("Select both source and target connections"); return; }
@@ -570,29 +788,47 @@ export default function MigrationsPage() {
       toast.error(migrationGate.reason ?? "Migration cannot start");
       return;
     }
-    setMigrating(true);
+
+    if (selectedTables.size === 0) {
+      await runMigration({});
+      return;
+    }
+
+    setPreflighting(true);
+    const resolvedTargetSchema = resolveTargetSchema(schema || "dbo", targetSchema);
     try {
-      const result = await startMigration({
+      const result = await preflightMigration({
         source_connection_id: sourceConn.id,
         target_connection_id: targetConn.id,
         tables: Array.from(selectedTables),
         schema: schema || "dbo",
-        target_schema: targetSchema || "public",
-        strategy: "chunked",
-        chunk_size: 10000,
-        parallel_workers: 4,
-        validate_after: true,
-        require_target_snapshot: snapshotWarning.requireTargetSnapshot,
+        target_schema: resolvedTargetSchema,
       });
-      toast.success(`Migration started: ${result.message}`);
-      setShowNewDialog(false);
-      qc.invalidateQueries({ queryKey: ["migrations"] });
+
+      if (result.can_start_without_prompt) {
+        await runMigration({});
+        return;
+      }
+
+      const initialPolicies: Record<string, TargetTablePolicy> = {};
+      for (const table of result.tables) {
+        if (table.requires_action && table.suggested_policy) {
+          initialPolicies[table.table_name] = table.suggested_policy;
+        }
+      }
+      setTablePolicies(initialPolicies);
+      setPreflight(result);
+      setShowConflictDialog(true);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Migration failed to start");
+      toast.error(err instanceof Error ? err.message : "Preflight check failed");
     } finally {
-      setMigrating(false);
+      setPreflighting(false);
     }
-  }, [sourceConn, targetConn, selectedTables, schema, targetSchema, migrationGate, snapshotWarning.requireTargetSnapshot, qc]);
+  }, [sourceConn, targetConn, migrationGate, selectedTables, schema, targetSchema, runMigration]);
+
+  const handleConfirmConflict = useCallback(async () => {
+    await runMigration(tablePolicies);
+  }, [runMigration, tablePolicies]);
 
   const handleTestConnections = useCallback(async () => {
     if (!sourceConn || !targetConn) { toast.error("Select both connections first"); return; }
@@ -646,7 +882,7 @@ export default function MigrationsPage() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Migrations</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Manage and monitor all table migrations
+            Manage and monitor table, stored procedure, and function migrations
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -753,6 +989,11 @@ export default function MigrationsPage() {
                 </TabsTrigger>
               </TabsList>
             </Tabs>
+            {viewTab === "active" && filteredMigrations.length > 0 && (
+              <p className="mt-3 text-xs text-muted-foreground leading-relaxed">
+                Click a job row to open its detail page — progress, logs, validation, and post-migration steps are there.
+              </p>
+            )}
           </div>
 
           {filteredMigrations.length === 0 ? (
@@ -779,6 +1020,8 @@ export default function MigrationsPage() {
             <DialogDescription>
               {wizardStep === "setup"
                 ? "Select databases, discover tables, and choose what to migrate."
+                : selectedTables.size === 0 && selectedRoutineCount > 0
+                ? "Review converted PL/pgSQL and any parse errors, then start migration when ready."
                 : "Review the readiness assessment, then start migration when ready."}
             </DialogDescription>
             <div className="flex items-center gap-2 pt-2">
@@ -798,7 +1041,10 @@ export default function MigrationsPage() {
             </div>
           </DialogHeader>
 
-          <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 space-y-5">
+          <div
+            ref={wizardScrollRef}
+            className="flex-1 min-h-0 overflow-y-auto px-6 py-5 space-y-5"
+          >
             {wizardStep === "review" ? (
               <MigrationAssessmentReview
                 summary={selectionSummary}
@@ -808,6 +1054,20 @@ export default function MigrationsPage() {
                 sourceSchema={schema || "dbo"}
                 targetSchema={targetSchema || "public"}
                 migrationBlockedReason={migrationGate.allowed ? null : migrationGate.reason}
+                columnTypeOverrides={columnTypeOverrides}
+                onColumnTypeOverridesChange={setColumnTypeOverrides}
+                selectedRoutineCount={selectedRoutineCount}
+                proceduralPreview={
+                  selectedRoutineCount > 0
+                    ? {
+                        summary: proceduralPreviewSummary,
+                        items: proceduralPreviewItems,
+                        loading: proceduralPreviewLoading,
+                        error: proceduralPreviewError,
+                        onRetry: fetchProceduralPreview,
+                      }
+                    : undefined
+                }
               />
             ) : (
               <>
@@ -951,7 +1211,11 @@ export default function MigrationsPage() {
                 </div>
               </div>
               <p className="text-[10px] text-muted-foreground leading-tight">
-                Target schema must exist on PostgreSQL before migration — create it first if needed.
+                Target schemas are created automatically on PostgreSQL when missing (except{" "}
+                <code className="text-[10px]">public</code>, which already exists). Only{" "}
+                <code className="text-[10px]">dbo</code> maps to{" "}
+                <code className="text-[10px]">public</code> by default — other source schemas
+                (e.g. Sales, Person) keep the same name so stored procedures resolve correctly.
               </p>
               <div className="flex flex-wrap gap-3">
                 <Button
@@ -964,7 +1228,7 @@ export default function MigrationsPage() {
                   {discovering
                     ? <Loader2 className="h-4 w-4 mr-2 animate-spin" />
                     : <RefreshCw className="h-4 w-4 mr-2" />}
-                  {discovering ? "Discovering…" : "Discover Tables"}
+                  {discovering ? "Discovering…" : "Discover Table, SP and FN"}
                 </Button>
                 <Button
                   variant="outline"
@@ -984,7 +1248,7 @@ export default function MigrationsPage() {
                   {discovering
                     ? "Discovering tables…"
                     : discoveredTables.length > 0
-                    ? `${discoveredTables.length} tables found — ${selectedTables.size} selected`
+                    ? `${discoveredTables.length} tables found — ${selectedTables.size}/${maxTablesPerJob} selected`
                     : discoverError
                     ? "Discovery failed"
                     : "Tables to migrate"}
@@ -993,7 +1257,8 @@ export default function MigrationsPage() {
                   <div className="flex gap-2 shrink-0">
                     <Button
                       variant="ghost" size="sm" className="h-7 text-xs"
-                      onClick={() => setSelectedTables(new Set(discoveredTables.map((t) => t.name)))}
+                      onClick={handleSelectAllTables}
+                      disabled={discoveredTables.length === 0}
                     >
                       Select All
                     </Button>
@@ -1031,7 +1296,7 @@ export default function MigrationsPage() {
                     <p className="text-sm">
                       {sourceHealth.status !== "reachable"
                         ? "Fix the source connection above, then discover tables."
-                        : <>Click <strong>Discover Tables</strong> to load tables from the source database.</>}
+                        : <>Click <strong>Discover Table, SP and FN</strong> to load objects from the source database.</>}
                     </p>
                   </div>
                 )}
@@ -1049,12 +1314,20 @@ export default function MigrationsPage() {
                           ? "bg-emerald-500/15 text-emerald-500 border-emerald-500/30"
                           : "bg-muted text-muted-foreground";
                       const isExpanded = expandedAssessment === t.name;
+                      const isSelected = selectedTables.has(t.name);
+                      const atSelectionLimit =
+                        !isSelected && selectedTables.size >= maxTablesPerJob;
                       return (
                         <div key={t.name}>
-                          <label className="flex items-center gap-3 px-4 py-2.5 hover:bg-muted/50 cursor-pointer">
+                          <label
+                            className={`flex items-center gap-3 px-4 py-2.5 hover:bg-muted/50 ${
+                              atSelectionLimit ? "cursor-not-allowed opacity-60" : "cursor-pointer"
+                            }`}
+                          >
                             <input
                               type="checkbox"
-                              checked={selectedTables.has(t.name)}
+                              checked={isSelected}
+                              disabled={atSelectionLimit}
                               onChange={() => toggleTable(t.name)}
                               className="h-4 w-4 rounded"
                             />
@@ -1102,6 +1375,52 @@ export default function MigrationsPage() {
                 )}
               </div>
             </div>
+
+            {discoveredTables.length > 0 && (
+              <ProceduralMigrationPanel
+                sourceConnectionId={sourceConn?.id ?? null}
+                sourceSchema={schema || "dbo"}
+                targetSchema={targetSchema || "public"}
+                objects={discoveredProceduralObjects}
+                selectedProcedures={selectedProcedures}
+                selectedFunctions={selectedFunctions}
+                onToggleProcedure={(name) => {
+                  setSelectedProcedures((prev) => {
+                    const next = new Set(prev);
+                    next.has(name) ? next.delete(name) : next.add(name);
+                    return next;
+                  });
+                }}
+                onToggleFunction={(name) => {
+                  setSelectedFunctions((prev) => {
+                    const next = new Set(prev);
+                    next.has(name) ? next.delete(name) : next.add(name);
+                    return next;
+                  });
+                }}
+                onSelectAllProcedures={() =>
+                  setSelectedProcedures(
+                    new Set(
+                      discoveredProceduralObjects
+                        .filter((o) => o.type.toLowerCase() === "procedure")
+                        .map((o) => o.name),
+                    ),
+                  )
+                }
+                onClearProcedures={() => setSelectedProcedures(new Set())}
+                onSelectAllFunctions={() =>
+                  setSelectedFunctions(
+                    new Set(
+                      discoveredProceduralObjects
+                        .filter((o) => o.type.toLowerCase().includes("function"))
+                        .map((o) => o.name),
+                    ),
+                  )
+                }
+                onClearFunctions={() => setSelectedFunctions(new Set())}
+                disabled={discovering || assessing || sourceHealth.status !== "reachable"}
+              />
+            )}
               </>
             )}
           </div>
@@ -1110,12 +1429,26 @@ export default function MigrationsPage() {
             <p className="text-xs text-muted-foreground min-w-0">
               {wizardStep === "review" ? (
                 migrationGate.allowed
-                  ? `${selectedTables.size} table${selectedTables.size !== 1 ? "s" : ""} ready to migrate`
+                  ? selectedTables.size > 0
+                    ? `${selectedTables.size} table${selectedTables.size !== 1 ? "s" : ""} ready${
+                        selectedRoutineCount > 0
+                          ? ` · ${selectedRoutineCount} routine(s)`
+                          : ""
+                      }`
+                    : `${selectedRoutineCount} routine${selectedRoutineCount !== 1 ? "s" : ""} ready (procedural-only)`
                   : migrationGate.reason
-              ) : selectedTables.size > 0 ? (
-                `${selectedTables.size} table${selectedTables.size !== 1 ? "s" : ""} selected`
+              ) : hasMigrationSelection ? (
+                selectedTables.size > 0
+                  ? `${selectedTables.size} table${selectedTables.size !== 1 ? "s" : ""} selected${
+                      selectedRoutineCount > 0
+                        ? ` · ${selectedRoutineCount} routine(s)`
+                        : ""
+                    }`
+                  : `${selectedRoutineCount} routine${selectedRoutineCount !== 1 ? "s" : ""} selected`
+              ) : discoveryComplete ? (
+                "Select tables and/or routines to migrate"
               ) : (
-                "Select tables, then continue to assessment review"
+                "Discover objects, then select tables and/or routines"
               )}
               {sourceConn && targetConn && wizardStep === "setup" && (
                 <span className="hidden lg:inline">
@@ -1129,8 +1462,9 @@ export default function MigrationsPage() {
                 <Button
                   onClick={() => setWizardStep("review")}
                   disabled={
-                    selectedTables.size === 0 ||
-                    !assessmentComplete ||
+                    !hasMigrationSelection ||
+                    (selectedTables.size > 0 && !assessmentComplete) ||
+                    !discoveryComplete ||
                     discovering ||
                     assessing
                   }
@@ -1147,16 +1481,23 @@ export default function MigrationsPage() {
                     onClick={handleStartMigration}
                     disabled={
                       migrating ||
+                      preflighting ||
                       !migrationGate.allowed ||
                       sourceHealth.status !== "reachable" ||
                       targetHealth.status !== "reachable"
                     }
                     title={migrationGate.reason ?? undefined}
                   >
-                    {migrating
+                    {(migrating || preflighting)
                       ? <Loader2 className="h-4 w-4 mr-2 animate-spin" />
                       : <Play className="h-4 w-4 mr-2" />}
-                    {migrating ? "Starting…" : `Run Migration (${selectedTables.size})`}
+                    {preflighting
+                      ? "Checking target…"
+                      : migrating
+                      ? "Starting…"
+                      : `Run Migration (${
+                          selectedTables.size + selectedRoutineCount
+                        })`}
                   </Button>
                 </>
               )}
@@ -1164,6 +1505,21 @@ export default function MigrationsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <TargetTableConflictDialog
+        open={showConflictDialog}
+        preflight={preflight}
+        policies={tablePolicies}
+        onPolicyChange={(tableName, policy) =>
+          setTablePolicies((prev) => ({ ...prev, [tableName]: policy }))
+        }
+        onCancel={() => {
+          setShowConflictDialog(false);
+          setPreflight(null);
+        }}
+        onConfirm={handleConfirmConflict}
+        confirming={migrating}
+      />
     </div>
   );
 }

@@ -34,6 +34,26 @@ async def _clean_runtime():
 _CDC_OK = CdcStatus(db_enabled=True, tables={"Orders": True, "T1": True})
 
 
+def _mock_cdc_provider() -> MagicMock:
+    from apps.replicator.capture.models import TableInfo
+
+    provider = MagicMock()
+    provider.connect = AsyncMock()
+    provider.discover_tables = AsyncMock(
+        return_value=[
+            TableInfo(
+                schema_name="dbo",
+                table_name="T1",
+                columns=["id"],
+                pk_columns=["id"],
+            ),
+        ],
+    )
+    provider.capture_changes = AsyncMock()
+    provider.take_snapshot = AsyncMock()
+    return provider
+
+
 class TestReplicationServiceCreate:
     async def test_create_rejects_when_cdc_disabled(self, patch_db_session):
         with patch(
@@ -79,9 +99,19 @@ class TestReplicationServiceCreate:
 
 class TestReplicationServiceLifecycle:
     async def test_start_blocked_when_blockers_present(self, patch_db_session):
-        with patch(
-            "application.replication_service.fetch_cdc_status",
-            AsyncMock(return_value=_CDC_OK),
+        with (
+            patch(
+                "application.replication_service.fetch_cdc_status",
+                AsyncMock(return_value=_CDC_OK),
+            ),
+            patch(
+                "application.replication_service._fetch_target_only_snapshots",
+                AsyncMock(return_value=({}, "public")),
+            ),
+            patch(
+                "application.replication_service._fetch_schema_snapshots",
+                AsyncMock(return_value=([], {})),
+            ),
         ):
             created = await create_stream(
                 name="blocked",
@@ -117,7 +147,23 @@ class TestReplicationServiceLifecycle:
                     "application.replication_service.fetch_cdc_status",
                     AsyncMock(return_value=_CDC_OK),
                 ),
+                patch(
+                    "application.replication_service.refresh_stream_concerns",
+                    AsyncMock(return_value=[]),
+                ),
+                patch(
+                    "application.replication_service.reconcile_stream_runtime",
+                    AsyncMock(return_value=None),
+                ),
+                patch(
+                    "application.replication_service._build_source_provider",
+                    AsyncMock(return_value=_mock_cdc_provider()),
+                ),
+                patch(
+                    "apps.replicator.apply.checkpoint.CheckpointStore",
+                ) as mock_checkpoint_cls,
             ):
+                mock_checkpoint_cls.return_value.ensure_table = AsyncMock()
                 started = await start_stream(stream_id)
                 assert started["status"] == "CDC_STREAMING"
 

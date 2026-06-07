@@ -8,16 +8,29 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import smtplib
 from email.message import EmailMessage
 from typing import Any
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+from application.notification_config import resolved_notification_config
 from shared.logging.structured_logging import get_logger
 
 logger = get_logger(__name__)
+
+
+def create_notification_service() -> NotificationService:
+    cfg = resolved_notification_config()
+    return NotificationService(
+        webhook_url=cfg.get("webhook_url") or None,
+        smtp_host=cfg.get("smtp_host") or None,
+        smtp_port=cfg.get("smtp_port"),
+        smtp_user=cfg.get("smtp_user") or None,
+        smtp_password=cfg.get("smtp_password") or None,
+        alert_email_to=cfg.get("alert_email_to") or None,
+        alert_email_from=cfg.get("alert_email_from") or None,
+    )
 
 
 class NotificationService:
@@ -32,18 +45,13 @@ class NotificationService:
         alert_email_to: str | None = None,
         alert_email_from: str | None = None,
     ) -> None:
-        self._webhook_url = webhook_url or os.environ.get("MIGRATION_WEBHOOK_URL")
-        self._smtp_host = smtp_host or os.environ.get("MIGRATION_SMTP_HOST")
-        self._smtp_port = smtp_port or int(os.environ.get("MIGRATION_SMTP_PORT", "587"))
-        self._smtp_user = smtp_user or os.environ.get("MIGRATION_SMTP_USER")
-        self._smtp_password = smtp_password or os.environ.get("MIGRATION_SMTP_PASSWORD")
-        self._alert_email_to = alert_email_to or os.environ.get("MIGRATION_ALERT_EMAIL_TO")
-        self._alert_email_from = (
-            alert_email_from
-            or os.environ.get("MIGRATION_ALERT_EMAIL_FROM")
-            or self._smtp_user
-            or "alerts@sql-optima.local"
-        )
+        self._webhook_url = webhook_url
+        self._smtp_host = smtp_host
+        self._smtp_port = smtp_port or 587
+        self._smtp_user = smtp_user
+        self._smtp_password = smtp_password
+        self._alert_email_to = alert_email_to
+        self._alert_email_from = alert_email_from or smtp_user or "alerts@sql-optima.local"
 
     @property
     def email_configured(self) -> bool:
@@ -132,7 +140,7 @@ class NotificationService:
         results: dict[str, str] = {}
         if channel in ("webhook", "all"):
             if not self._webhook_url:
-                results["webhook"] = "skipped — MIGRATION_WEBHOOK_URL not set"
+                results["webhook"] = "skipped — webhook URL not configured"
             else:
                 try:
                     await self._send_webhook("alert.test", payload)
@@ -141,9 +149,7 @@ class NotificationService:
                     results["webhook"] = f"failed: {exc}"
         if channel in ("email", "all"):
             if not self.email_configured:
-                results["email"] = (
-                    "skipped — set MIGRATION_SMTP_HOST and MIGRATION_ALERT_EMAIL_TO"
-                )
+                results["email"] = "skipped — SMTP host and alert recipient not configured"
             else:
                 try:
                     await self._send_email("alert.test", payload)

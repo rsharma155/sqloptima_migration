@@ -7,6 +7,8 @@ SPDX-License-Identifier: MIT
 """
 from __future__ import annotations
 
+import ipaddress
+import os
 from typing import Any
 from uuid import uuid4
 
@@ -21,6 +23,55 @@ logger = get_logger(__name__)
 
 # Fix 9.3: module-level constant so tests can import it.
 COPY_BATCH_SIZE: int = 5_000
+
+# Hostnames commonly used for local / Docker PostgreSQL without TLS configured.
+_LOCAL_PG_HOSTS = frozenset({
+    "localhost",
+    "127.0.0.1",
+    "::1",
+    "0.0.0.0",
+    "host.docker.internal",
+    "postgres",
+    "postgres_target",
+    "postgres_checklist",
+})
+
+
+def resolve_postgres_ssl_mode(entry: dict) -> str | None:
+    """Pick asyncpg SSL mode for a connection-store entry.
+
+    Production hosts default to ``require``. Local/Docker hosts and
+    ``MIGRATION_TARGET_SSL_MODE`` env override use ``prefer`` or plaintext.
+    """
+    env = os.environ.get("MIGRATION_TARGET_SSL_MODE", "").strip()
+    if env:
+        if env.lower() in {"disable", "false", "none", "off", "0"}:
+            return None
+        return env
+
+    host = (entry.get("host") or "").strip().lower()
+    if host in _LOCAL_PG_HOSTS or host.endswith(".local"):
+        return "prefer"
+    try:
+        ip = ipaddress.ip_address(host.strip("[]"))
+        if ip.is_private or ip.is_loopback:
+            return "prefer"
+    except ValueError:
+        pass
+    return "require"
+
+
+def postgres_config_from_entry(entry: dict, *, password: str) -> PostgresConnectionConfig:
+    """Build a PostgreSQL config from a connection-store entry dict."""
+    return PostgresConnectionConfig(
+        host=entry["host"],
+        port=int(entry.get("port", 5432)),
+        database=entry["database"],
+        username=entry.get("username", ""),
+        password=password,
+        schema=entry.get("schema", "public"),
+        ssl_mode=resolve_postgres_ssl_mode(entry),
+    )
 
 
 class PostgresConnectionConfig(ConnectionConfig):

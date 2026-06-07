@@ -40,7 +40,11 @@ func BuildExtractQueryWithOptions(
 	} else {
 		quoted := make([]string, len(columns))
 		for i, c := range columns {
-			quoted[i] = quoteIdentMSSQL(c)
+			if cast, ok := opts.ColumnExtractCasts[c]; ok && strings.TrimSpace(cast) != "" {
+				quoted[i] = cast + " AS " + quoteIdentMSSQL(c)
+			} else {
+				quoted[i] = quoteIdentMSSQL(c)
+			}
 		}
 		colList = strings.Join(quoted, ", ")
 	}
@@ -52,9 +56,12 @@ func BuildExtractQueryWithOptions(
 	order := quoteIdentMSSQL(orderCol)
 
 	var pkExpr string
-	if opts.UUIDKeyRange {
+	switch {
+	case opts.UUIDKeyRange:
 		pkExpr = fmt.Sprintf("CAST(%s AS CHAR(36))", quoteIdentMSSQL(pkCol))
-	} else {
+	case opts.StringKeyRange:
+		pkExpr = fmt.Sprintf("CAST(%s AS NVARCHAR(4000))", quoteIdentMSSQL(pkCol))
+	default:
 		pkExpr = quoteIdentMSSQL(pkCol)
 	}
 
@@ -100,6 +107,16 @@ func BuildDateBoundsQuery(schema, table, col string) string {
 func BuildUUIDBoundsQuery(schema, table, col string) string {
 	c := quoteIdentMSSQL(col)
 	expr := fmt.Sprintf("CAST(%s AS CHAR(36))", c)
+	return fmt.Sprintf(
+		"SELECT MIN(%s) AS lo, MAX(%s) AS hi FROM %s",
+		expr, expr, quotedTableMSSQL(schema, table),
+	)
+}
+
+// BuildStringBoundsQuery returns lexicographic MIN/MAX for text/varchar/hierarchyid PK columns.
+func BuildStringBoundsQuery(schema, table, col string) string {
+	c := quoteIdentMSSQL(col)
+	expr := fmt.Sprintf("CAST(%s AS NVARCHAR(4000))", c)
 	return fmt.Sprintf(
 		"SELECT MIN(%s) AS lo, MAX(%s) AS hi FROM %s",
 		expr, expr, quotedTableMSSQL(schema, table),

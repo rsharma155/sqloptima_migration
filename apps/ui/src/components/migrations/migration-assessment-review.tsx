@@ -11,6 +11,11 @@ import { Progress } from "@/components/ui/progress";
 import { TierBadge } from "@/components/shared/tier-badge";
 import type { DatabaseAssessment, TableAssessment } from "@/lib/api";
 import type { SelectedAssessmentSummary } from "@/lib/migration-readiness";
+import { ColumnTypeOverridePanel } from "@/components/migrations/column-type-override-panel";
+import {
+  ProceduralConversionReview,
+  type ProceduralConversionReviewProps,
+} from "@/components/migrations/procedural-conversion-review";
 
 function TierHealthBar({
   safe,
@@ -62,7 +67,7 @@ function TableAssessmentRow({ assess }: { assess: TableAssessment }) {
         </ul>
       )}
       {assess.warnings.length > 0 && (
-        <ul className="text-[11px] text-amber-400 space-y-0.5 list-disc pl-4">
+        <ul className="text-[11px] text-amber-800 dark:text-amber-300 space-y-0.5 list-disc pl-4">
           {assess.warnings.map((w) => (
             <li key={w}>{w}</li>
           ))}
@@ -85,6 +90,13 @@ export interface MigrationAssessmentReviewProps {
   sourceSchema: string;
   targetSchema: string;
   migrationBlockedReason: string | null;
+  columnTypeOverrides?: Record<string, string>;
+  onColumnTypeOverridesChange?: (overrides: Record<string, string>) => void;
+  proceduralPreview?: Pick<
+    ProceduralConversionReviewProps,
+    "summary" | "items" | "loading" | "error" | "onRetry"
+  >;
+  selectedRoutineCount?: number;
 }
 
 export function MigrationAssessmentReview({
@@ -95,21 +107,58 @@ export function MigrationAssessmentReview({
   sourceSchema,
   targetSchema,
   migrationBlockedReason,
+  columnTypeOverrides = {},
+  onColumnTypeOverridesChange,
+  proceduralPreview,
+  selectedRoutineCount = 0,
 }: MigrationAssessmentReviewProps) {
   const selectedCount = selectedTables.size;
+  const proceduralOnly = selectedCount === 0 && selectedRoutineCount > 0;
   const selectedRows = Array.from(selectedTables)
     .map((name) => tableAssessments[name.toLowerCase()])
     .filter(Boolean) as TableAssessment[];
 
   return (
     <div className="space-y-4">
+      {proceduralOnly && proceduralPreview ? (
+        <>
+          {migrationBlockedReason && (
+            <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm flex items-start gap-2">
+              <XCircle className="h-4 w-4 text-red-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="font-semibold text-red-400">Migration cannot start</p>
+                <p className="text-red-300/90 text-xs mt-1 leading-relaxed">{migrationBlockedReason}</p>
+              </div>
+            </div>
+          )}
+          <ProceduralConversionReview
+          summary={proceduralPreview.summary}
+          items={proceduralPreview.items}
+          loading={proceduralPreview.loading}
+          error={proceduralPreview.error}
+          sourceSchema={sourceSchema}
+          targetSchema={targetSchema}
+          onRetry={proceduralPreview.onRetry}
+        />
+        </>
+      ) : (
+        <>
       <div className="flex flex-wrap items-center gap-2">
         <h3 className="text-sm font-semibold">Migration readiness assessment</h3>
-        <TierBadge tier={summary.overallTier} />
+        {selectedCount > 0 && <TierBadge tier={summary.overallTier} />}
         <Badge variant="outline" className="text-[10px]">
           {sourceSchema} → {targetSchema}
         </Badge>
       </div>
+
+      {onColumnTypeOverridesChange && (
+        <ColumnTypeOverridePanel
+          selectedTables={selectedTables}
+          tableAssessments={tableAssessments}
+          columnTypeOverrides={columnTypeOverrides}
+          onChange={onColumnTypeOverridesChange}
+        />
+      )}
 
       {migrationBlockedReason && (
         <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm flex items-start gap-2">
@@ -122,11 +171,11 @@ export function MigrationAssessmentReview({
       )}
 
       {!migrationBlockedReason && summary.warning > 0 && (
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm flex items-start gap-2">
-          <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm flex items-start gap-2 text-amber-900 dark:text-amber-100">
+          <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
           <div>
-            <p className="font-semibold text-amber-300">Warnings on selected tables</p>
-            <p className="text-xs text-amber-200/80 mt-1">
+            <p className="font-semibold text-amber-800 dark:text-amber-300">Warnings on selected tables</p>
+            <p className="text-xs text-amber-800/90 dark:text-amber-200/90 mt-1">
               Migration can proceed, but review warnings below — some tables may need extra steps
               or run slower than estimated.
             </p>
@@ -235,6 +284,20 @@ export function MigrationAssessmentReview({
             <Progress value={100} className="h-1 opacity-0" aria-hidden />
           </CardContent>
         </Card>
+      )}
+        </>
+      )}
+
+      {!proceduralOnly && selectedRoutineCount > 0 && proceduralPreview && (
+        <ProceduralConversionReview
+          summary={proceduralPreview.summary}
+          items={proceduralPreview.items}
+          loading={proceduralPreview.loading}
+          error={proceduralPreview.error}
+          sourceSchema={sourceSchema}
+          targetSchema={targetSchema}
+          onRetry={proceduralPreview.onRetry}
+        />
       )}
     </div>
   );

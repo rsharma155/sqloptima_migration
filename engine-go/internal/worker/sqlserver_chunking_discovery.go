@@ -25,6 +25,7 @@ const (
 	ChunkKeyInteger ChunkKeyKind = iota
 	ChunkKeyDateTime
 	ChunkKeyUUID
+	ChunkKeyString
 )
 
 // ChunkKeyInfo describes the column used for range chunking.
@@ -129,6 +130,8 @@ func classifySQLType(typeName string) ChunkKeyKind {
 		return ChunkKeyUUID
 	case "datetime", "datetime2", "smalldatetime", "date":
 		return ChunkKeyDateTime
+	case "char", "nchar", "varchar", "nvarchar", "text", "ntext", "hierarchyid":
+		return ChunkKeyString
 	default:
 		return ChunkKeyInteger
 	}
@@ -200,6 +203,24 @@ func (SQLServerChunkBoundsReader) ReadUUID(
 	return planner.UUIDBounds{Min: strings.ToLower(lo.String), Max: strings.ToLower(hi.String)}, nil
 }
 
+func (SQLServerChunkBoundsReader) ReadString(
+	ctx context.Context, cfg extractor.SQLServerConfig, schema, table, col string,
+) (planner.StringBounds, error) {
+	db, err := sql.Open("sqlserver", cfg.ConnectionString())
+	if err != nil {
+		return planner.StringBounds{}, err
+	}
+	defer db.Close()
+	var lo, hi sql.NullString
+	if err := db.QueryRowContext(ctx, extractor.BuildStringBoundsQuery(schema, table, col)).Scan(&lo, &hi); err != nil {
+		return planner.StringBounds{}, err
+	}
+	if !lo.Valid || !hi.Valid {
+		return planner.StringBounds{}, nil
+	}
+	return planner.StringBounds{Min: lo.String, Max: hi.String}, nil
+}
+
 // ResolveTableChunks discovers the chunk key, reads bounds, and plans chunks.
 func ResolveTableChunks(
 	ctx context.Context,
@@ -245,6 +266,14 @@ func ResolveTableChunks(
 		return planner.UUIDChunker{}.Plan(
 			jobID, table.SourceSchema, table.TableName, key.Column, bounds,
 		), key, nil
+	case ChunkKeyString:
+		bounds, err := boundsReader.ReadString(ctx, src, table.SourceSchema, table.TableName, key.Column)
+		if err != nil {
+			return nil, key, err
+		}
+		return planner.StringChunker{}.Plan(
+			jobID, table.SourceSchema, table.TableName, key.Column, bounds,
+		), key, nil
 	default:
 		bounds, err := boundsReader.ReadInteger(ctx, src, table.SourceSchema, table.TableName, key.Column)
 		if err != nil {
@@ -259,11 +288,15 @@ func ResolveTableChunks(
 // BuildExtractOptions maps dispatch payload + chunk key into SQL Server extract hints.
 func BuildExtractOptions(table GoTableDispatchPayload, key ChunkKeyInfo, useNoLock bool) extractor.ExtractOptions {
 	return extractor.ExtractOptions{
-		WhereClause:  table.WhereClause,
-		OrderColumn:  table.OrderColumn,
-		MaxDOP:       table.SourceMaxDOP,
-		NoLock:       useNoLock,
-		UUIDKeyRange: key.Kind == ChunkKeyUUID,
+		WhereClause:        table.WhereClause,
+		OrderColumn:        table.OrderColumn,
+		MaxDOP:             table.SourceMaxDOP,
+		NoLock:             useNoLock,
+		UUIDKeyRange:       key.Kind == ChunkKeyUUID,
+		StringKeyRange:     key.Kind == ChunkKeyString,
+		InlineTextLOBs:     true,
+		InlineBinaryLOBs:   true,
+		ColumnExtractCasts: table.ColumnExtractCasts,
 	}
 }
 

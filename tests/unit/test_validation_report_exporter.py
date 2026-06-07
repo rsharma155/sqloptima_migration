@@ -216,3 +216,30 @@ class TestHtmlExport:
         exporter = ValidationReportExporter()
         html_str = exporter.to_html(_build_report())
         assert ">1<" in html_str  # passed count
+
+    def test_aggregate_html_shows_column_details(self):
+        exporter = ValidationReportExporter()
+        result = ValidationResult(
+            object_name="dbo.orders",
+            category=ValidationCategory.AGGREGATE,
+            status=ValidationStatus.PASSED,
+            details={
+                "column_results": [
+                    {
+                        "column": "id",
+                        "status": "passed",
+                        "source": {"min": 1, "max": 10, "sum": 55, "avg": 5.5},
+                        "target": {"min": 1, "max": 10, "sum": 55, "avg": 5.5},
+                    }
+                ],
+            },
+        )
+        report = ValidationReport(
+            results=[result],
+            total_objects=1,
+            passed=1,
+            validation_level=2,
+        )
+        html_str = exporter.to_html(report)
+        assert "dbo.orders" in html_str
+        assert "MIN (src" in html_str or "1 → 1" in html_str

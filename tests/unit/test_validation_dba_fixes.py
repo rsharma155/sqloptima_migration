@@ -45,10 +45,10 @@ class TestAggregateValidatorUsesCorrectIssueType:
             schema="dbo",
             aggregate_columns=["id"],
         )
+        assert result.status == ValidationStatus.FAILED
         for issue in result.issues:
-            assert isinstance(issue, ValidationIssue), (
-                f"Expected ValidationIssue, got {type(issue).__name__} — fix 4.1 not applied"
-            )
+            assert isinstance(issue, ValidationIssue)
+            assert issue.category.value == "aggregate"
 
 
 class TestSchemaValidatorTypeEquivalence:
@@ -153,7 +153,7 @@ class TestRowCountTargetSchemaQualification:
         """The public validate() method must pass schema to _count_target."""
         validator = RowCountValidator()
         src_conn = AsyncMock()
-        src_conn.execute = AsyncMock(return_value=[{"cnt": 100}])
+        src_conn.execute = AsyncMock(return_value=[{"row_count": 100}])
         tgt_conn = AsyncMock()
         tgt_conn.execute = AsyncMock(return_value=[{"cnt": 100}])
 

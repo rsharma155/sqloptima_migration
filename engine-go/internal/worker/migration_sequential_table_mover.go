@@ -47,7 +47,15 @@ func (m *MigrationTableDataMover) moveSequential(
 				return result, err
 			}
 		}
-		outcome, err := m.executeChunk(ctx, pipeline, chunk, table, schema, transforms, opts)
+		if result.ChunksRun > 0 {
+			if err := sleepBetweenSourceChunks(ctx, resolveChunkDelay(table, opts.sourceThrottle)); err != nil {
+				return result, err
+			}
+		}
+		chunkOpts := opts
+		chunkOpts.tableRowsBase = result.RowsMigrated
+		chunkOpts.enableIntraChunkProgress = true
+		outcome, err := m.executeChunk(ctx, jobID, pipeline, chunk, table, schema, transforms, chunkOpts)
 		if err != nil {
 			_ = m.handleChunkFailure(ctx, jobID, table, chunk, tableSizer, err)
 			_ = m.meta.UpdateTablePlanProgress(ctx, jobID, table.TableName, "failed", result.RowsMigrated)
@@ -57,6 +65,9 @@ func (m *MigrationTableDataMover) moveSequential(
 		result.RowsMigrated += outcome.rows
 		result.ChunksRun++
 		_ = m.meta.UpdateTablePlanProgress(ctx, jobID, table.TableName, "migrating", result.RowsMigrated)
+		_ = m.meta.UpdateMigrationJobTotals(
+			ctx, jobID, opts.jobBase.RowsMigrated+result.RowsMigrated, opts.jobBase.TablesDone,
+		)
 	}
 	return result, nil
 }
@@ -91,7 +102,15 @@ func (m *MigrationTableDataMover) moveSequentialQueued(
 		if chunk == nil {
 			return *result, nil
 		}
-		outcome, err := m.executeChunk(ctx, pipeline, *chunk, table, schema, transforms, opts)
+		if result.ChunksRun > 0 {
+			if err := sleepBetweenSourceChunks(ctx, resolveChunkDelay(table, opts.sourceThrottle)); err != nil {
+				return *result, err
+			}
+		}
+		chunkOpts := opts
+		chunkOpts.tableRowsBase = result.RowsMigrated
+		chunkOpts.enableIntraChunkProgress = true
+		outcome, err := m.executeChunk(ctx, jobID, pipeline, *chunk, table, schema, transforms, chunkOpts)
 		if err != nil {
 			_ = m.handleChunkFailure(ctx, jobID, table, *chunk, tableSizer, err)
 			_ = m.meta.UpdateTablePlanProgress(ctx, jobID, table.TableName, "failed", result.RowsMigrated)
@@ -101,5 +120,8 @@ func (m *MigrationTableDataMover) moveSequentialQueued(
 		result.RowsMigrated += outcome.rows
 		result.ChunksRun++
 		_ = m.meta.UpdateTablePlanProgress(ctx, jobID, table.TableName, "migrating", result.RowsMigrated)
+		_ = m.meta.UpdateMigrationJobTotals(
+			ctx, jobID, opts.jobBase.RowsMigrated+result.RowsMigrated, opts.jobBase.TablesDone,
+		)
 	}
 }

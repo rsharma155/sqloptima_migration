@@ -27,7 +27,7 @@ func TestSplitSchemaForLOBStreaming(t *testing.T) {
 		{Name: "body", LogicalType: core.LogicalLargeUtf8},
 		{Name: "name", LogicalType: core.LogicalUtf8},
 	}}
-	qSchema, lobIdx := extractor.SplitSchemaForLOBStreaming(schema, "id")
+	qSchema, lobIdx := extractor.SplitSchemaForLOBStreaming(schema, "id", extractor.ExtractOptions{})
 	if len(lobIdx) != 1 || lobIdx[0] != 1 {
 		t.Fatalf("lob indexes = %v", lobIdx)
 	}
@@ -41,8 +41,41 @@ func TestSplitSchemaNoLOBPassthrough(t *testing.T) {
 	schema := extractor.ExtractionSchema{Columns: []extractor.ExtractionColumn{
 		{Name: "id", LogicalType: core.LogicalInt64},
 	}}
-	qSchema, lobIdx := extractor.SplitSchemaForLOBStreaming(schema, "id")
+	qSchema, lobIdx := extractor.SplitSchemaForLOBStreaming(schema, "id", extractor.ExtractOptions{})
 	if len(lobIdx) != 0 || len(qSchema.Columns) != 1 {
 		t.Fatalf("expected passthrough, got lob=%v cols=%d", lobIdx, len(qSchema.Columns))
+	}
+}
+
+func TestSplitSchemaInlineBinaryLOBs(t *testing.T) {
+	schema := extractor.ExtractionSchema{Columns: []extractor.ExtractionColumn{
+		{Name: "id", LogicalType: core.LogicalInt64},
+		{Name: "body", LogicalType: core.LogicalLargeUtf8},
+		{Name: "blob", LogicalType: core.LogicalLargeBinary},
+	}}
+	qSchema, lobIdx := extractor.SplitSchemaForLOBStreaming(schema, "id", extractor.ExtractOptions{
+		InlineTextLOBs:   true,
+		InlineBinaryLOBs: true,
+	})
+	if len(lobIdx) != 0 {
+		t.Fatalf("expected no streaming LOBs, got %v", lobIdx)
+	}
+	if len(qSchema.Columns) != 3 {
+		t.Fatalf("query columns = %d want 3 (all inline)", len(qSchema.Columns))
+	}
+}
+
+func TestSplitSchemaInlineTextLOBs(t *testing.T) {
+	schema := extractor.ExtractionSchema{Columns: []extractor.ExtractionColumn{
+		{Name: "id", LogicalType: core.LogicalInt64},
+		{Name: "body", LogicalType: core.LogicalLargeUtf8},
+		{Name: "blob", LogicalType: core.LogicalLargeBinary},
+	}}
+	qSchema, lobIdx := extractor.SplitSchemaForLOBStreaming(schema, "id", extractor.ExtractOptions{InlineTextLOBs: true})
+	if len(lobIdx) != 1 || lobIdx[0] != 2 {
+		t.Fatalf("lob indexes = %v", lobIdx)
+	}
+	if len(qSchema.Columns) != 2 {
+		t.Fatalf("query columns = %d want 2 (id + body inline)", len(qSchema.Columns))
 	}
 }

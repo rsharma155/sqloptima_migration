@@ -165,7 +165,7 @@ app.add_middleware(
     CORSMiddleware,
     **_cors_kwargs,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
 
@@ -244,6 +244,11 @@ async def startup() -> None:
         )
     import application.migration_service as migration_svc
     from apps.api.connection_store import load_connections, set_secret_provider, set_secrets_manager
+    from apps.api.notification_settings_store import (
+        load_notification_settings,
+        set_secrets_manager as set_notification_secrets_manager,
+    )
+    from apps.api.migration_settings_store import load_migration_settings
     from apps.api.dependencies import set_secret_provider as dep_set_secret_provider
     from apps.api.dependencies import set_secrets
     from infrastructure.metadata_db.session import AsyncSessionFactory, init_db
@@ -253,6 +258,7 @@ async def startup() -> None:
     sm = SecretsManager()
     set_secrets(sm)
     set_secrets_manager(sm)
+    set_notification_secrets_manager(sm)
 
     sp = build_secret_provider()
     set_secret_provider(sp)
@@ -271,6 +277,8 @@ async def startup() -> None:
     from apps.api.startup_checks import run_startup_checks
     await run_startup_checks()
     await load_connections()
+    await load_notification_settings()
+    await load_migration_settings()
     await migration_svc.load_jobs()
     try:
         from application.audit_service import AuditService

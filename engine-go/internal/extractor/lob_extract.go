@@ -12,15 +12,28 @@ import (
 )
 
 // SplitSchemaForLOBStreaming returns a SELECT schema without LOB columns (PK always included).
-func SplitSchemaForLOBStreaming(schema ExtractionSchema, pkColumn string) (ExtractionSchema, []int) {
+// When inline flags are set, matching LOB types stay in the main query instead of streaming.
+func SplitSchemaForLOBStreaming(schema ExtractionSchema, pkColumn string, opts ExtractOptions) (ExtractionSchema, []int) {
 	var lobIndexes []int
 	for i, c := range schema.Columns {
-		if c.LogicalType.IsLOB() {
-			lobIndexes = append(lobIndexes, i)
+		if !c.LogicalType.IsLOB() {
+			continue
 		}
+		if opts.InlineTextLOBs && c.LogicalType == core.LogicalLargeUtf8 {
+			continue
+		}
+		if opts.InlineBinaryLOBs && c.LogicalType == core.LogicalLargeBinary {
+			continue
+		}
+		lobIndexes = append(lobIndexes, i)
 	}
 	if len(lobIndexes) == 0 {
 		return schema, nil
+	}
+
+	streaming := make(map[int]struct{}, len(lobIndexes))
+	for _, i := range lobIndexes {
+		streaming[i] = struct{}{}
 	}
 
 	seen := make(map[string]struct{}, len(schema.Columns))
@@ -33,8 +46,8 @@ func SplitSchemaForLOBStreaming(schema ExtractionSchema, pkColumn string) (Extra
 		queryCols = append(queryCols, c)
 	}
 
-	for _, c := range schema.Columns {
-		if c.LogicalType.IsLOB() {
+	for i, c := range schema.Columns {
+		if _, skip := streaming[i]; skip {
 			continue
 		}
 		addCol(c)

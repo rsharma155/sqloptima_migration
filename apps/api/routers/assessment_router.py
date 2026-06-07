@@ -52,6 +52,7 @@ class TableAssessmentOut(BaseModel):
     lob_columns: list[str]
     ci_collation_columns: list[str]
     blocker_types: list[str]
+    unsupported_type_columns: list[dict[str, str]] = Field(default_factory=list)
     blockers: list[str]
     warnings: list[str]
     prerequisites: list[str]
@@ -89,6 +90,7 @@ def _to_table_out(ta: TableAssessment) -> TableAssessmentOut:
         lob_columns=ta.lob_columns,
         ci_collation_columns=ta.ci_collation_columns,
         blocker_types=ta.blocker_types,
+        unsupported_type_columns=ta.unsupported_type_columns,
         blockers=ta.blockers,
         warnings=ta.warnings,
         prerequisites=ta.prerequisites,

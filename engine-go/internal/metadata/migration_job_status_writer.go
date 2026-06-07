@@ -15,7 +15,7 @@ func (c *Client) SetMigrationJobStatus(ctx context.Context, jobID uuid.UUID, sta
 	_, err := c.pool.Exec(ctx, `
 		UPDATE migration_jobs
 		SET status = $1, updated_at = NOW(),
-		    completed_at = CASE WHEN $1 IN ('completed', 'failed', 'stopped') THEN NOW() ELSE completed_at END
+		    completed_at = CASE WHEN $1 IN ('completed', 'partial', 'failed', 'stopped') THEN NOW() ELSE completed_at END
 		WHERE migration_job_id = $2`, status, jobID.String())
 	if err != nil {
 		return fmt.Errorf("set job status: %w", err)

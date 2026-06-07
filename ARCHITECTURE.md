@@ -1,8 +1,9 @@
 # Architecture — SQL Server → PostgreSQL Migration Platform
 
-**Version:** Go data plane complete (phases 0–15) + DBA-feedback GA polish pass (2026-06-05) + L-series hardening + replication control plane
-**Last updated:** 2026-06-07
-**Author:** Ravi Sharma
+**Repository:** [github.com/rsharma155/sqloptima_migration](https://github.com/rsharma155/sqloptima_migration)  
+**Version:** Go data plane complete (phases 0–15) + DBA-feedback GA polish pass (2026-06-05) + L-series hardening + replication control plane  
+**Last updated:** 2026-06-07  
+**Author:** Ravi Sharma  
 **License:** MIT — © 2026 Ravi Sharma
 
 ---
@@ -19,6 +20,8 @@
 8. [Domain Model](#8-domain-model)
 9. [T-SQL → PL/pgSQL Transpilation Pipeline](#9-t-sql--plpgsql-transpilation-pipeline)
 10. [Migration Data Pipeline](#10-migration-data-pipeline)
+    - [Phased target DDL lifecycle](#phased-target-ddl-lifecycle)
+    - [Post-migration finalize](#post-migration-finalize)
 11. [Go Data Plane](#11-go-data-plane-engine-go)
 12. [Replication Architecture (CDC)](#12-replication-architecture-cdc)
 13. [Layer Dependencies](#13-layer-dependencies)
@@ -59,6 +62,7 @@ Both planes communicate exclusively via the **PostgreSQL Metadata Repository** �
 │                       Next.js UI  (port 3508)                           │
 │         React 19 · TypeScript · TailwindCSS v4 · shadcn/ui             │
 │         Typed client: api.ts — all paths under /api/v1                 │
+│         Migration job detail + post-migration finalize dashboard       │
 └──────────────────────────────────┬──────────────────────────────────────┘
                                    │ HTTPS REST /api/v1 + /api/comparison
 ┌──────────────────────────────────▼──────────────────────────────────────┐
@@ -136,7 +140,7 @@ Deliberately thin. Each router calls an application service — no business logi
 |---|---|---|
 | `auth_router.py` | `/api/v1/auth/*`, `/api/v1/users` | Login, token refresh, user CRUD |
 | `connections_router.py` | `/api/v1/connections`, `/api/v1/create-database` | Connection profiles with encrypted passwords |
-| `migrations_router.py` | `/api/v1/migrations/**` | Job lifecycle: start, pause, resume, stop, progress |
+| `migrations_router.py` | `/api/v1/migrations/**` | Job lifecycle: start, pause, resume, stop, progress, **post-migration finalize** |
 | `conversion_router.py` | `/api/v1/convert`, `/api/v1/sql/validate` | T-SQL → PL/pgSQL, syntax validation |
 | `validation_router.py` | `/api/v1/jobs/{id}/validate`, `/api/v1/validation-runs` | L1–L4 validation with persistence |
 | `discovery_router.py` | `/api/v1/discover`, `/api/v1/mapping` | Schema discovery, column type mapping |
@@ -164,7 +168,7 @@ Deliberately thin. Each router calls an application service — no business logi
 | `discovery_service.py` | Wraps `DiscoveryEngine` with connection resolution |
 | `conversion_service.py` | Wraps `ProceduralConverter` with logging |
 | `retention_service.py` | Scans `migration_jobs`, deletes/archives by age according to `RetentionPolicy` |
-| `go_engine_migration/` | Go job dispatch JSON contract, command issue, job watcher (validation + audit/alerts on terminal status) |
+| `go_engine_migration/` | Go job dispatch JSON contract, command issue, **target table provisioning** (minimal load DDL), **deferred schema catalog**, **post-migration finalizer**, job watcher (validation + finalize + audit/alerts on terminal status) |
 | `metadata_security_service.py` | Metadata DB credential storage audit (§12.8) |
 | `alert_service.py` / `notification_service.py` | Platform alert collection and webhook/email delivery |
 | `workflow_bridge_service.py` | Temporal workflow submission and status sync |
@@ -195,7 +199,7 @@ Pure Python — no I/O, no async, no database calls.
 | `assessment/` | `AssessmentEngine` — SAFE/WARNING/BLOCKER rating, 0–100 complexity score, time estimate |
 | `discovery/` | `DiscoveryEngine` — multi-schema discovery; `computed_column_discovery`, `index_discovery`, `synonym_discovery`, `pii_classifier` |
 | `chunking/` | `ChunkPlanner`, `DateTimeChunkPlanner` — half-open `[start, end)` PK/datetime boundaries aligned with extract queries |
-| `migration/` | `MigrationEngine` dispatch types, `ParallelMigration`, `LobStreamer`, `DryRunMigration`, `SnapshotGate`, `masking_discovery`, Go dispatch config |
+| `migration/` | `MigrationEngine` dispatch types, `ParallelMigration`, `LobStreamer`, `DryRunMigration`, `SnapshotGate`, `masking_discovery`, Go dispatch config; **`deferred_schema_catalog`** (identity/index/FK/check/default/trigger inventory); **`post_migration_ddl_generator`** + **`post_migration_finalize_models`** |
 | `migration/retention_policy.py` | `RetentionPolicy` value object — max_age_days, keep_failed flag, action (DELETE/ARCHIVE) |
 | `transpilation/` | AST pipeline: parser → IR → transformation rules → PL/pgSQL generator |
 | `transpilation/repair/` | `ConversionRepairService` — validate → fix → re-validate loop via pgparse + rule-based fixers |
@@ -217,7 +221,7 @@ Pure Python — no I/O, no async, no database calls.
 |---|---|---|
 | `metadata_db/` | SQLAlchemy 2 async + aiosqlite/asyncpg | Platform state repository |
 | `sqlserver/` | pyodbc (wrapped in `asyncio.get_running_loop().run_in_executor()`) | SQL Server connection + `sys.*` discovery |
-| `postgres/` | asyncpg connection pool | PostgreSQL connection + `information_schema` discovery; all DDL identifiers via `quote_pg_ident()` |
+| `postgres/` | asyncpg connection pool | PostgreSQL connection + `information_schema` discovery; all DDL identifiers via `quote_pg_ident()`; **`postgres_table_ddl.py`** reconstructs readable CREATE TABLE DDL without duplicate PK/index statements |
 | `ai/` | OpenAI / Anthropic / local LLMs | Advisory analysis only — never executes migration |
 | `temporal/` | Temporal.io SDK | Durable workflow execution |
 | `replication/` | `InMemoryChangeBus`, `LoopbackPublisher`, `ReplicationChangeConsumer`, `SqlServerWatermarkAdapter` | Capture → queue → apply pipeline |
@@ -279,12 +283,17 @@ POST /api/v1/migrations {source_conn, target_conn, tables[], masking_policy, req
   │
   ├─ _dispatch_go_migration_job (Python control plane)
   │    ├─ GoMigrationJobDispatcher.dispatch()
+  │    │    ├─ DeferredSchemaCatalogBuilder — discover identity, secondary indexes, FKs,
+  │    │    │   checks, defaults, triggers from SQL Server sys.* (stored in plan_config)
+  │    │    ├─ provision_target_tables() — minimal-load CREATE TABLE (columns + PK only)
   │    │    ├─ Builds JSON config (tables, chunk_size, parallel_workers, masking, idempotent, …)
   │    │    ├─ Persists migration_jobs.config + migration_table_plans rows
   │    │    └─ Sets job status QUEUED for Go worker claim
   │    └─ asyncio.create_task(watch_go_migration_job())
-  │         └─ Polls metadata until terminal status; runs L1 validate_table on COMPLETED;
-  │            fires audit + notification hooks
+  │         └─ Polls metadata until terminal status
+  │            ├─ L1 validate_table on COMPLETED (row-count parity)
+  │            ├─ PostMigrationFinalizer on COMPLETED + validation pass (optional)
+  │            └─ Audit + notification hooks
   │
   │  [Go migration-engine — data plane]
   │    ├─ MigrationJobClaimer polls metadata, claims QUEUED job
@@ -302,6 +311,37 @@ POST /api/v1/migrations {source_conn, target_conn, tables[], masking_policy, req
   │
 GET /api/v1/migrations/{id}/progress
   └─ Reads job + table_plans from metadata DB (written by Go worker)
+
+GET /api/v1/migrations/{id}/post-migration
+  └─ Deferred object inventory + per-object finalize status (from migration_jobs.config)
+
+POST /api/v1/migrations/{id}/post-migration/finalize
+  └─ Apply identity, indexes, FKs, checks, defaults (requires COMPLETED job)
+```
+
+### 4.2.1 Post-migration finalize flow
+
+```
+Migration COMPLETED + L1 validation passed
+  │
+  ├─ watch_go_migration_job() → _run_post_migration_finalize()  [if finalize_after=true]
+  │    └─ PostMigrationFinalizer.finalize_table() per table (ordered steps below)
+  │
+  └─ Or operator triggers manually:
+       POST /api/v1/migrations/{id}/post-migration/finalize {finalize_identities, …}
+            │
+            └─ UI: /migrations/{jobId}/post-migration
+
+Per table (PostMigrationFinalizer):
+  1. Identity columns  → ALTER COLUMN … ADD GENERATED BY DEFAULT AS IDENTITY + setval()
+  2. Secondary indexes → CREATE INDEX [CONCURRENTLY] (PK / columnstore / spatial skipped)
+  3. Foreign keys      → ADD CONSTRAINT … NOT VALID → VALIDATE CONSTRAINT
+  4. Check constraints → ADD CONSTRAINT … CHECK … NOT VALID → VALIDATE CONSTRAINT
+  5. Column defaults   → ALTER COLUMN … SET DEFAULT (transpiled expressions)
+  6. Triggers          → skipped by default (manual review; finalize_triggers=false)
+
+State persisted in migration_jobs.config.post_migration_finalize
+  { status, tables: { table: { category: { object_key: applied|failed|… } } } }
 ```
 
 ### 4.3 Schema Conversion Flow
@@ -484,10 +524,10 @@ All platform state lives in a single database (PostgreSQL in production, SQLite 
 | `rows_total` / `rows_migrated` | BIGINT | |
 | `tables_total` / `tables_done` | INTEGER | |
 | `started_at` / `completed_at` | TIMESTAMPTZ | |
-| `config` | JSON | Parallelism, chunk size, strategy |
+| `config` | JSON | Go dispatch JSON + **`finalize_options`** + **`post_migration_finalize`** state |
 
 #### `migration_table_plans`
-One row per table per job. Status transitions: `pending → running → completed | failed | stopped`. Tracks extraction strategy, row range, and per-table progress.
+One row per table per job. Status transitions: `pending → running → completed | failed | stopped`. Tracks extraction strategy, row range, and per-table progress. **`plan_config`** JSON holds column transforms/types and **`deferred_schema`** — the post-migration object inventory captured at dispatch from SQL Server (`DeferredSchemaCatalogBuilder`).
 
 #### `migration_commands`
 One row per job. Written by the Python API (pause/resume/stop); read by the Go engine. `acked_at` is set by the Go engine when the command is acted upon.
@@ -843,6 +883,67 @@ Go migration-engine (cmd/migration-engine)
 GET /api/v1/migrations/{id}/progress  ← Python reads metadata written by Go
 ```
 
+### Phased target DDL lifecycle
+
+Bulk data migration deliberately splits **load-time DDL** from **post-load DDL** so COPY/INSERT stays fast and identity values from the source can be inserted explicitly.
+
+| Phase | When | What is created on PostgreSQL | Module |
+|---|---|---|---|
+| **Minimal load schema** | Before Go COPY | Columns (plain types), **primary key only** — no identity, defaults, secondary indexes, FKs, checks, triggers | `target_table_provisioner.py` (`MIGRATION_LOAD_DDL_POLICY = minimal_load`) |
+| **Bulk data load** | Go worker | Rows copied with explicit source values (including identity column values) | `engine-go/internal/loader` |
+| **Row validation** | After COMPLETED | L1 row-count parity (source vs target) | `go_migration_job_watcher.py` |
+| **Post-migration finalize** | After validation pass (auto or manual) | Identity + sequence sync, secondary indexes, FKs, checks, defaults | `post_migration_finalizer.py` |
+
+**SQL Server → PostgreSQL identity mapping (finalize step only):**
+
+| SQL Server | PostgreSQL (after load) |
+|---|---|
+| `INT IDENTITY(1,1)` | `integer GENERATED BY DEFAULT AS IDENTITY` + `setval(pg_get_serial_sequence(…), GREATEST(MAX(col), seed))` |
+| `BIGINT IDENTITY(seed, increment)` | `bigint GENERATED BY DEFAULT AS IDENTITY (INCREMENT BY n …)` + `setval` |
+
+`GENERATED BY DEFAULT` (not `ALWAYS`) preserves SQL Server semantics: auto-fill when omitted, allow explicit inserts for admin/data-fix paths.
+
+**Index policy:** non-clustered secondary indexes from `sys.indexes` are **not** created during provisioning. At finalize, they are emitted via `PostMigrationDdlGenerator.generate_secondary_index()` (reuses `DdlGenerator.generate_index_ddl_from_discovery`). Unsupported types (columnstore, spatial, XML) are inventoried with `unsupported_reason` and skipped. Optional `CREATE INDEX CONCURRENTLY` via `create_indexes_concurrently` job flag.
+
+**Constraint policy:** FK and CHECK constraints use PostgreSQL `NOT VALID` → `VALIDATE CONSTRAINT` so validation runs after bulk load without blocking inserts during migration.
+
+### Post-migration finalize
+
+#### Domain layer (`domains/migration/`)
+
+| Module | Responsibility |
+|---|---|
+| `deferred_schema_catalog.py` | `DeferredSchemaCatalogBuilder` queries `sys.identity_columns`, `sys.indexes`, `sys.foreign_keys`, `sys.check_constraints`, `sys.default_constraints`, `sys.triggers`; produces `DeferredTableSchema` dataclass serialized to `plan_config.deferred_schema` |
+| `post_migration_ddl_generator.py` | Emits finalize DDL: identity alter + setval, indexes, FK/CHECK NOT VALID pairs, column defaults (e.g. `getdate()` → `CURRENT_TIMESTAMP`) |
+| `post_migration_finalize_models.py` | `PostMigrationFinalizeOptions`, `PostMigrationFinalizeState`, per-object status enums (`pending` / `applied` / `failed` / `unsupported` / `skipped`) |
+
+#### Application layer (`application/go_engine_migration/`)
+
+| Module | Responsibility |
+|---|---|
+| `target_table_provisioner.py` | `build_create_table_ddl()` — minimal load schema only |
+| `post_migration_finalizer.py` | `PostMigrationFinalizer.finalize_table()`, `finalize_migration_job()`, `get_finalize_status()` |
+| `go_migration_job_dispatcher.py` | Captures deferred catalog at dispatch; stores in `migration_table_plans.plan_config` |
+| `go_migration_job_watcher.py` | Runs finalize after successful L1 validation when `finalize_after=true` |
+
+#### API
+
+| Method | Path | Role |
+|---|---|---|
+| `GET` | `/api/v1/migrations/{job_id}/post-migration` | Inventory + applied status per table/object |
+| `POST` | `/api/v1/migrations/{job_id}/post-migration/finalize` | Operator-triggered finalize with option overrides |
+
+`POST /api/v1/migrations` accepts finalize flags: `finalize_after`, `finalize_identities`, `finalize_indexes`, `finalize_foreign_keys`, `finalize_check_constraints`, `finalize_defaults`, `finalize_triggers`, `create_indexes_concurrently`.
+
+#### UI
+
+- **Job detail** (`/migrations/{jobId}`) — link to post-migration finalize
+- **Finalize dashboard** (`/migrations/{jobId}/post-migration`) — per-table deferred inventory, per-object status, option checkboxes, **Run post-migration finalize** action
+
+#### Triggers
+
+Triggers are **discovered and displayed** in the finalize inventory but **not auto-applied by default** (`finalize_triggers=false`). T-SQL → PL/pgSQL trigger conversion remains in the transpilation pipeline; operators enable trigger finalize only after manual review.
+
 **Local dev:** `python start.py --all` starts API + Go engine + UI. **Docker:** `docker compose up` includes the `migration-engine` service.
 
 ---
@@ -1087,6 +1188,7 @@ CDC_STREAMING → PAUSED/STOPPING/FAILED/COMPLETED`) rejects illegal transitions
 | **Chunk boundary semantics** | Half-open `[start, end)` in planner + extract query | Prevents silent row skips when chunk end was treated as inclusive |
 | **Product editions** | `MIGRATION_EDITION` + HMAC `MIGRATION_LICENSE_KEY` | Gates features per SKU (assess/migrate/replicate/enterprise); blocks DEV-LOCAL in production |
 | **Pre-migration snapshot** | `SnapshotGate` + `require_target_snapshot` on API | Ensures target pg_dump exists before destructive bulk load; dev override via env |
+| **Phased target DDL** | Minimal load schema + post-migration finalize | Identity, secondary indexes, FKs, and checks deferred until after bulk COPY so inserts stay fast and source identity values load explicitly; `GENERATED BY DEFAULT AS IDENTITY` + `setval` applied only after validation |
 | **PII masking** | Column transforms in Go dispatch JSON | Compliance — mask at extract/transform before load; auto-discovery via `pii_classifier` |
 | **Observability** | `/metrics` Prometheus text + `GET /admin/slos` | Operators scrape counters; SLO doc lives in code + OPERATIONS.md |
 | **Cutover rollback window** | `cutover_checkpoints.committed=false` for 24 h | Operators can rollback to pre-cutover state before commit closes the window |
@@ -1106,9 +1208,10 @@ CDC_STREAMING → PAUSED/STOPPING/FAILED/COMPLETED`) rejects illegal transitions
 | Hardening (rate limiting, Docker healthchecks, startup checks, DDL quoting, secrets rotation, chunk boundary fix) | ✅ Done |
 | Go data plane: planner, extractor, loader, queue, worker loop, dispatch parity | ✅ Done |
 | Go orchestration: bbolt queue + adaptive sizer wired through table movers | ✅ Done |
-| Python control plane: dispatch, commands, watcher, snapshot gate, PII masking | ✅ Done |
+| Python control plane: dispatch, commands, watcher, snapshot gate, PII masking, **post-migration finalize** | ✅ Done |
 | L1–L4 validation (row count, aggregates, chunk hash, sampling, row-sample compare, equivalence harnesses) | ✅ Done |
 | Schema comparison (comparison tree, significant diffs, dual-pane UI) | ✅ Done |
+| Post-migration finalize (deferred schema catalog, identity/index/FK/check/default apply, UI dashboard) | ✅ Done |
 | Migration wizard auto-assessment + per-table concerns | ✅ Done |
 | Replication control plane (API, service, runtime, UI, CDC preflight, schema drift) | ✅ Done |
 | Cutover workflow (checkpoints, rollback, connection-switch manifest, write-freeze) | ✅ Done |
@@ -1120,3 +1223,16 @@ CDC_STREAMING → PAUSED/STOPPING/FAILED/COMPLETED`) rejects illegal transitions
 | CDC live I/O in Go data plane (`go-mssqldb` read + `pgx/v5` apply around `cdc` package) | 🔲 Pending |
 | Grafana dashboards + OTLP provider init in the Go binary | 🔲 Pending |
 | Expanded live integration tests (full docker-compose stack; golden e2e in weekly CI) | 🟡 Partial |
+
+---
+
+## Related documentation
+
+| Document | Purpose |
+|---|---|
+| [README.md](README.md) | Quickstart, service URLs, configuration |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup and pull request guidelines |
+| [SECURITY.md](SECURITY.md) | Vulnerability reporting |
+| [docs/SECURITY.md](docs/SECURITY.md) | Production hardening and compliance |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Runbooks and SLOs |
+| [docs/PACKAGING.md](docs/PACKAGING.md) | Editions, licensing, Helm |

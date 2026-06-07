@@ -91,6 +91,7 @@ class TableAssessment:
     lob_columns: list[str] = field(default_factory=list)
     ci_collation_columns: list[str] = field(default_factory=list)
     blocker_types: list[str] = field(default_factory=list)
+    unsupported_type_columns: list[dict[str, str]] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     prerequisites: list[str] = field(default_factory=list)
@@ -152,6 +153,7 @@ class AssessmentEngine:
         lob_cols: list[str] = []
         ci_cols: list[str] = []
         blocker_types: list[str] = []
+        unsupported_type_columns: list[dict[str, str]] = []
         blockers: list[str] = []
         warnings: list[str] = []
         prereqs: list[str] = []
@@ -163,9 +165,12 @@ class AssessmentEngine:
             # ---- Blocker types ----
             if type_lower in _BLOCKER_TYPES:
                 blocker_types.append(col.column_name)
+                unsupported_type_columns.append(
+                    {"column_name": col.column_name, "source_type": type_lower}
+                )
                 blockers.append(
                     f"Column '{col.column_name}' uses unsupported type '{type_lower}' "
-                    f"— requires manual conversion (hierarchyid→ltree, geography/geometry→PostGIS)"
+                    f"— choose a PostgreSQL target type in the migration wizard to proceed"
                 )
                 score += 40
 
@@ -304,6 +309,7 @@ class AssessmentEngine:
             lob_columns=lob_cols,
             ci_collation_columns=ci_cols,
             blocker_types=blocker_types,
+            unsupported_type_columns=unsupported_type_columns,
             blockers=blockers,
             warnings=warnings,
             prerequisites=prereqs,

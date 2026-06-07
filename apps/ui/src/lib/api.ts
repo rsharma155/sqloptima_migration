@@ -144,6 +144,53 @@ export interface MigrationRequest {
   validate_after?: boolean;
   require_target_snapshot?: boolean;
   snapshot_ref?: string | null;
+  table_policies?: Record<string, string>;
+  column_type_overrides?: Record<string, string>;
+  procedures?: string[];
+  functions?: string[];
+  migrate_procedural_after_tables?: boolean;
+}
+
+export type TargetTablePolicy =
+  | "use_existing"
+  | "drop_empty_recreate"
+  | "truncate_reload";
+
+export interface MigrationPreflightTable {
+  table_name: string;
+  exists: boolean;
+  row_count: number;
+  requires_action: boolean;
+  suggested_policy: TargetTablePolicy | null;
+  message: string;
+}
+
+export interface PausedMigrationMatch {
+  job_id: string;
+  status: string;
+  overlapping_tables: Array<{
+    table_name: string;
+    status?: string;
+    rows_migrated: number;
+    row_count_estimate: number;
+  }>;
+  rows_migrated: number;
+  message: string;
+}
+
+export interface MigrationPreflightResponse {
+  tables: MigrationPreflightTable[];
+  paused_jobs: PausedMigrationMatch[];
+  has_conflicts: boolean;
+  can_start_without_prompt: boolean;
+}
+
+export interface MigrationPreflightRequest {
+  source_connection_id: string;
+  target_connection_id: string;
+  tables: string[];
+  schema?: string;
+  target_schema?: string;
 }
 
 export interface MigrationResponse {
@@ -168,6 +215,56 @@ export interface MigrationResponse {
     rows_migrated?: number;
     row_count_estimate?: number;
   }>;
+  procedural_migration?: ProceduralMigrationStatus | null;
+}
+
+export interface ProceduralMigrationObjectResult {
+  name: string;
+  schema_name: string;
+  object_type: string;
+  status: string;
+  success: boolean;
+  warnings: string[];
+  errors: string[];
+  manual_review_required: boolean;
+  postgres_syntax_valid: boolean;
+  converted_sql?: string;
+  target_validated?: boolean;
+  runtime_smoke_executed?: boolean;
+  runtime_smoke_passed?: boolean;
+  runtime_smoke_skipped?: boolean;
+  runtime_smoke_message?: string;
+}
+
+export interface ProceduralMigrationStatus {
+  status: string;
+  source_schema: string;
+  target_schema: string;
+  selected_procedures: string[];
+  selected_functions: string[];
+  auto_migrate_after_tables: boolean;
+  last_error?: string | null;
+  objects: Record<string, ProceduralMigrationObjectResult>;
+  has_selection: boolean;
+}
+
+export interface ProceduralPreviewObject {
+  name: string;
+  object_type: "procedure" | "function";
+}
+
+export interface ProceduralPreviewItem {
+  name: string;
+  object_type: string;
+  schema_name: string;
+  target_schema: string;
+  success: boolean;
+  warnings: string[];
+  errors: string[];
+  converted_sql: string;
+  manual_review_required: boolean;
+  postgres_syntax_valid: boolean;
+  target_validated?: boolean;
 }
 
 export interface MigrationLogEntry {
@@ -190,6 +287,29 @@ export interface ProgressResponse {
 
 export async function startMigration(req: MigrationRequest): Promise<MigrationResponse> {
   return request("/api/v1/migrations", { method: "POST", body: req });
+}
+
+export async function preflightMigration(
+  req: MigrationPreflightRequest,
+): Promise<MigrationPreflightResponse> {
+  return request("/api/v1/migrations/preflight", { method: "POST", body: req });
+}
+
+export interface ColumnTypeOverrideOption {
+  option_id: string;
+  pg_ddl_type: string;
+  label: string;
+  description: string;
+  requires_extension: string | null;
+  fidelity: string;
+}
+
+export interface ColumnTypeOverrideCatalog {
+  source_types: Record<string, ColumnTypeOverrideOption[]>;
+}
+
+export async function getColumnTypeOverrideOptions(): Promise<ColumnTypeOverrideCatalog> {
+  return request("/api/v1/migrations/column-type-override-options");
 }
 
 export async function getMigrations(): Promise<MigrationResponse[]> {
@@ -222,10 +342,83 @@ export async function stopMigration(jobId: string): Promise<{ job_id: string; st
   return request(`/api/v1/migrations/${jobId}/stop`, { method: "POST" });
 }
 
+export async function previewProceduralMigration(req: {
+  source_connection_id: string;
+  schema?: string;
+  target_schema?: string;
+  objects: ProceduralPreviewObject[];
+}): Promise<{ items: ProceduralPreviewItem[] }> {
+  return request("/api/v1/migrations/procedural/preview", { method: "POST", body: req });
+}
+
+export async function getProceduralMigrationStatus(
+  jobId: string,
+): Promise<ProceduralMigrationStatus> {
+  return request(`/api/v1/migrations/${jobId}/procedural`);
+}
+
+export async function runProceduralMigration(
+  jobId: string,
+): Promise<ProceduralMigrationStatus> {
+  return request(`/api/v1/migrations/${jobId}/procedural/migrate`, { method: "POST" });
+}
+
 export async function provisionMigrationTables(
   jobId: string,
 ): Promise<{ job_id: string; created_tables: string[]; message: string }> {
   return request(`/api/v1/migrations/${jobId}/provision-tables`, { method: "POST" });
+}
+
+export interface PostMigrationFinalizeOptions {
+  finalize_identities?: boolean;
+  finalize_indexes?: boolean;
+  finalize_foreign_keys?: boolean;
+  finalize_check_constraints?: boolean;
+  finalize_defaults?: boolean;
+  finalize_triggers?: boolean;
+  create_indexes_concurrently?: boolean;
+}
+
+export interface PostMigrationTableInventory {
+  identities: string[];
+  indexes: Array<{ name: string; unsupported: string | null }>;
+  foreign_keys: string[];
+  check_constraints: string[];
+  defaults: string[];
+  triggers: string[];
+}
+
+export interface PostMigrationTableStatus {
+  table_name: string;
+  source_schema: string;
+  target_schema: string;
+  inventory: PostMigrationTableInventory;
+  applied: Record<string, Record<string, string>>;
+}
+
+export interface PostMigrationStatusResponse {
+  job_id: string;
+  found: boolean;
+  migration_status: string;
+  finalize_status: string;
+  last_error: string | null;
+  options: Record<string, boolean>;
+  tables: PostMigrationTableStatus[];
+}
+
+export async function getPostMigrationStatus(jobId: string): Promise<PostMigrationStatusResponse> {
+  return request(`/api/v1/migrations/${jobId}/post-migration`);
+}
+
+export async function runPostMigrationFinalize(
+  jobId: string,
+  options: PostMigrationFinalizeOptions = {},
+): Promise<{ job_id: string; status: string; last_error: string | null; tables: Record<string, unknown> }> {
+  return request(`/api/v1/migrations/${jobId}/post-migration/finalize`, {
+    method: "POST",
+    body: options,
+    timeout: 120000,
+  });
 }
 
 // ---- SQL Conversion ----
@@ -458,6 +651,31 @@ export async function testRawConnection(config: ConnectionConfig): Promise<{ sta
   return request("/api/v1/connections/test-raw", { method: "POST", body: config });
 }
 
+export interface PrivilegeScriptInfo {
+  engine: string;
+  title: string;
+  recommended_login?: string;
+  recommended_role?: string;
+  default_schema?: string;
+  privileges: string[];
+  capabilities: string[];
+  not_granted: string[];
+  file: string;
+  purpose: string;
+  variables: Record<string, string>;
+  run_example: string;
+  content: string;
+}
+
+export interface PrivilegeScriptBundle {
+  source: PrivilegeScriptInfo;
+  target: PrivilegeScriptInfo;
+}
+
+export async function getConnectionPrivilegeScripts(): Promise<PrivilegeScriptBundle> {
+  return request("/api/v1/connections/privilege-scripts");
+}
+
 // ---- Projects ----
 
 export interface Project {
@@ -505,6 +723,7 @@ export interface TableAssessment {
   lob_columns: string[];
   ci_collation_columns: string[];
   blocker_types: string[];
+  unsupported_type_columns?: Array<{ column_name: string; source_type: string }>;
   blockers: string[];
   warnings: string[];
   prerequisites: string[];
@@ -617,6 +836,8 @@ export async function compareRowSamples(
 export interface ValidationReportJson {
   report_id: string;
   generated_at: string;
+  validation_level?: number;
+  validation_level_label?: string;
   overall_status: string;
   summary: {
     total_objects: number;
@@ -626,6 +847,15 @@ export interface ValidationReportJson {
     duration_ms?: number;
   };
   results: ValidationReportResult[];
+}
+
+export interface AggregateColumnResult {
+  column: string;
+  status: string;
+  source?: Record<string, unknown>;
+  target?: Record<string, unknown>;
+  mismatches?: string[];
+  reason?: string;
 }
 
 export async function getValidationRunReport(
@@ -750,10 +980,33 @@ export interface AlertsResponse {
 }
 
 export interface AlertConfigResponse {
+  webhook_enabled: boolean;
   webhook_configured: boolean;
+  webhook_url: string;
+  email_enabled: boolean;
   email_configured: boolean;
   email_to: string | null;
+  smtp_host: string;
+  smtp_port: number;
+  smtp_user: string;
+  smtp_password_set: boolean;
+  alert_email_to: string;
+  alert_email_from: string;
   channels_active: boolean;
+  source: "database" | "environment" | "none";
+  updated_at: string | null;
+}
+
+export interface AlertConfigUpdateRequest {
+  webhook_enabled: boolean;
+  webhook_url: string;
+  email_enabled: boolean;
+  smtp_host: string;
+  smtp_port: number;
+  smtp_user: string;
+  smtp_password: string;
+  alert_email_to: string;
+  alert_email_from: string;
 }
 
 export async function getPlatformAlerts(): Promise<AlertsResponse> {
@@ -762,6 +1015,41 @@ export async function getPlatformAlerts(): Promise<AlertsResponse> {
 
 export async function getAlertConfig(): Promise<AlertConfigResponse> {
   return request("/api/v1/alerts/config");
+}
+
+export async function saveAlertConfig(
+  body: AlertConfigUpdateRequest,
+): Promise<AlertConfigResponse> {
+  return request("/api/v1/alerts/config", { method: "PUT", body });
+}
+
+export interface MigrationSettingsResponse {
+  source_throttle_enabled: boolean;
+  small_table_delay_sec: number;
+  large_table_delay_sec: number;
+  large_table_row_threshold: number;
+  large_table_size_mb_threshold: number;
+  max_tables_per_job: number;
+  updated_at: string | null;
+}
+
+export interface MigrationSettingsUpdateRequest {
+  source_throttle_enabled: boolean;
+  small_table_delay_sec: number;
+  large_table_delay_sec: number;
+  large_table_row_threshold: number;
+  large_table_size_mb_threshold: number;
+  max_tables_per_job: number;
+}
+
+export async function getMigrationSettings(): Promise<MigrationSettingsResponse> {
+  return request("/api/v1/admin/migration-settings");
+}
+
+export async function saveMigrationSettings(
+  body: MigrationSettingsUpdateRequest,
+): Promise<MigrationSettingsResponse> {
+  return request("/api/v1/admin/migration-settings", { method: "PUT", body });
 }
 
 export async function testAlertChannels(
@@ -777,6 +1065,26 @@ export interface ReplicationConcern {
   message: string;
   table_name?: string | null;
   property_name?: string | null;
+}
+
+export interface ReplicationConnectionSummary {
+  connection_id: string;
+  name: string;
+  host: string;
+  port?: number | string;
+  database: string;
+  type: string;
+}
+
+export interface ReplicationTableProgress {
+  table_schema: string;
+  table_name: string;
+  events_captured: number;
+  batches_polled: number;
+  batches_with_changes: number;
+  last_batch_size: number;
+  last_position?: string | null;
+  last_captured_at?: string | null;
 }
 
 export interface ReplicationStream {
@@ -797,6 +1105,49 @@ export interface ReplicationStream {
   last_checkpoint_lsn?: string | null;
   started_at?: string | null;
   stopped_at?: string | null;
+  is_active?: boolean;
+  is_running?: boolean;
+  is_paused?: boolean;
+  pending_lag?: number;
+}
+
+export interface ReplicationStreamDetails extends ReplicationStream {
+  source_connection?: ReplicationConnectionSummary | null;
+  target_connection?: ReplicationConnectionSummary | null;
+  target_tables: ReplicationTargetTableStatus[];
+  checkpoints: Array<{
+    table_schema: string;
+    table_name: string;
+    rows_applied: number;
+    last_checkpoint_lsn: string;
+    updated_at?: string | null;
+  }>;
+  operations: { insert: number; update: number; delete: number };
+  duplicates_skipped: number;
+  apply_failures: number;
+  batches_polled: number;
+  batches_with_changes: number;
+  batch_size: number;
+  poll_interval_ms: number;
+  table_progress: ReplicationTableProgress[];
+  capture_errors: string[];
+  apply_errors: string[];
+  all_errors: string[];
+  mode: string;
+  runtime_active?: boolean;
+  can_start?: boolean;
+}
+
+export interface ReplicationSummary {
+  total_streams: number;
+  active_streams: number;
+  stopped_streams: number;
+  events_captured: number;
+  events_applied: number;
+  queue_depth: number;
+  pending_lag: number;
+  live: boolean;
+  updated_at: string;
 }
 
 export interface CreateReplicationStreamRequest {
@@ -816,6 +1167,41 @@ export interface ReplicationCdcStatus {
   message: string | null;
 }
 
+export interface ReplicationTargetTableStatus {
+  table_name: string;
+  exists: boolean;
+  target_table_name?: string | null;
+  found_in_schema?: string | null;
+  row_count: number;
+  schema_mismatch: boolean;
+  ready: boolean;
+  message: string;
+}
+
+export interface UpdateReplicationStreamRequest {
+  name?: string;
+  source_connection_id?: string;
+  target_connection_id?: string;
+  tables?: string[];
+  source_schema?: string;
+  target_schema?: string;
+}
+
+export async function getReplicationTargetStatus(
+  targetConnectionId: string,
+  targetSchema: string,
+  tables: string[],
+  sourceSchema = "dbo",
+): Promise<ReplicationTargetTableStatus[]> {
+  const params = new URLSearchParams({
+    target_connection_id: targetConnectionId,
+    target_schema: targetSchema,
+    source_schema: sourceSchema,
+    tables: tables.join(","),
+  });
+  return request(`/api/v1/replication/target-status?${params.toString()}`);
+}
+
 export async function getReplicationCdcStatus(
   sourceConnectionId: string,
   sourceSchema: string,
@@ -831,18 +1217,43 @@ export async function getReplicationCdcStatus(
   return request(`/api/v1/replication/cdc-status?${params.toString()}`);
 }
 
+export async function getReplicationSummary(): Promise<ReplicationSummary> {
+  return request("/api/v1/replication/summary");
+}
+
 export async function listReplicationStreams(): Promise<ReplicationStream[]> {
   return request("/api/v1/replication/streams");
+}
+
+export async function getReplicationStreamDetails(
+  streamId: string,
+): Promise<ReplicationStreamDetails> {
+  return request(`/api/v1/replication/streams/${streamId}/details`);
+}
+
+export async function refreshReplicationStreamConcerns(
+  streamId: string,
+): Promise<{ concerns: ReplicationConcern[]; stream: ReplicationStream }> {
+  return request(`/api/v1/replication/streams/${streamId}/refresh-concerns`, {
+    method: "POST",
+  });
 }
 
 export async function createReplicationStream(
   req: CreateReplicationStreamRequest,
 ): Promise<ReplicationStream> {
-  return request("/api/v1/replication/streams", { method: "POST", body: req });
+  return request("/api/v1/replication/streams", {
+    method: "POST",
+    body: req,
+    timeout: 90_000,
+  });
 }
 
 export async function startReplicationStream(streamId: string): Promise<ReplicationStream> {
-  return request(`/api/v1/replication/streams/${streamId}/start`, { method: "POST" });
+  return request(`/api/v1/replication/streams/${streamId}/start`, {
+    method: "POST",
+    timeout: 90_000,
+  });
 }
 
 export async function stopReplicationStream(streamId: string): Promise<ReplicationStream> {
@@ -855,6 +1266,13 @@ export async function pauseReplicationStream(streamId: string): Promise<Replicat
 
 export async function resumeReplicationStream(streamId: string): Promise<ReplicationStream> {
   return request(`/api/v1/replication/streams/${streamId}/resume`, { method: "POST" });
+}
+
+export async function updateReplicationStream(
+  streamId: string,
+  req: UpdateReplicationStreamRequest,
+): Promise<ReplicationStream> {
+  return request(`/api/v1/replication/streams/${streamId}`, { method: "PATCH", body: req });
 }
 
 export async function deleteReplicationStream(streamId: string): Promise<{ deleted: boolean }> {

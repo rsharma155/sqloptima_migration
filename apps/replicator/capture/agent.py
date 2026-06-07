@@ -50,6 +50,9 @@ class CaptureAgent:
         self._last_positions: dict[str, bytes | None] = {}
         self.progress: dict[str, dict[str, Any]] = {}
         self.events_captured = 0
+        self.batches_polled = 0
+        self.batches_with_changes = 0
+        self.capture_errors: list[str] = []
         # Fix 2.5: track tasks so stop() can cancel them individually and await completion.
         self._tasks: list[asyncio.Task] = []
 
@@ -156,8 +159,12 @@ class CaptureAgent:
                     await asyncio.sleep(self._poll_interval)
             except asyncio.CancelledError:
                 break
-            except Exception:
+            except Exception as exc:
                 logger.exception("Error in capture loop for %s", table.qualified_name)
+                msg = f"{table.qualified_name}: {exc}"
+                self.capture_errors.append(msg)
+                if len(self.capture_errors) > 20:
+                    self.capture_errors.pop(0)
                 await asyncio.sleep(self._poll_interval * 5)
 
     async def _capture_and_publish(self, table: TableInfo) -> int:
@@ -176,7 +183,26 @@ class CaptureAgent:
             batch_size=self._batch_size,
         )
 
+        self.batches_polled += 1
+        table_stats = self.progress.setdefault(
+            table.qualified_name,
+            {
+                "table_schema": table.schema_name,
+                "table_name": table.table_name,
+                "events_captured": 0,
+                "batches_polled": 0,
+                "batches_with_changes": 0,
+                "last_batch_size": 0,
+                "last_position": None,
+                "last_captured_at": None,
+            },
+        )
+        table_stats["batches_polled"] += 1
+
         if not batch.changes:
+            if batch.new_position:
+                self._last_positions[table.qualified_name] = batch.new_position.serialize()
+                table_stats["last_position"] = batch.new_position.serialize().hex()
             return 0
 
         for event in batch.changes:
@@ -187,13 +213,15 @@ class CaptureAgent:
             batch.new_position.serialize() if batch.new_position else None
         )
 
-        self.events_captured += len(batch.changes)
-        self.progress[table.qualified_name] = {
-            "events_captured": self.events_captured,
-            "last_position": (
-                batch.new_position.serialize().hex() if batch.new_position else None
-            ),
-            "last_captured_at": datetime.now(UTC).isoformat(),
-        }
+        chunk_size = len(batch.changes)
+        self.events_captured += chunk_size
+        self.batches_with_changes += 1
+        table_stats["events_captured"] += chunk_size
+        table_stats["batches_with_changes"] += 1
+        table_stats["last_batch_size"] = chunk_size
+        table_stats["last_position"] = (
+            batch.new_position.serialize().hex() if batch.new_position else None
+        )
+        table_stats["last_captured_at"] = datetime.now(UTC).isoformat()
 
-        return len(batch.changes)
+        return chunk_size

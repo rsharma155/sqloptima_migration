@@ -7,6 +7,7 @@ export type MigrationStatus =
   | "running"
   | "paused"
   | "completed"
+  | "partial"
   | "failed"
   | "stopped"
   | "cancelled";
@@ -17,6 +18,7 @@ const STATUS_LABELS: Record<string, string> = {
   running: "Running",
   paused: "Paused",
   completed: "Completed",
+  partial: "Partial",
   failed: "Failed",
   stopped: "Stopped",
   cancelled: "Cancelled",
@@ -27,6 +29,7 @@ const STATUS_VARIANT: Record<string, "default" | "success" | "warning" | "destru
   running: "warning",
   paused: "warning",
   completed: "success",
+  partial: "warning",
   failed: "destructive",
   stopped: "default",
   cancelled: "default",
@@ -63,5 +66,5 @@ export function isLiveMigrationDetail(status: string): boolean {
 
 export function isTerminalMigration(status: string): boolean {
   const s = status.toLowerCase();
-  return s === "completed" || s === "failed" || s === "stopped" || s === "cancelled";
+  return s === "completed" || s === "partial" || s === "failed" || s === "stopped" || s === "cancelled";
 }

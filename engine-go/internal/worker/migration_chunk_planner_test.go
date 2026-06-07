@@ -18,6 +18,10 @@ func TestClassifySQLType(t *testing.T) {
 		"date":                   ChunkKeyDateTime,
 		"bigint":                 ChunkKeyInteger,
 		"int":                    ChunkKeyInteger,
+		"nvarchar(3)":            ChunkKeyString,
+		"nchar(3)":               ChunkKeyString,
+		"varchar(15)":            ChunkKeyString,
+		"hierarchyid":            ChunkKeyString,
 		"":                       ChunkKeyInteger,
 	}
 	for in, want := range cases {
@@ -37,8 +41,8 @@ func TestBuildExtractOptions(t *testing.T) {
 	if opts.WhereClause != "active = 1" || opts.OrderColumn != "created_at" || opts.MaxDOP != 4 {
 		t.Fatalf("unexpected opts: %+v", opts)
 	}
-	if !opts.NoLock || !opts.UUIDKeyRange {
-		t.Fatalf("expected nolock and uuid key range, got %+v", opts)
+	if !opts.NoLock || !opts.UUIDKeyRange || !opts.InlineTextLOBs || !opts.InlineBinaryLOBs {
+		t.Fatalf("expected nolock, uuid key range, and inline LOBs, got %+v", opts)
 	}
 }
 
@@ -55,10 +59,20 @@ func TestResolveConflictColumns(t *testing.T) {
 	}
 }
 
+func TestBuildExtractOptionsStringKey(t *testing.T) {
+	opts := BuildExtractOptions(GoTableDispatchPayload{}, ChunkKeyInfo{Kind: ChunkKeyString}, false)
+	if !opts.StringKeyRange {
+		t.Fatal("string key must set StringKeyRange")
+	}
+	if opts.UUIDKeyRange {
+		t.Fatal("string key must not set UUIDKeyRange")
+	}
+}
+
 func TestBuildExtractOptionsIntegerKey(t *testing.T) {
 	opts := BuildExtractOptions(GoTableDispatchPayload{}, ChunkKeyInfo{Kind: ChunkKeyInteger}, false)
-	if opts.UUIDKeyRange {
-		t.Fatal("integer key must not set UUIDKeyRange")
+	if opts.UUIDKeyRange || opts.StringKeyRange {
+		t.Fatal("integer key must not set lexical key range flags")
 	}
 	_ = extractor.ExtractOptions{}
 }

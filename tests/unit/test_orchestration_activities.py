@@ -72,7 +72,6 @@ class TestDiscoverObjects:
         assert result[1]["object_type"] == "VIEW"
         assert result[2]["object_type"] == "PROCEDURE"
         assert result[3]["object_type"] == "FUNCTION"
-        mock_conn.connect.assert_called_once()
         mock_conn.disconnect.assert_called_once()
 
     @pytest.mark.asyncio
@@ -176,7 +175,6 @@ class TestPlanChunks:
         assert result["status"] == "planned"
         assert result["total_chunks"] == 2
         assert result["total_rows_estimate"] == 5000
-        mock_conn.connect.assert_called_once()
         mock_conn.disconnect.assert_called_once()
 
     @pytest.mark.asyncio
@@ -264,14 +262,11 @@ class TestMigrateTable:
 
     @pytest.mark.asyncio
     async def test_migrate_returns_error_on_exception(self):
-        mock_source = AsyncMock()
-        mock_source.connect.side_effect = Exception("Connection broken")
-
         with (
             patch("domains.orchestration.activities._resolve_sqlserver_connector") as MockSrc,
             patch("domains.orchestration.activities._resolve_postgres_connector") as MockTgt,
         ):
-            MockSrc.return_value = mock_source
+            MockSrc.side_effect = Exception("Connection broken")
             MockTgt.return_value = AsyncMock()
 
             result = await migrate_table("src", "tgt", "dbo", "failing", ["id"], 100, 4)
@@ -292,7 +287,7 @@ class TestValidateTable:
             MockSrc.return_value = mock_source
             MockTgt.return_value = mock_target
 
-            mock_source.execute.return_value = [{"cnt": 100}]
+            mock_source.execute.return_value = [{"row_count": 100}]
             mock_target.execute.return_value = [{"cnt": 100}]
 
             result = await validate_table("src", "tgt", "dbo", "users")
@@ -312,29 +307,88 @@ class TestValidateTable:
             MockSrc.return_value = mock_source
             MockTgt.return_value = mock_target
 
-            mock_source.execute.return_value = [{"cnt": 100}]
-            mock_target.execute.return_value = [{"cnt": 95}]
+            mock_source.execute.return_value = [{"row_count": 1000}]
+            mock_target.execute.return_value = [{"cnt": 500}]
 
             result = await validate_table("src", "tgt", "dbo", "users")
         assert result["status"] == "failed"
-        assert result["source_count"] == 100
-        assert result["target_count"] == 95
+        assert result["source_count"] == 1000
+        assert result["target_count"] == 500
 
     @pytest.mark.asyncio
-    async def test_error_returns_status_error(self):
+    async def test_uses_expected_row_count_from_metadata(self):
         mock_source = AsyncMock()
-        mock_source.execute.side_effect = Exception("Source unreachable")
+        mock_target = AsyncMock()
 
         with (
             patch("domains.orchestration.activities._resolve_sqlserver_connector") as MockSrc,
             patch("domains.orchestration.activities._resolve_postgres_connector") as MockTgt,
         ):
             MockSrc.return_value = mock_source
-            MockTgt.return_value = AsyncMock()
+            MockTgt.return_value = mock_target
+            mock_target.execute.return_value = [{"cnt": 250}]
+
+            result = await validate_table(
+                "src", "tgt", "dbo", "users", expected_row_count=250,
+            )
+        assert result["status"] == "passed"
+        assert result["source_count_basis"] == "migration_metadata"
+        MockSrc.assert_not_called()
+        mock_source.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resolve_sqlserver_connector_applies_trust_certificate(self):
+        resolved = {
+            "host": "localhost",
+            "port": 1433,
+            "database": "db",
+            "username": "sa",
+            "password": "pw",
+            "ssl_enabled": True,
+            "trust_server_certificate": True,
+        }
+        with (
+            patch(
+                "application.workflow_bridge_service.WorkflowBridgeService",
+            ) as MockBridge,
+            patch(
+                "infrastructure.sqlserver.sqlserver_connector.SqlServerConnector",
+            ) as MockConnector,
+            patch(
+                "infrastructure.sqlserver.sqlserver_connector.sqlserver_config_from_resolved",
+            ) as mock_cfg_fn,
+        ):
+            mock_cfg_fn.return_value = MagicMock()
+            bridge = MockBridge.return_value
+            bridge.resolve_connection = AsyncMock(return_value=resolved)
+            MockConnector.return_value.connect = AsyncMock()
+
+            from domains.orchestration.activities import _resolve_sqlserver_connector
+
+            await _resolve_sqlserver_connector("conn-id", "Sales")
+
+        mock_cfg_fn.assert_called_once_with(
+            resolved,
+            password="pw",
+            schema="Sales",
+        )
+
+    @pytest.mark.asyncio
+    async def test_error_returns_status_error(self):
+        mock_source = AsyncMock()
+        mock_target = AsyncMock()
+        mock_target.execute.side_effect = Exception("Target unreachable")
+
+        with (
+            patch("domains.orchestration.activities._resolve_sqlserver_connector") as MockSrc,
+            patch("domains.orchestration.activities._resolve_postgres_connector") as MockTgt,
+        ):
+            MockSrc.return_value = mock_source
+            MockTgt.return_value = mock_target
 
             result = await validate_table("src", "tgt", "dbo", "users")
         assert result["status"] == "error"
-        assert "Source unreachable" in result["error"]
+        assert "Target unreachable" in result["error"]
 
 
 class TestHelpers:
@@ -360,7 +414,7 @@ class TestHelpers:
         assert count == 5000
 
     @pytest.mark.asyncio
-    async def test_get_approximate_row_count_fallback(self):
+    async def test_get_approximate_row_count_falls_back_to_count(self):
         source = AsyncMock()
         source.execute.side_effect = [
             Exception("partitions fail"),

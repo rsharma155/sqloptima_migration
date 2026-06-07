@@ -1,6 +1,6 @@
 """
 Module: application/validation_service.py
-Purpose: Orchestrates L1–L4 validation levels against a completed (or in-progress)
+Purpose: Orchestrates L1–L3 validation levels against a completed (or in-progress)
          migration job.  Each invocation creates a ValidationRunRecord, runs the
          requested level, persists per-table mismatches, and marks the run
          COMPLETED or FAILED.  Report export (JSON/CSV/HTML) is provided via
@@ -16,19 +16,18 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from domains.validation.l3_l4_validators import (
-    L3ChunkHashValidator,
-    L4StatisticalSamplingValidator,
-)
+from domains.validation.l3_l4_validators import L3ChunkHashValidator
 from domains.validation.validation_engine import (
     AggregateValidator,
     RowCountValidator,
-    ValidationEngine,
     ValidationReport,
     ValidationResult,
     ValidationStatus,
 )
-from domains.validation.validation_report_exporter import ValidationReportExporter
+from domains.validation.validation_report_exporter import (
+    ValidationReportExporter,
+    result_to_dict,
+)
 from infrastructure.metadata_db.repositories.validation_repository import (
     ValidationRepository,
 )
@@ -39,38 +38,32 @@ logger = get_logger(__name__)
 # Supported export formats
 EXPORT_FORMATS = frozenset({"json", "csv", "html"})
 
+_LEVEL_LABELS = {
+    1: "L1 — Row Count",
+    2: "L2 — Aggregates",
+    3: "L3 — Chunk Validation",
+}
+
 
 class ValidationServiceError(Exception):
     pass
 
 
 class ValidationService:
-    """Orchestrates L1–L4 validation with full DB persistence.
+    """Orchestrates L1–L3 validation with full DB persistence.
 
     Levels:
     * 1 — row-count comparison (fast, sub-second per table)
-    * 2 — aggregate comparison (MIN/MAX/SUM per numeric column)
+    * 2 — aggregate comparison (MIN/MAX/SUM/AVG per numeric column)
     * 3 — per-chunk count + aggregate (``L3ChunkHashValidator``)
-    * 4 — statistical random sampling (``L4StatisticalSamplingValidator``)
 
-    Usage::
-
-        svc = ValidationService(session)
-        run = await svc.run_level(
-            job_id=job_id, level=1,
-            source_connector=src, target_connector=tgt,
-            tables=[{"name": "orders", "schema": "dbo"}],
-        )
-        report_json = await svc.get_report(run.validation_run_id, "json")
+    Spot-check row samples are available separately via
+    ``POST /api/v1/jobs/{job_id}/row-samples`` (default top 10 rows).
     """
 
     def __init__(self, session: AsyncSession) -> None:
         self._repo = ValidationRepository(session)
         self._exporter = ValidationReportExporter()
-
-    # ------------------------------------------------------------------
-    # Validation execution
-    # ------------------------------------------------------------------
 
     async def run_level(
         self,
@@ -82,25 +75,10 @@ class ValidationService:
         chunks: list[tuple[Any, Any]] | None = None,
         pk_column: str = "id",
         sample_pct: float = 1.0,
-    ) -> Any:  # returns ValidationRunRecord
-        """Run a single validation level and persist results.
-
-        Args:
-            job_id: Parent migration job UUID.
-            level: 1–4.
-            source_connector: Connector with async ``execute(sql, params)`` method.
-            target_connector: Connector with async ``execute(sql, params)`` method.
-            tables: ``[{"name": "orders", "schema": "dbo", "source_columns": [...]}]``
-            chunks: Required for level 3 — list of ``(pk_start, pk_end)`` tuples.
-            pk_column: PK column name used for L3/L4 chunking/sampling.
-            sample_pct: Sampling percentage for level 4 (0 < pct ≤ 100).
-
-        Returns:
-            Persisted :class:`ValidationRunRecord`.
-        """
-        if level not in (1, 2, 3, 4):
+    ) -> Any:
+        if level not in (1, 2, 3):
             raise ValidationServiceError(
-                f"Invalid level {level!r}; must be 1, 2, 3, or 4"
+                f"Invalid level {level!r}; must be 1, 2, or 3"
             )
 
         run = await self._repo.create_run(job_id, level)
@@ -109,25 +87,30 @@ class ValidationService:
         try:
             results = await self._execute_level(
                 level, source_connector, target_connector,
-                tables, chunks, pk_column, sample_pct,
+                tables, chunks, pk_column,
             )
-            report_obj = self._build_report(results)
-            pass_count = report_obj.passed
-            fail_count = report_obj.failed
+            report_obj = self._build_report(results, validation_level=level)
             report_dict = self._report_to_dict(report_obj)
 
             await self._persist_mismatches(run.validation_run_id, results, tables)
-            await self._repo.complete_run(run.validation_run_id, pass_count, fail_count, report_dict)
+            await self._repo.complete_run(
+                run.validation_run_id,
+                report_obj.passed,
+                report_obj.failed,
+                report_dict,
+            )
             logger.info(
                 "validation_level_complete",
                 job_id=job_id,
                 level=level,
-                passed=pass_count,
-                failed=fail_count,
+                passed=report_obj.passed,
+                failed=report_obj.failed,
             )
         except Exception as exc:
             await self._repo.fail_run(run.validation_run_id, str(exc))
-            logger.error("validation_level_failed", job_id=job_id, level=level, error=str(exc))
+            logger.error(
+                "validation_level_failed", job_id=job_id, level=level, error=str(exc),
+            )
             raise
 
         return await self._repo.get_run(run.validation_run_id)
@@ -143,8 +126,7 @@ class ValidationService:
         pk_column: str = "id",
         sample_pct: float = 1.0,
     ) -> list[Any]:
-        """Run multiple validation levels sequentially."""
-        levels = levels or [1, 2, 3, 4]
+        levels = levels or [1, 2, 3]
         runs = []
         for lvl in levels:
             run = await self.run_level(
@@ -160,12 +142,7 @@ class ValidationService:
             runs.append(run)
         return runs
 
-    # ------------------------------------------------------------------
-    # Report export
-    # ------------------------------------------------------------------
-
     async def get_report(self, run_id: str, fmt: str) -> str:
-        """Return the validation report for *run_id* in *fmt* (json/csv/html)."""
         fmt = fmt.lower()
         if fmt not in EXPORT_FORMATS:
             raise ValidationServiceError(
@@ -186,10 +163,6 @@ class ValidationService:
     async def list_runs(self, job_id: str) -> list[Any]:
         return await self._repo.get_runs_for_job(job_id)
 
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
-
     async def _execute_level(
         self,
         level: int,
@@ -198,65 +171,100 @@ class ValidationService:
         tables: list[dict[str, Any]],
         chunks: list[tuple[Any, Any]] | None,
         pk_column: str,
-        sample_pct: float,
     ) -> list[ValidationResult]:
+        from application.go_engine_migration.target_table_provisioner import _fetch_pk_columns
+
+        async def _resolve_pk_columns(schema: str, table_name: str) -> list[str]:
+            pk_cols = await _fetch_pk_columns(source_connector, schema, table_name)
+            if pk_cols:
+                return pk_cols
+            if pk_column:
+                return [pk_column]
+            return ["id"]
+
         if level == 1:
-            engine = ValidationEngine(row_count_validator=RowCountValidator())
-            report = await engine.validate_migration(
-                source_connector, target_connector, tables
-            )
-            return [r for r in report.results if r.category.value == "row_count"]
-
-        if level == 2:
-            engine = ValidationEngine(
-                aggregate_validator=AggregateValidator(),
-            )
-            report = await engine.validate_migration(
-                source_connector, target_connector, tables, run_aggregate_validation=True
-            )
-            return [
-                r for r in report.results
-                if isinstance(getattr(r, "details", None), dict)
-                and r.details.get("aggregate_functions")
-            ]
-
-        if level == 3:
-            validator = L3ChunkHashValidator()
+            validator = RowCountValidator()
             results: list[ValidationResult] = []
-            eff_chunks = chunks or []
             for tbl in tables:
                 table_name = tbl.get("name", "")
                 schema = tbl.get("schema", "dbo")
-                if not eff_chunks:
-                    # No chunks provided: fall back to single full-table range
-                    r = await validator.validate_chunk(
-                        source_connector, target_connector,
-                        table_name, pk_column, None, None, schema=schema,
+                target_schema = tbl.get("target_schema", "public")
+                if not table_name:
+                    continue
+                results.append(
+                    await validator.validate(
+                        source_connector,
+                        target_connector,
+                        table_name,
+                        schema,
+                        target_schema=target_schema,
                     )
-                    results.append(r)
-                else:
-                    chunk_results = await validator.validate_all_chunks(
-                        source_connector, target_connector,
-                        table_name, pk_column, eff_chunks, schema=schema,
-                    )
-                    results.extend(chunk_results)
+                )
             return results
 
-        # level == 4
-        validator_l4 = L4StatisticalSamplingValidator(sample_pct=sample_pct)
+        if level == 2:
+            validator = AggregateValidator()
+            results = []
+            for tbl in tables:
+                table_name = tbl.get("name", "")
+                schema = tbl.get("schema", "dbo")
+                target_schema = tbl.get("target_schema", "public")
+                if not table_name:
+                    continue
+                results.append(
+                    await validator.validate(
+                        source_connector,
+                        target_connector,
+                        table_name,
+                        schema,
+                        target_schema=target_schema,
+                    )
+                )
+            return results
+
+        validator = L3ChunkHashValidator()
         results = []
+        eff_chunks = chunks or []
         for tbl in tables:
             table_name = tbl.get("name", "")
             schema = tbl.get("schema", "dbo")
-            r = await validator_l4.validate(
-                source_connector, target_connector,
-                table_name, pk_column, schema=schema,
-            )
-            results.append(r)
+            target_schema = tbl.get("target_schema", "public")
+            if not table_name:
+                continue
+            pk_columns = await _resolve_pk_columns(schema, table_name)
+            if not eff_chunks:
+                results.append(
+                    await validator.validate_chunk(
+                        source_connector,
+                        target_connector,
+                        table_name,
+                        pk_columns,
+                        None,
+                        None,
+                        schema=schema,
+                        target_schema=target_schema,
+                    )
+                )
+            else:
+                results.extend(
+                    await validator.validate_all_chunks(
+                        source_connector,
+                        target_connector,
+                        table_name,
+                        pk_columns,
+                        eff_chunks,
+                        schema=schema,
+                        target_schema=target_schema,
+                    )
+                )
         return results
 
     @staticmethod
-    def _build_report(results: list[ValidationResult]) -> ValidationReport:
+    def _build_report(
+        results: list[ValidationResult],
+        *,
+        validation_level: int | None = None,
+    ) -> ValidationReport:
         report = ValidationReport(
             results=results,
             total_objects=len(results),
@@ -269,6 +277,7 @@ class ValidationService:
                 1 for r in results
                 if r.status in (ValidationStatus.WARNING, ValidationStatus.SKIPPED)
             ),
+            validation_level=validation_level,
         )
         if report.failed > 0:
             report.overall_status = ValidationStatus.FAILED
@@ -278,26 +287,16 @@ class ValidationService:
 
     @staticmethod
     def _report_to_dict(report: ValidationReport) -> dict:
+        level = report.validation_level
         return {
             "overall_status": report.overall_status.value,
+            "validation_level": level,
+            "validation_level_label": _LEVEL_LABELS.get(level or 0, ""),
             "total_objects": report.total_objects,
             "passed": report.passed,
             "failed": report.failed,
             "warnings": report.warnings,
-            "results": [
-                {
-                    "object_name": r.object_name,
-                    "category": r.category.value,
-                    "status": r.status.value,
-                    "source_count": r.source_count,
-                    "target_count": r.target_count,
-                    "issues": [
-                        {"severity": i.severity, "message": i.message}
-                        for i in r.issues
-                    ],
-                }
-                for r in report.results
-            ],
+            "results": [result_to_dict(r) for r in report.results],
         }
 
     async def _persist_mismatches(
@@ -309,7 +308,7 @@ class ValidationService:
         table_lookup = {t.get("name", ""): t.get("schema", "dbo") for t in tables}
         mismatches = []
         for r in results:
-            if r.status != ValidationStatus.FAILED:
+            if r.status not in (ValidationStatus.FAILED, ValidationStatus.ERROR):
                 continue
             table_name = r.object_name.split(".")[-1].split("[")[0].strip()
             schema = table_lookup.get(table_name, "")
@@ -320,15 +319,17 @@ class ValidationService:
                     "mismatch_type": r.category.value.upper(),
                     "source_value": issue.source_value,
                     "target_value": issue.target_value,
-                    "details": {"message": issue.message, "severity": issue.severity},
+                    "details": {
+                        "message": issue.message,
+                        "severity": issue.severity,
+                        "category": issue.category.value,
+                    },
                 })
         if mismatches:
             await self._repo.bulk_record_mismatches(run_id, mismatches)
 
     @staticmethod
     def _run_to_report(run: Any) -> ValidationReport:
-        """Reconstruct a ValidationReport from a stored run's JSON report dict."""
-
         from domains.validation.validation_engine import (
             ValidationCategory,
             ValidationIssue,
@@ -345,27 +346,55 @@ class ValidationService:
                 st = ValidationStatus(r.get("status", "passed"))
             except ValueError:
                 st = ValidationStatus.PASSED
-            issues = [
-                ValidationIssue(
-                    category=cat,
-                    severity=i.get("severity", "error"),
-                    message=i.get("message", ""),
+            issues = []
+            for i in r.get("issues", []):
+                try:
+                    issue_cat = ValidationCategory(
+                        i.get("category", cat.value),
+                    )
+                except ValueError:
+                    issue_cat = cat
+                issues.append(
+                    ValidationIssue(
+                        category=issue_cat,
+                        severity=i.get("severity", "error"),
+                        message=i.get("message", ""),
+                        source_value=i.get("source_value"),
+                        target_value=i.get("target_value"),
+                        details=i.get("details") or {},
+                    )
                 )
-                for i in r.get("issues", [])
-            ]
-            results.append(ValidationResult(
-                object_name=r.get("object_name", ""),
-                category=cat,
-                status=st,
-                source_count=r.get("source_count"),
-                target_count=r.get("target_count"),
-                issues=issues,
-            ))
+            result_kwargs: dict[str, Any] = {
+                "object_name": r.get("object_name", ""),
+                "category": cat,
+                "status": st,
+                "source_count": r.get("source_count"),
+                "target_count": r.get("target_count"),
+                "duration_ms": float(r.get("duration_ms") or 0),
+                "issues": issues,
+                "details": r.get("details") or {},
+            }
+            raw_id = r.get("validation_id")
+            if raw_id:
+                from uuid import UUID
+
+                try:
+                    result_kwargs["validation_id"] = UUID(str(raw_id))
+                except ValueError:
+                    pass
+            results.append(ValidationResult(**result_kwargs))
 
         try:
             overall = ValidationStatus(report_dict.get("overall_status", "passed"))
         except ValueError:
             overall = ValidationStatus.PASSED
+
+        level = report_dict.get("validation_level")
+        if level is not None:
+            try:
+                level = int(level)
+            except (TypeError, ValueError):
+                level = None
 
         return ValidationReport(
             results=results,
@@ -374,4 +403,5 @@ class ValidationService:
             failed=report_dict.get("failed", 0),
             warnings=report_dict.get("warnings", 0),
             overall_status=overall,
+            validation_level=level,
         )

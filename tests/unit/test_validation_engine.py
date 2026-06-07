@@ -76,7 +76,7 @@ class TestRowCountValidator:
     async def test_matching_counts(self):
         source = MagicMock()
         target = MagicMock()
-        source.execute = AsyncMock(return_value=[{"cnt": 100}])
+        source.execute = AsyncMock(return_value=[{"row_count": 100}])
         target.execute = AsyncMock(return_value=[{"cnt": 100}])
 
         validator = RowCountValidator()
@@ -89,13 +89,27 @@ class TestRowCountValidator:
     async def test_mismatched_counts(self):
         source = MagicMock()
         target = MagicMock()
-        source.execute = AsyncMock(return_value=[{"cnt": 100}])
-        target.execute = AsyncMock(return_value=[{"cnt": 95}])
+        source.execute = AsyncMock(return_value=[{"row_count": 1000}])
+        target.execute = AsyncMock(return_value=[{"cnt": 500}])
 
         validator = RowCountValidator()
         result = await validator.validate(source, target, "users", "dbo")
         assert result.status == ValidationStatus.FAILED
         assert len(result.issues) > 0
+
+    @pytest.mark.asyncio
+    async def test_uses_expected_row_count_when_provided(self):
+        source = MagicMock()
+        target = MagicMock()
+        target.execute = AsyncMock(return_value=[{"cnt": 100}])
+
+        validator = RowCountValidator()
+        result = await validator.validate(
+            source, target, "users", "dbo", expected_row_count=100,
+        )
+        assert result.status == ValidationStatus.PASSED
+        assert result.source_count == 100
+        source.execute.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_connection_error(self):
@@ -106,7 +120,7 @@ class TestRowCountValidator:
 
         validator = RowCountValidator()
         result = await validator.validate(source, target, "test", "dbo")
-        assert result.source_count == -1
+        assert result.source_count == 0
 
 
 class TestChecksumValidator:
@@ -196,7 +210,7 @@ class TestValidationEngine:
         ]
 
         report = await engine.validate_migration(source, target, tables)
-        assert report.total_objects == 3
+        assert report.total_objects == 2
         assert report.results is not None
 
     @pytest.mark.asyncio
@@ -223,7 +237,7 @@ class TestValidationEngine:
     async def test_report_overall_failed(self):
         source = MagicMock()
         target = MagicMock()
-        source.execute = AsyncMock(side_effect=[Exception("fail"), Exception("fail"), Exception("fail")])
+        source.execute = AsyncMock(side_effect=[Exception("fail"), Exception("fail")])
         target.execute = AsyncMock(return_value=[{"cnt": 0}])
 
         engine = ValidationEngine()
@@ -341,6 +355,8 @@ class TestAggregateValidator:
         validator = AggregateValidator()
         result = await validator.validate(source, target, "orders", "dbo", ["id"])
         assert result.status.name == "PASSED"
+        assert result.category.value == "aggregate"
+        assert result.details["column_results"][0]["status"] == "passed"
 
     @pytest.mark.asyncio
     async def test_fails_on_mismatch(self):
@@ -370,3 +386,19 @@ class TestAggregateValidator:
         validator = AggregateValidator()
         result = await validator.validate(source, target, "Hotels", "dbo", ["HotelID"])
         assert result.status.name == "PASSED"
+
+    @pytest.mark.asyncio
+    async def test_normalizes_uppercase_sqlserver_aggregate_keys(self):
+        from domains.validation.validation_engine import AggregateValidator
+
+        source = AsyncMock()
+        target = AsyncMock()
+        source.execute.return_value = [{"MIN": 1, "MAX": 100, "SUM": 5050, "AVG": 50.5}]
+        target.execute.return_value = [{"min": 1, "max": 100, "sum": 5050, "avg": 50.5}]
+
+        validator = AggregateValidator()
+        result = await validator.validate(source, target, "orders", "dbo", ["id"])
+        assert result.status.name == "PASSED"
+        col = result.details["column_results"][0]
+        assert col["source"] == {"min": 1, "max": 100, "sum": 5050, "avg": 50.5}
+        assert col["target"] == {"min": 1, "max": 100, "sum": 5050, "avg": 50.5}

@@ -458,6 +458,8 @@ class WorkflowBridgeService:
                 "username": conn.username,
                 "password": password,
                 "db_type": conn.db_type,
+                "ssl_enabled": bool(conn.ssl_enabled),
+                "trust_server_certificate": bool(conn.ssl_enabled),
             }
 
     # ── Private ──────────────────────────────────────────────────────────

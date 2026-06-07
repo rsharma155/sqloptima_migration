@@ -26,9 +26,14 @@ class GoTableDispatchPayload:
     column_transforms: dict[str, str] = field(default_factory=dict)
     column_sensitivity: dict[str, str] = field(default_factory=dict)
     column_types: dict[str, str] = field(default_factory=dict)
+    column_extract_casts: dict[str, str] = field(default_factory=dict)
     order_column: str | None = None
     where_clause: str | None = None
     source_maxdop: int = 1
+    skip_data_load: bool = False
+    row_count_estimate: int = 0
+    table_size_mb: float = 0.0
+    chunk_delay_sec: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -42,8 +47,14 @@ class GoTableDispatchPayload:
             "column_transforms": dict(self.column_transforms),
             "column_sensitivity": dict(self.column_sensitivity),
             "column_types": dict(self.column_types),
+            "column_extract_casts": dict(self.column_extract_casts),
             "source_maxdop": self.source_maxdop,
+            "skip_data_load": self.skip_data_load,
+            "row_count_estimate": self.row_count_estimate,
+            "table_size_mb": self.table_size_mb,
         }
+        if self.chunk_delay_sec > 0:
+            out["chunk_delay_sec"] = self.chunk_delay_sec
         if self.order_column:
             out["order_column"] = self.order_column
         if self.where_clause:
@@ -69,7 +80,14 @@ class GoTableDispatchPayload:
             column_types={
                 str(k): str(v) for k, v in (data.get("column_types") or {}).items()
             },
+            column_extract_casts={
+                str(k): str(v) for k, v in (data.get("column_extract_casts") or {}).items()
+            },
             order_column=(str(data["order_column"]) if data.get("order_column") else None),
             where_clause=(str(data["where_clause"]) if data.get("where_clause") else None),
             source_maxdop=int(data.get("source_maxdop", 1)),
+            skip_data_load=bool(data.get("skip_data_load", False)),
+            row_count_estimate=int(data.get("row_count_estimate", 0)),
+            table_size_mb=float(data.get("table_size_mb", 0.0)),
+            chunk_delay_sec=float(data.get("chunk_delay_sec", 0.0)),
         )

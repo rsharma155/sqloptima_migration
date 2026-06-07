@@ -73,20 +73,34 @@ func (m *MigrationTableDataMover) Move(
 	src extractor.SQLServerConfig,
 	pgURL string,
 	table GoTableDispatchPayload,
+	jobBase JobProgressBase,
+	sourceThrottle SourceThrottleConfig,
 ) (MoveTableResult, error) {
 	result := MoveTableResult{TableName: table.TableName}
+	markFailed := func(err error) (MoveTableResult, error) {
+		_ = m.meta.UpdateTablePlanProgress(ctx, jobID, table.TableName, "failed", result.RowsMigrated)
+		_ = m.meta.AppendMigrationJobLog(ctx, jobID, "error",
+			fmt.Sprintf("Failed %s: %v", table.TableName, err))
+		return result, err
+	}
 	_ = m.meta.UpdateTablePlanProgress(ctx, jobID, table.TableName, "migrating", 0)
 
 	tableSizer := m.newTableSizer(table)
 	chunkSize := m.planChunkSize(table, tableSizer)
 
+	_ = m.meta.AppendMigrationJobLog(ctx, jobID, "info",
+		fmt.Sprintf("Planning chunks for %s (chunk size %d)", table.TableName, chunkSize))
+
 	chunks, key, err := ResolveTableChunks(ctx, jobID, src, table, chunkSize)
 	if err != nil {
-		return result, err
+		return markFailed(err)
 	}
+	_ = m.meta.AppendMigrationJobLog(ctx, jobID, "info",
+		fmt.Sprintf("Planned %d chunk(s) for %s on key column %s",
+			len(chunks), table.TableName, key.Column))
 	if m.runtime.Queue != nil {
 		if err := ensureTableChunksEnqueued(m.runtime.Queue, jobID, table.SourceSchema, table.TableName, chunks); err != nil {
-			return result, fmt.Errorf("enqueue chunks: %w", err)
+			return markFailed(fmt.Errorf("enqueue chunks: %w", err))
 		}
 	}
 	if len(chunks) == 0 {
@@ -113,6 +127,8 @@ func (m *MigrationTableDataMover) Move(
 	runOpts := tableMoveOptions{
 		conflictColumns: conflictCols,
 		extractOpts:     extractOpts,
+		jobBase:         jobBase,
+		sourceThrottle:  sourceThrottle.withDefaults(),
 	}
 
 	if useParallel {
@@ -124,17 +140,24 @@ func (m *MigrationTableDataMover) Move(
 		result, err = m.moveSequential(ctx, jobID, src, pgURL, table, chunks, schema, transforms, runOpts, tableSizer)
 	}
 	if err != nil {
-		return result, err
+		return markFailed(err)
 	}
 
 	_ = m.meta.AppendMigrationJobLog(ctx, jobID, "success",
 		fmt.Sprintf("Completed %s: %d row(s) migrated in %d chunk(s)",
 			table.TableName, result.RowsMigrated, result.ChunksRun))
 	_ = m.meta.UpdateTablePlanProgress(ctx, jobID, table.TableName, "completed", result.RowsMigrated)
+	_ = m.meta.UpdateMigrationJobTotals(
+		ctx, jobID, jobBase.RowsMigrated+result.RowsMigrated, jobBase.TablesDone+1,
+	)
 	return result, nil
 }
 
 type tableMoveOptions struct {
-	conflictColumns []string
-	extractOpts     extractor.ExtractOptions
+	conflictColumns          []string
+	extractOpts              extractor.ExtractOptions
+	jobBase                  JobProgressBase
+	tableRowsBase            int64
+	enableIntraChunkProgress bool
+	sourceThrottle           SourceThrottleConfig
 }

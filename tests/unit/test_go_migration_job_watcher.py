@@ -56,8 +56,22 @@ async def test_watcher_runs_validation_on_completed(monkeypatch: pytest.MonkeyPa
         "application.migration_service.save_jobs_async",
         lambda: asyncio.sleep(0),
     )
+    async def noop_log(*_args, **_kwargs):
+        return None
 
-    await watch_go_migration_job(job_id, validate_after=True, poll_interval_sec=0.01, timeout_sec=1)
+    monkeypatch.setattr(
+        "application.migration_service._append_job_log_durable",
+        noop_log,
+    )
+    monkeypatch.setattr(
+        "application.go_engine_migration.go_migration_job_watcher._run_post_migration_finalize",
+        noop_log,
+    )
+
+    await watch_go_migration_job(
+        job_id, validate_after=True, finalize_after=False,
+        poll_interval_sec=0.01, timeout_sec=1,
+    )
     assert calls["validate"] == 1
 
 
@@ -93,4 +107,7 @@ async def test_watcher_skips_validation_when_disabled(monkeypatch: pytest.Monkey
         fake_validate,
     )
 
-    await watch_go_migration_job(job_id, validate_after=False, poll_interval_sec=0.01, timeout_sec=1)
+    await watch_go_migration_job(
+        job_id, validate_after=False, finalize_after=False,
+        poll_interval_sec=0.01, timeout_sec=1,
+    )

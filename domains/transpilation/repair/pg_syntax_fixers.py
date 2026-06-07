@@ -41,7 +41,7 @@ _FOR_JSON_RE = re.compile(
 )
 
 _QUERY_OPTION_RE = re.compile(
-    r"\bOPTION\s*\(\s*(?:RECOMPILE|OPTIMIZE\s+FOR\s+[^)]*|MAXDOP\s+\d+|FAST\s+\d+|"
+    r"\bOPTION\s*\(\s*(?:MAXRECURSION\s+\d+|RECOMPILE|OPTIMIZE\s+FOR\s+[^)]*|MAXDOP\s+\d+|FAST\s+\d+|"
     r"USE\s+PLAN\s+[^)]*|MERGE\s+JOIN|LOOP\s+JOIN|HASH\s+JOIN)\s*\)",
     re.IGNORECASE,
 )
@@ -146,11 +146,21 @@ def fix_tsql_expressions(sql: str) -> tuple[str, int]:
 
 
 def fix_goto_statements(sql: str) -> tuple[str, int]:
-    pattern = re.compile(r"\bGOTO\s+\w+\b", re.IGNORECASE)
-    matches = list(pattern.finditer(sql))
-    if not matches:
+    from domains.transpilation.converters.plpgsql._body_transforms import _convert_goto_statements
+
+    updated = _convert_goto_statements(sql)
+    if updated == sql:
         return sql, 0
-    return pattern.sub("/* GOTO removed — restructure control flow manually */", sql), len(matches)
+    return updated, 1
+
+
+def fix_dynamic_sql(sql: str) -> tuple[str, int]:
+    from domains.transpilation.converters.plpgsql._body_transforms import _convert_dynamic_sql
+
+    updated = _convert_dynamic_sql(sql)
+    if updated == sql:
+        return sql, 0
+    return updated, 1
 
 
 def fix_remaining_top(sql: str) -> tuple[str, int]:
@@ -190,7 +200,9 @@ def fix_merge_statements(sql: str) -> tuple[str, int]:
 def fix_body_transform_pass(sql: str) -> tuple[str, int]:
     """Re-apply high-value body transforms on converted PL/pgSQL fragments."""
     from domains.transpilation.converters.plpgsql._body_transforms import (
+        _convert_dynamic_sql,
         _convert_for_xml_path,
+        _convert_goto_statements,
         _convert_merge,
         _convert_openjson,
         _convert_select_into,
@@ -205,6 +217,8 @@ def fix_body_transform_pass(sql: str) -> tuple[str, int]:
         _convert_openjson,
         _convert_merge,
         _convert_for_xml_path,
+        _convert_dynamic_sql,
+        _convert_goto_statements,
     )
     result = sql
     applied = 0
@@ -214,6 +228,39 @@ def fix_body_transform_pass(sql: str) -> tuple[str, int]:
             applied += 1
             result = updated
     return result, applied
+
+
+def fix_quoted_column_aliases(sql: str) -> tuple[str, int]:
+    """T-SQL AS 'Alias' → AS "Alias" for PostgreSQL."""
+    from domains.transpilation.converters.plpgsql._body_transforms import _convert_quoted_column_aliases
+
+    updated = _convert_quoted_column_aliases(sql)
+    if updated == sql:
+        return sql, 0
+    count = len(re.findall(r"\bAS\s+'", sql, flags=re.IGNORECASE))
+    return updated, max(count, 1)
+
+
+def fix_insert_missing_into(sql: str) -> tuple[str, int]:
+    """T-SQL INSERT without INTO → INSERT INTO (PostgreSQL requirement)."""
+    pattern = re.compile(
+        r'\bINSERT\s+(?!INTO\b)(?=(?:[\w"]+\.)?[\w"]+)',
+        re.IGNORECASE,
+    )
+    matches = list(pattern.finditer(sql))
+    if not matches:
+        return sql, 0
+    return pattern.sub("INSERT INTO ", sql), len(matches)
+
+
+def fix_static_routine_exec(sql: str) -> tuple[str, int]:
+    """EXECUTE schema.proc → CALL schema.proc() inside PL/pgSQL bodies."""
+    from domains.transpilation.converters.plpgsql._body_transforms import _convert_static_routine_exec
+
+    updated = _convert_static_routine_exec(sql)
+    if updated == sql:
+        return sql, 0
+    return updated, 1
 
 
 def fix_drop_if_exists(sql: str) -> tuple[str, int]:
@@ -231,6 +278,9 @@ def fix_drop_if_exists(sql: str) -> tuple[str, int]:
 # Ordered proactive fixers — run every repair round on full SQL and PL/pgSQL bodies.
 PROACTIVE_FIXERS: list[tuple[str, FixerFn]] = [
     ("body_transform_pass", fix_body_transform_pass),
+    ("insert_missing_into", fix_insert_missing_into),
+    ("quoted_column_aliases", fix_quoted_column_aliases),
+    ("static_routine_exec", fix_static_routine_exec),
     ("bracket_identifiers", fix_bracket_identifiers),
     ("table_hints", fix_table_hints),
     ("apply_to_lateral", fix_apply_to_lateral),
@@ -242,6 +292,7 @@ PROACTIVE_FIXERS: list[tuple[str, FixerFn]] = [
     ("execute_as", fix_execute_as_owner),
     ("begin_try", fix_begin_try_blocks),
     ("merge", fix_merge_statements),
+    ("dynamic_sql", fix_dynamic_sql),
     ("goto", fix_goto_statements),
     ("remaining_top", fix_remaining_top),
     ("set_statements", fix_set_statements),
@@ -254,6 +305,8 @@ BODY_ONLY_FIXERS: list[tuple[str, FixerFn]] = [
 
 # Map pgparse "near TOKEN" hints to fixers tried first on that round.
 TARGETED_FIXERS: list[tuple[re.Pattern[str], list[str]]] = [
+    (re.compile(r"'Manager\w+'|ManagerFirstName", re.IGNORECASE), ["quoted_column_aliases"]),
+    (re.compile(r"\b(?:dbo|public)\b", re.IGNORECASE), ["insert_missing_into", "static_routine_exec"]),
     (re.compile(r"APPLY", re.IGNORECASE), ["apply_to_lateral"]),
     (re.compile(r"RETURN", re.IGNORECASE), ["return_query_in_cte"]),
     (re.compile(r"\[", re.IGNORECASE), ["bracket_identifiers"]),
@@ -262,7 +315,8 @@ TARGETED_FIXERS: list[tuple[re.Pattern[str], list[str]]] = [
     (re.compile(r"SYSTEM_USER", re.IGNORECASE), ["system_user"]),
     (re.compile(r"EXECUTE", re.IGNORECASE), ["execute_as"]),
     (re.compile(r"GETDATE", re.IGNORECASE), ["broken_getdate"]),
-    (re.compile(r"GOTO", re.IGNORECASE), ["goto"]),
+    (re.compile(r"sp_executesql", re.IGNORECASE), ["dynamic_sql"]),
+    (re.compile(r"GOTO", re.IGNORECASE), ["goto", "dynamic_sql"]),
     (re.compile(r"MERGE", re.IGNORECASE), ["merge"]),
     (re.compile(r"NOLOCK|ROWLOCK|XLOCK", re.IGNORECASE), ["table_hints"]),
 ]

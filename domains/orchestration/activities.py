@@ -25,20 +25,13 @@ async def _resolve_sqlserver_connector(connection_id: str, schema: str = "dbo"):
     from application.workflow_bridge_service import WorkflowBridgeService
     from infrastructure.metadata_db.session import AsyncSessionFactory
     from infrastructure.sqlserver.sqlserver_connector import (
-        SqlServerConnectionConfig,
         SqlServerConnector,
+        sqlserver_config_from_resolved,
     )
 
     svc = WorkflowBridgeService(session_factory=AsyncSessionFactory, temporal_client=None)
     cfg = await svc.resolve_connection(connection_id)
-    config = SqlServerConnectionConfig(
-        host=cfg["host"],
-        port=cfg["port"],
-        database=cfg["database"],
-        username=cfg["username"],
-        password=cfg["password"],
-        schema=schema,
-    )
+    config = sqlserver_config_from_resolved(cfg, password=cfg["password"], schema=schema)
     connector = SqlServerConnector(config)
     await connector.connect()
     return connector
@@ -71,7 +64,6 @@ async def discover_objects(connection_id: str, schema: str) -> list[dict]:
     from infrastructure.sqlserver.sqlserver_discovery import SqlServerMetadataDiscovery
 
     connector = await _resolve_sqlserver_connector(connection_id, schema)
-    await connector.connect()
     try:
         discovery = SqlServerMetadataDiscovery(connector)
         tables = await discovery.discover_tables("source_db", schema)
@@ -175,28 +167,15 @@ async def _get_pk_columns(source: Any, schema: str, table: str) -> list[str]:
 
 
 async def _get_approximate_row_count(source: Any, schema: str, table: str) -> int:
-    try:
-        rows = await source.execute("""
-            SELECT SUM(p.rows) AS row_count
-            FROM sys.partitions p
-            INNER JOIN sys.objects o ON p.object_id = o.object_id
-            INNER JOIN sys.schemas s ON o.schema_id = s.schema_id
-            WHERE s.name = ? AND o.name = ? AND p.index_id IN (0, 1)
-        """, {"schema": schema, "table": table})
-        if rows and rows[0]["row_count"]:
-            return rows[0]["row_count"]
-    except Exception:
-        pass
-    try:
-        rows = await source.execute(f"SELECT COUNT(*) AS cnt FROM [{schema}].[{table}]")
-        return rows[0]["cnt"] if rows else 0
-    except Exception:
-        return 0
+    from infrastructure.sqlserver.row_count_estimate import (
+        fetch_sqlserver_table_row_estimate,
+    )
+
+    return await fetch_sqlserver_table_row_estimate(source, schema, table)
 
 
 async def plan_chunks(source_connection_id: str, schema: str, table: str, chunk_size: int = 10000) -> dict:
     source = await _resolve_sqlserver_connector(source_connection_id, schema)
-    await source.connect()
     try:
         planner = ChunkPlanner(source, chunk_size=chunk_size)
         chunking_result = await planner.plan_table(schema, table)
@@ -243,8 +222,6 @@ async def migrate_table(
     try:
         source = await _resolve_sqlserver_connector(source_connection_id, schema)
         target = await _resolve_postgres_connector(target_connection_id)
-        await source.connect()
-        await target.connect()
         try:
             pk_cols = await _get_pk_columns(source, schema, table)
             order_col = pk_cols[0] if pk_cols else (columns[0] if columns else "id")
@@ -322,11 +299,16 @@ async def validate_table(
     table: str,
     *,
     target_schema: str = "public",
+    expected_row_count: int | None = None,
 ) -> dict:
     """Validate table row counts between source and target.
 
     ``source_conn`` and ``target_conn`` are connection_id strings from the
     metadata DB — resolved via WorkflowBridgeService.resolve_connection().
+
+    When ``expected_row_count`` is supplied (e.g. rows migrated from job metadata),
+    validation compares the target exact count to that value and avoids a source
+    table scan. Otherwise the source side uses a sys.partitions row estimate.
     """
     logger.info(
         "Validating table via Temporal activity",
@@ -335,26 +317,42 @@ async def validate_table(
         table=table,
     )
     try:
-        source = await _resolve_sqlserver_connector(source_conn, schema)
         target = await _resolve_postgres_connector(target_conn)
-        await source.connect()
-        await target.connect()
+        source = None
+        if expected_row_count is None:
+            source = await _resolve_sqlserver_connector(source_conn, schema)
         try:
-            src_rows = await source.execute(f"SELECT COUNT(*) AS cnt FROM [{schema}].[{table}]")
+            from domains.validation.validation_engine import _row_counts_within_tolerance
+            from infrastructure.sqlserver.row_count_estimate import (
+                fetch_sqlserver_table_row_estimate,
+            )
+
             tgt_rows = await target.execute(
                 f'SELECT COUNT(*) AS cnt FROM "{target_schema}"."{table}"',
             )
-            src_count = src_rows[0]["cnt"] if src_rows else 0
             tgt_count = tgt_rows[0]["cnt"] if tgt_rows else 0
-            passed = src_count == tgt_count
+
+            if expected_row_count is not None:
+                src_count = expected_row_count
+                passed = tgt_count == expected_row_count
+                source_basis = "migration_metadata"
+            else:
+                src_count = await fetch_sqlserver_table_row_estimate(
+                    source, schema, table,
+                )
+                passed = _row_counts_within_tolerance(src_count, tgt_count)
+                source_basis = "sys.partitions_estimate"
+
             return {
                 "status": "passed" if passed else "failed",
                 "source_count": src_count,
                 "target_count": tgt_count,
+                "source_count_basis": source_basis,
                 "table": table,
             }
         finally:
-            await source.disconnect()
+            if source is not None:
+                await source.disconnect()
             await target.disconnect()
     except Exception as e:
         logger.exception("Validation failed", schema=schema, table=table)

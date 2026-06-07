@@ -66,6 +66,27 @@ func TestBoundsQuerySelectsMinMax(t *testing.T) {
 	}
 }
 
+func TestStringBoundsQueryCastsToNVarchar(t *testing.T) {
+	sql := extractor.BuildStringBoundsQuery("Production", "Document", "DocumentNode")
+	if !strings.Contains(sql, "CAST([DocumentNode] AS NVARCHAR(4000))") {
+		t.Errorf("string bounds query must cast hierarchyid/text keys, got: %s", sql)
+	}
+}
+
+func TestExtractQueryWithColumnExtractCasts(t *testing.T) {
+	opts := extractor.ExtractOptions{
+		ColumnExtractCasts: map[string]string{
+			"col_hierarchyid": "CAST([col_hierarchyid] AS nvarchar(900))",
+		},
+	}
+	sql := extractor.BuildExtractQueryWithOptions(
+		"dbo", "dt_MiscTypes", "id", []string{"id", "col_hierarchyid"}, opts,
+	)
+	if !strings.Contains(sql, "CAST([col_hierarchyid] AS nvarchar(900)) AS [col_hierarchyid]") {
+		t.Errorf("expected user cast in SELECT, got: %s", sql)
+	}
+}
+
 func TestExtractQueryWithOptionsNOLOCKAndMAXDOP(t *testing.T) {
 	opts := extractor.ExtractOptions{
 		WhereClause:  "active = 1",

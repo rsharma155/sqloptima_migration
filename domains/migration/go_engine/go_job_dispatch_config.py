@@ -15,6 +15,7 @@ from uuid import UUID
 from domains.migration.go_engine.go_connection_dispatch_ref import GoConnectionDispatchRef
 from domains.migration.go_engine.go_executor_kind import GoExecutorKind
 from domains.migration.go_engine.go_table_dispatch_payload import GoTableDispatchPayload
+from domains.migration.source_throttle import SourceThrottleConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +31,7 @@ class GoJobDispatchConfig:
     idempotent: bool = False
     conflict_columns: tuple[str, ...] = field(default_factory=tuple)
     use_nolock: bool = False
+    source_throttle: SourceThrottleConfig = field(default_factory=SourceThrottleConfig)
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -41,6 +43,7 @@ class GoJobDispatchConfig:
             "snapshot_ref": self.snapshot_ref,
             "idempotent": self.idempotent,
             "use_nolock": self.use_nolock,
+            "source_throttle": self.source_throttle.to_dict(),
         }
         if self.conflict_columns:
             out["conflict_columns"] = list(self.conflict_columns)
@@ -62,6 +65,7 @@ class GoJobDispatchConfig:
             idempotent=bool(data.get("idempotent", False)),
             conflict_columns=tuple(str(c) for c in conflict_raw),
             use_nolock=bool(data.get("use_nolock", False)),
+            source_throttle=SourceThrottleConfig.from_dict(data.get("source_throttle")),
         )
 
     def validate(self) -> None:

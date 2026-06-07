@@ -92,8 +92,13 @@ def table_assessments_by_name(assessment: DatabaseAssessment) -> dict[str, Table
 def selected_table_blockers(
     assessment: DatabaseAssessment,
     table_names: list[str],
+    *,
+    column_type_overrides: dict[str, str] | None = None,
 ) -> list[tuple[str, list[str]]]:
     """Return (table_name, blocker_messages) for BLOCKER-tier selected tables."""
+    from domains.migration.column_type_override import table_blocked_after_overrides
+
+    overrides = column_type_overrides or {}
     by_name = table_assessments_by_name(assessment)
     blocked: list[tuple[str, list[str]]] = []
     for name in table_names:
@@ -101,10 +106,10 @@ def selected_table_blockers(
         if ta is None:
             blocked.append((name, [f"Table {name!r} was not found in assessment results"]))
             continue
-        if ta.migration_tier == MigrationTier.BLOCKER:
-            messages = ta.blockers or [
-                f"Table has BLOCKER complexity (score {ta.complexity_score}/100)"
-            ]
+        if ta.migration_tier != MigrationTier.BLOCKER:
+            continue
+        still_blocked, messages = table_blocked_after_overrides(ta, overrides)
+        if still_blocked:
             blocked.append((name, messages))
     return blocked
 
@@ -112,9 +117,15 @@ def selected_table_blockers(
 def assert_tables_ready_for_migration(
     assessment: DatabaseAssessment,
     table_names: list[str],
+    *,
+    column_type_overrides: dict[str, str] | None = None,
 ) -> None:
     """Raise MigrationReadinessError if any selected table is BLOCKER-tier."""
-    blocked = selected_table_blockers(assessment, table_names)
+    blocked = selected_table_blockers(
+        assessment,
+        table_names,
+        column_type_overrides=column_type_overrides,
+    )
     if not blocked:
         return
     lines = [
@@ -135,6 +146,7 @@ async def validate_migration_tables_ready(
     table_names: list[str],
     entry: dict[str, Any],
     password: str,
+    column_type_overrides: dict[str, str] | None = None,
 ) -> None:
     """Assess schema and reject migration when selected tables have BLOCKER issues."""
     if not table_names:
@@ -145,4 +157,12 @@ async def validate_migration_tables_ready(
         schema=schema,
         password=password,
     )
-    assert_tables_ready_for_migration(assessment, table_names)
+    if column_type_overrides:
+        from domains.migration.column_type_override import resolve_overrides_for_tables
+
+        resolve_overrides_for_tables(assessment, table_names, column_type_overrides)
+    assert_tables_ready_for_migration(
+        assessment,
+        table_names,
+        column_type_overrides=column_type_overrides,
+    )

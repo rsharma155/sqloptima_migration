@@ -9,9 +9,11 @@
  */
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import Link from "next/link";
 import {
   Activity,
   AlertTriangle,
+  ChevronRight,
   Database,
   Plus,
   Loader2,
@@ -21,6 +23,8 @@ import {
   Server,
   RefreshCw,
   XCircle,
+  Pencil,
+  Trash2,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -45,19 +49,25 @@ import { toast } from "sonner";
 import { useConnections, type Connection } from "@/lib/ConnectionContext";
 import {
   createReplicationStream,
+  deleteReplicationStream,
   discoverSchema,
   getReplicationCdcStatus,
-  getReplicationStreamStatus,
+  getReplicationSummary,
+  getReplicationTargetStatus,
   listReplicationStreams,
+  type ReplicationSummary,
   type ReplicationCdcStatus,
+  type ReplicationTargetTableStatus,
   pauseReplicationStream,
   resumeReplicationStream,
   startReplicationStream,
   stopReplicationStream,
   testConnection,
+  updateReplicationStream,
   type ReplicationStream as ApiReplicationStream,
 } from "@/lib/api";
 import { formatConnectionTestFailures } from "@/lib/connection-health";
+import { resolveTargetSchema } from "@/lib/schema-mapping";
 import { EmptyState } from "@/components/shared/empty-state";
 
 interface DiscoveredTable {
@@ -66,8 +76,12 @@ interface DiscoveredTable {
   type: string;
 }
 
+const ACTIVE_STREAM_STATUSES = ["CDC_STREAMING", "STARTING", "CDC_CATCHUP", "PAUSED"];
+
 export default function ReplicationPage() {
-  const [showAddDialog, setShowAddDialog] = useState(false);
+  const [showStreamDialog, setShowStreamDialog] = useState(false);
+  const [editingStreamId, setEditingStreamId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ApiReplicationStream | null>(null);
   const [sourceConn, setSourceConn] = useState<Connection | null>(null);
   const [targetConn, setTargetConn] = useState<Connection | null>(null);
   const [schema, setSchema] = useState("dbo");
@@ -81,6 +95,9 @@ export default function ReplicationPage() {
   const [streamName, setStreamName] = useState("");
   const [cdcStatus, setCdcStatus] = useState<ReplicationCdcStatus | null>(null);
   const [cdcChecking, setCdcChecking] = useState(false);
+  const [targetStatus, setTargetStatus] = useState<ReplicationTargetTableStatus | null>(null);
+  const [targetChecking, setTargetChecking] = useState(false);
+  const [summary, setSummary] = useState<ReplicationSummary | null>(null);
 
   const { sourceConnections, targetConnections } = useConnections();
 
@@ -109,6 +126,72 @@ export default function ReplicationPage() {
     }
   }, [sourceConn, schema]);
 
+  const resolvedTargetSchema = resolveTargetSchema(schema, targetSchema);
+
+  const refreshTargetStatus = useCallback(async (tableName?: string) => {
+    if (!targetConn || !tableName) {
+      setTargetStatus(null);
+      return;
+    }
+    setTargetChecking(true);
+    try {
+      const rows = await getReplicationTargetStatus(
+        targetConn.id,
+        resolvedTargetSchema,
+        [tableName],
+        schema || "dbo",
+      );
+      setTargetStatus(rows[0] ?? null);
+    } catch (err) {
+      setTargetStatus({
+        table_name: tableName,
+        exists: false,
+        row_count: 0,
+        schema_mismatch: false,
+        ready: false,
+        message: err instanceof Error ? err.message : "Could not verify target table",
+      });
+    } finally {
+      setTargetChecking(false);
+    }
+  }, [targetConn, resolvedTargetSchema, schema]);
+
+  const resetStreamDialog = useCallback(() => {
+    setEditingStreamId(null);
+    setStreamName("");
+    setDiscoveredTables([]);
+    setSelectedTable("");
+    setDiscoverError(null);
+    setCdcStatus(null);
+    setTargetStatus(null);
+  }, []);
+
+  const openCreateDialog = useCallback(() => {
+    resetStreamDialog();
+    setShowStreamDialog(true);
+  }, [resetStreamDialog]);
+
+  const openEditDialog = useCallback((stream: ApiReplicationStream) => {
+    if (ACTIVE_STREAM_STATUSES.includes(stream.status)) {
+      toast.error("Stop the stream before editing");
+      return;
+    }
+    const tableName = stream.tables[0]?.name ?? "";
+    const src = sourceConnections.find((c) => c.id === stream.source_connection_id) ?? sourceConn;
+    const tgt = targetConnections.find((c) => c.id === stream.target_connection_id) ?? targetConn;
+    if (src) setSourceConn(src);
+    if (tgt) setTargetConn(tgt);
+    setSchema(stream.source_schema || "dbo");
+    setTargetSchema(stream.target_schema || "public");
+    setStreamName(stream.name);
+    setSelectedTable(tableName);
+    if (tableName) {
+      setDiscoveredTables([{ name: tableName, schema: stream.source_schema, type: "table" }]);
+    }
+    setEditingStreamId(stream.stream_id);
+    setShowStreamDialog(true);
+  }, [sourceConnections, targetConnections, sourceConn, targetConn]);
+
   useEffect(() => {
     if (sourceConn && !sourceConnections.find((c) => c.id === sourceConn.id)) setSourceConn(null);
     if (targetConn && !targetConnections.find((c) => c.id === targetConn.id)) setTargetConn(null);
@@ -116,31 +199,34 @@ export default function ReplicationPage() {
     if (targetConnections.length > 0 && !targetConn) setTargetConn(targetConnections[0]);
   }, [sourceConnections, targetConnections, sourceConn, targetConn]);
 
-  // Auto-discover when dialog opens and we have a source connection
+  // Auto-discover when create dialog opens and we have a source connection
   useEffect(() => {
-    if (showAddDialog && sourceConn) {
+    if (showStreamDialog && sourceConn && !editingStreamId) {
       handleDiscover();
     }
-    if (!showAddDialog) {
-      setDiscoveredTables([]);
-      setSelectedTable("");
-      setDiscoverError(null);
-      setCdcStatus(null);
+    if (!showStreamDialog) {
+      resetStreamDialog();
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showAddDialog]);
+  }, [showStreamDialog, editingStreamId]);
 
   useEffect(() => {
-    if (showAddDialog && sourceConn) {
+    if (showStreamDialog && sourceConn) {
       refreshCdcStatus();
     }
-  }, [showAddDialog, sourceConn, schema, refreshCdcStatus]);
+  }, [showStreamDialog, sourceConn, schema, refreshCdcStatus]);
 
   useEffect(() => {
-    if (showAddDialog && sourceConn && selectedTable) {
+    if (showStreamDialog && sourceConn && selectedTable) {
       refreshCdcStatus(selectedTable);
     }
-  }, [selectedTable, showAddDialog, sourceConn, refreshCdcStatus]);
+  }, [selectedTable, showStreamDialog, sourceConn, refreshCdcStatus]);
+
+  useEffect(() => {
+    if (showStreamDialog && targetConn && selectedTable) {
+      refreshTargetStatus(selectedTable);
+    }
+  }, [selectedTable, showStreamDialog, targetConn, resolvedTargetSchema, refreshTargetStatus]);
 
   const handleDiscover = useCallback(async () => {
     if (!sourceConn) {
@@ -178,14 +264,17 @@ export default function ReplicationPage() {
       toast.info("Configure source and target connections in Settings first");
       return;
     }
-    setShowAddDialog(true);
-    // Discovery is triggered by the useEffect above when showAddDialog becomes true
-  }, [sourceConn, targetConn]);
+    openCreateDialog();
+  }, [sourceConn, targetConn, openCreateDialog]);
 
   const loadStreams = useCallback(async () => {
     try {
-      const rows = await listReplicationStreams();
+      const [rows, summaryData] = await Promise.all([
+        listReplicationStreams(),
+        getReplicationSummary(),
+      ]);
       setStreams(rows);
+      setSummary(summaryData);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to load streams");
     } finally {
@@ -197,38 +286,97 @@ export default function ReplicationPage() {
     loadStreams();
   }, [loadStreams]);
 
-  const handleCreateAndStart = useCallback(async () => {
+  const handleSaveAndStart = useCallback(async () => {
     if (!sourceConn || !targetConn || !selectedTable) {
       toast.error("Select connections and a table");
       return;
     }
+    if (!targetStatus?.ready) {
+      toast.error("Migrate the selected table to the target before starting replication");
+      return;
+    }
     setLoading(true);
+    const payload = {
+      name: streamName || `${schema}.${selectedTable}`,
+      source_connection_id: sourceConn.id,
+      target_connection_id: targetConn.id,
+      tables: [selectedTable],
+      source_schema: schema || "dbo",
+      target_schema: resolvedTargetSchema,
+      mode: "cdc" as const,
+    };
+
     try {
-      const created = await createReplicationStream({
-        name: streamName || `${schema}.${selectedTable}`,
-        source_connection_id: sourceConn.id,
-        target_connection_id: targetConn.id,
-        tables: [selectedTable],
-        source_schema: schema || "dbo",
-        target_schema: targetSchema || "public",
-        mode: "cdc",
-      });
-      if (created.concerns.some((c) => c.level === "blocker")) {
-        toast.warning("Stream created with blockers — resolve concerns before data flows");
-        setStreams((prev) => [created, ...prev]);
-        setShowAddDialog(false);
+      const saved = editingStreamId
+        ? await updateReplicationStream(editingStreamId, payload)
+        : await createReplicationStream(payload);
+
+      if (saved.concerns.some((c) => c.level === "blocker")) {
+        toast.warning("Stream saved with blockers — resolve concerns before data flows");
+        setStreams((prev) => {
+          const without = prev.filter((s) => s.stream_id !== saved.stream_id);
+          return [saved, ...without];
+        });
+        setShowStreamDialog(false);
         return;
       }
-      const started = await startReplicationStream(created.stream_id);
-      setStreams((prev) => [started, ...prev.filter((s) => s.stream_id !== started.stream_id)]);
-      toast.success(`Replication started for ${selectedTable}`);
-      setShowAddDialog(false);
+
+      try {
+        const started = await startReplicationStream(saved.stream_id);
+        setStreams((prev) => [
+          started,
+          ...prev.filter((s) => s.stream_id !== started.stream_id),
+        ]);
+        toast.success(
+          editingStreamId
+            ? `Replication updated and started for ${selectedTable}`
+            : `Replication started for ${selectedTable}`,
+        );
+        setShowStreamDialog(false);
+      } catch (startErr) {
+        setStreams((prev) => {
+          const without = prev.filter((s) => s.stream_id !== saved.stream_id);
+          return [saved, ...without];
+        });
+        const msg =
+          startErr instanceof Error ? startErr.message : "Failed to start replication";
+        toast.error(`Stream saved but could not start: ${msg}`, { duration: 10_000 });
+        setShowStreamDialog(false);
+      }
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to create stream");
+      const msg = err instanceof Error ? err.message : "Failed to save stream";
+      toast.error(
+        editingStreamId ? `Failed to update stream: ${msg}` : `Failed to create stream: ${msg}`,
+        { duration: 10_000 },
+      );
     } finally {
       setLoading(false);
     }
-  }, [sourceConn, targetConn, selectedTable, schema, targetSchema, streamName]);
+  }, [
+    sourceConn,
+    targetConn,
+    selectedTable,
+    schema,
+    resolvedTargetSchema,
+    streamName,
+    editingStreamId,
+    targetStatus,
+  ]);
+
+  const handleDeleteStream = useCallback(async () => {
+    if (!deleteTarget) return;
+    try {
+      if (ACTIVE_STREAM_STATUSES.includes(deleteTarget.status)) {
+        await stopReplicationStream(deleteTarget.stream_id);
+      }
+      await deleteReplicationStream(deleteTarget.stream_id);
+      setStreams((prev) => prev.filter((s) => s.stream_id !== deleteTarget.stream_id));
+      toast.success(`Deleted stream ${deleteTarget.name}`);
+      setDeleteTarget(null);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to delete stream");
+    }
+  }, [deleteTarget]);
 
   const handleStreamAction = useCallback(
     async (streamId: string, action: "pause" | "resume" | "stop") => {
@@ -274,33 +422,34 @@ export default function ReplicationPage() {
     }
   }, [sourceConn, targetConn]);
 
-  const activeStreams = streams.filter((s) =>
-    ["CDC_STREAMING", "STARTING", "CDC_CATCHUP"].includes(s.status),
+  const activeStreams = summary?.active_streams ?? streams.filter((s) =>
+    ["CDC_STREAMING", "STARTING", "CDC_CATCHUP", "PAUSED"].includes(s.status),
   ).length;
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   useEffect(() => {
-    const interval = activeStreams > 0 ? 5_000 : 30_000;
-    pollRef.current = setInterval(() => {
-      streams
-        .filter((s) => ["CDC_STREAMING", "PAUSED"].includes(s.status))
-        .forEach(async (s) => {
-          try {
-            const fresh = await getReplicationStreamStatus(s.stream_id);
-            setStreams((prev) =>
-              prev.map((row) => (row.stream_id === s.stream_id ? { ...row, ...fresh } : row)),
-            );
-          } catch {
-            /* ignore poll errors */
-          }
-        });
+    const hasLive = summary?.live ?? streams.some((s) => s.is_active);
+    const interval = hasLive ? 4_000 : 30_000;
+    pollRef.current = setInterval(async () => {
+      try {
+        const [summaryData, rows] = await Promise.all([
+          getReplicationSummary(),
+          listReplicationStreams(),
+        ]);
+        setSummary(summaryData);
+        setStreams(rows);
+      } catch {
+        /* ignore poll errors */
+      }
     }, interval);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [activeStreams, streams]);
+  }, [summary?.live, streams]);
 
-  const totalCaptured = streams.reduce((n, s) => n + (s.events_captured || 0), 0);
-  const totalApplied = streams.reduce((n, s) => n + (s.events_applied || 0), 0);
-  const queueDepth = streams.reduce((n, s) => n + (s.queue_depth || 0), 0);
+  const totalCaptured = summary?.events_captured ?? 0;
+  const totalApplied = summary?.events_applied ?? 0;
+  const queueDepth = summary?.queue_depth ?? 0;
+  const pendingLag = summary?.pending_lag ?? 0;
+  const kpiLive = summary?.live ?? false;
 
   return (
     <div className="p-6 space-y-6">
@@ -318,6 +467,24 @@ export default function ReplicationPage() {
         </Button>
       </div>
 
+      <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm flex items-start gap-2">
+        <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
+        <p className="text-amber-950 dark:text-amber-100 text-xs leading-relaxed">
+          <span className="font-medium">Preview feature.</span>{" "}
+          Replication is still in progress and may not work as expected. Full functionality is
+          planned for a future release.
+        </p>
+      </div>
+
+      <div className="rounded-md border border-blue-500/30 bg-blue-500/10 px-4 py-3 text-sm flex items-start gap-2">
+        <Database className="h-4 w-4 text-blue-500 shrink-0 mt-0.5" />
+        <p className="text-blue-900 dark:text-blue-100 text-xs leading-relaxed">
+          <span className="font-medium">CDC replication requires a migrated baseline.</span>{" "}
+          Run a full table migration first, then add a stream here to apply ongoing SQL Server
+          changes to PostgreSQL.
+        </p>
+      </div>
+
       {sourceConn && targetConn && (
         <div className="flex items-center gap-3 text-sm text-muted-foreground">
           <Badge variant="outline" className="text-[10px] px-1 py-0">Source</Badge>
@@ -328,7 +495,7 @@ export default function ReplicationPage() {
         </div>
       )}
 
-      {/* Stats */}
+      {/* Stats — sourced from /replication/summary with live runtime merge */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
@@ -336,43 +503,51 @@ export default function ReplicationPage() {
             <Activity className={`h-4 w-4 ${activeStreams > 0 ? "text-emerald-500" : "text-muted-foreground"}`} />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{activeStreams} / {streams.length}</div>
+            <div className="text-2xl font-bold">
+              {summary ? `${summary.active_streams} / ${summary.total_streams}` : `${activeStreams} / ${streams.length}`}
+            </div>
             <p className="text-xs text-muted-foreground mt-1">
-              {streams.length === 0 ? "No streams configured" : `${streams.length - activeStreams} stopped`}
+              {kpiLive ? "Live metrics updating" : streams.length === 0 ? "No streams configured" : "No active capture"}
             </p>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium">Events Captured</CardTitle>
+            <CardTitle className="text-sm font-medium">Commands Captured</CardTitle>
             <Activity className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold font-mono">{totalCaptured}</div>
-            <p className="text-xs text-muted-foreground mt-1">From source polling</p>
+            <div className="text-2xl font-bold font-mono">{totalCaptured.toLocaleString()}</div>
+            <p className="text-xs text-muted-foreground mt-1">
+              CDC events read from SQL Server{kpiLive ? " · live" : ""}
+            </p>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium">Events Applied</CardTitle>
+            <CardTitle className="text-sm font-medium">Commands Applied</CardTitle>
             <Activity className="h-4 w-4 text-emerald-500" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold font-mono text-emerald-500">{totalApplied}</div>
-            <p className="text-xs text-muted-foreground mt-1">Written to PostgreSQL</p>
+            <div className="text-2xl font-bold font-mono text-emerald-500">{totalApplied.toLocaleString()}</div>
+            <p className="text-xs text-muted-foreground mt-1">
+              Synced to PostgreSQL{pendingLag > 0 ? ` · ${pendingLag} pending` : ""}
+            </p>
           </CardContent>
         </Card>
 
-        <Card className={queueDepth > 100 ? "border-amber-500/40" : ""}>
+        <Card className={queueDepth > 100 || pendingLag > 50 ? "border-amber-500/40" : ""}>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium">Queue Depth</CardTitle>
+            <CardTitle className="text-sm font-medium">Queue / Lag</CardTitle>
             <Activity className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{queueDepth}</div>
-            <p className="text-xs text-muted-foreground mt-1">Pending in-memory queue</p>
+            <div className="text-2xl font-bold font-mono">{queueDepth.toLocaleString()}</div>
+            <p className="text-xs text-muted-foreground mt-1">
+              In-memory queue · lag {pendingLag.toLocaleString()}
+            </p>
           </CardContent>
         </Card>
       </div>
@@ -435,18 +610,26 @@ export default function ReplicationPage() {
                     }`}>
                       <Activity className="h-4 w-4" />
                     </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium truncate">{s.name}</p>
+                    <Link
+                      href={`/replication/${s.stream_id}`}
+                      className="flex-1 min-w-0 group"
+                    >
+                      <p className="text-sm font-medium truncate group-hover:text-primary transition-colors">
+                        {s.name}
+                      </p>
                       <p className="text-xs text-muted-foreground font-mono">
                         {s.source_schema}.{tableName} → {s.target_schema}.{tableName.toLowerCase()}
                       </p>
                       <p className="text-[10px] text-muted-foreground mt-0.5">
-                        captured {s.events_captured} · applied {s.events_applied}
+                        captured {s.events_captured?.toLocaleString()} · applied {s.events_applied?.toLocaleString()}
+                        {(s.pending_lag ?? 0) > 0 && (
+                          <span className="text-amber-400 ml-2">lag {s.pending_lag}</span>
+                        )}
                         {s.concerns.length > 0 && (
                           <span className="text-amber-400 ml-2">{s.concerns.length} concern(s)</span>
                         )}
                       </p>
-                    </div>
+                    </Link>
                     <Badge variant="outline" className="text-[10px]">{s.status}</Badge>
                     {s.status === "CDC_STREAMING" && (
                       <Button variant="ghost" size="sm" onClick={() => handleStreamAction(s.stream_id, "pause")}>
@@ -463,6 +646,25 @@ export default function ReplicationPage() {
                         <Square className="h-4 w-4" />
                       </Button>
                     )}
+                    {!ACTIVE_STREAM_STATUSES.includes(s.status) && (
+                      <Button variant="ghost" size="sm" onClick={() => openEditDialog(s)} title="Edit stream">
+                        <Pencil className="h-4 w-4" />
+                      </Button>
+                    )}
+                    <Button variant="ghost" size="sm" asChild title="View details">
+                      <Link href={`/replication/${s.stream_id}`}>
+                        <ChevronRight className="h-4 w-4" />
+                      </Link>
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-destructive hover:text-destructive"
+                      onClick={() => setDeleteTarget(s)}
+                      title="Delete stream"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
                   </div>
                 );
               })}
@@ -496,16 +698,19 @@ export default function ReplicationPage() {
       {/* ------------------------------------------------------------------ */}
       {/* Add Stream Dialog                                                   */}
       {/* ------------------------------------------------------------------ */}
-      <Dialog open={showAddDialog} onOpenChange={setShowAddDialog}>
+      <Dialog open={showStreamDialog} onOpenChange={setShowStreamDialog}>
         <DialogContent className="w-full max-w-4xl sm:max-w-5xl flex flex-col p-0 gap-0 overflow-hidden max-h-[90vh]">
           <DialogHeader className="px-6 pt-6 pb-4 border-b shrink-0">
-            <DialogTitle>Add Replication Stream</DialogTitle>
+            <DialogTitle>{editingStreamId ? "Edit Replication Stream" : "Add Replication Stream"}</DialogTitle>
             <DialogDescription>
-              Select a source table to replicate to the target database via CDC.
+              Select a source table that has already been migrated to PostgreSQL, then stream CDC changes.
             </DialogDescription>
           </DialogHeader>
 
           <div className="px-6 py-5 space-y-5 flex-1 overflow-y-auto">
+            <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-950 dark:text-amber-100">
+              Replication is in active development and may not work as expected yet.
+            </div>
             {cdcChecking && (
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -521,6 +726,28 @@ export default function ReplicationPage() {
             {!cdcChecking && cdcStatus?.ready && (
               <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-4 py-2 text-sm text-emerald-600">
                 CDC is enabled for the selected source{selectedTable ? ` table (${selectedTable})` : " database"}.
+              </div>
+            )}
+            {targetChecking && (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Checking whether the table exists on the target…
+              </div>
+            )}
+            {!targetChecking && targetStatus && !targetStatus.ready && (
+              <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-900 dark:text-amber-100 flex items-start gap-2">
+                <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-amber-500" />
+                <div className="space-y-2">
+                  <p>{targetStatus.message}</p>
+                  <Button variant="outline" size="sm" asChild>
+                    <Link href="/migrations">Run migration first</Link>
+                  </Button>
+                </div>
+              </div>
+            )}
+            {!targetChecking && targetStatus?.ready && (
+              <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-4 py-2 text-sm text-emerald-600">
+                {targetStatus.message}
               </div>
             )}
             <div className="grid grid-cols-2 gap-4">
@@ -654,20 +881,44 @@ export default function ReplicationPage() {
               <div className="rounded-md bg-muted/30 px-3 py-2 text-xs text-muted-foreground space-y-0.5">
                 <p className="font-medium text-foreground">Replication details</p>
                 <p>Source: <span className="font-mono">{sourceConn?.database}.{schema}.{selectedTable}</span></p>
-                <p>Target: <span className="font-mono">{targetConn?.database}.public.{selectedTable.toLowerCase()}</span></p>
+                <p>Target: <span className="font-mono">{targetConn?.database}.{resolvedTargetSchema}.{selectedTable.toLowerCase()}</span></p>
               </div>
             )}
           </div>
 
           <DialogFooter className="px-6 py-4 border-t shrink-0">
-            <Button variant="outline" onClick={() => setShowAddDialog(false)}>Cancel</Button>
+            <Button variant="outline" onClick={() => setShowStreamDialog(false)}>Cancel</Button>
             <Button
-              onClick={handleCreateAndStart}
-              disabled={!selectedTable || loading || cdcChecking || !cdcStatus?.ready}
+              onClick={handleSaveAndStart}
+              disabled={
+                !selectedTable
+                || loading
+                || cdcChecking
+                || targetChecking
+                || !cdcStatus?.ready
+                || !targetStatus?.ready
+              }
             >
               <Play className="h-4 w-4 mr-2" />
-              Create &amp; Start
+              {editingStreamId ? "Save & Start" : "Create & Start"}
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={deleteTarget !== null} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete replication stream?</DialogTitle>
+            <DialogDescription>
+              {deleteTarget
+                ? `This removes "${deleteTarget.name}" and stops capture if it is still running.`
+                : ""}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button>
+            <Button variant="destructive" onClick={handleDeleteStream}>Delete</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

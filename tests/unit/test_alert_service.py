@@ -6,7 +6,8 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import application.migration_service as migration_svc
-from application.alert_service import AlertService, notification_config_status
+from application.alert_service import AlertService
+from application.notification_config import notification_config_status
 from application.job_registry import JobRegistry
 from domains.migration.migration_engine import (
     MigrationJob,

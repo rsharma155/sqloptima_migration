@@ -39,6 +39,27 @@ def test_selected_table_blockers_returns_blocker_tables():
     assert "PostGIS" in blocked[0][1][0]
 
 
+def test_assert_tables_ready_allows_with_type_overrides():
+    ta = TableAssessment(
+        table_name="dt_MiscTypes",
+        schema_name="dbo",
+        migration_tier=MigrationTier.BLOCKER,
+        blocker_types=["col_sql_variant"],
+        unsupported_type_columns=[
+            {"column_name": "col_sql_variant", "source_type": "sql_variant"},
+        ],
+        blockers=[
+            "Column 'col_sql_variant' uses unsupported type 'sql_variant' — choose a PostgreSQL target type"
+        ],
+    )
+    assessment = DatabaseAssessment(database_name="AppDb", tables=[ta])
+    assert_tables_ready_for_migration(
+        assessment,
+        ["dt_MiscTypes"],
+        column_type_overrides={"dt_MiscTypes.col_sql_variant": "sql_variant_text"},
+    )
+
+
 def test_assert_tables_ready_raises_for_blockers():
     assessment = DatabaseAssessment(
         database_name="AppDb",

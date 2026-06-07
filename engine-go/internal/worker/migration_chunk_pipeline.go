@@ -37,6 +37,7 @@ func (p *MigrationChunkPipeline) Run(
 	conflictColumns []string,
 	extractOpts extractor.ExtractOptions,
 	transforms *MigrationColumnTransformPipeline,
+	onProgress loader.RowProgressFunc,
 ) (int64, error) {
 	pipe := make(chan []core.CellValue, 32)
 	errCh := make(chan error, 1)
@@ -73,7 +74,7 @@ func (p *MigrationChunkPipeline) Run(
 		return rows, nil
 	}
 
-	rows, err := p.Loader.RunToTargetTable(ctx, targetSchema, targetTable, schema, pipe)
+	rows, err := p.Loader.RunToTargetTable(ctx, targetSchema, targetTable, schema, pipe, onProgress)
 	if extractErr := <-errCh; extractErr != nil {
 		return 0, fmt.Errorf("extract chunk: %w", extractErr)
 	}

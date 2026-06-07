@@ -48,6 +48,15 @@ class ChangeApplier:
         self._conn = connection
         self._checkpoint = checkpoint_store
         self._dedup = deduplicator
+        self.stats: dict[str, int] = {
+            "applied": 0,
+            "duplicate": 0,
+            "insert": 0,
+            "update": 0,
+            "delete": 0,
+            "failed": 0,
+        }
+        self.recent_errors: list[str] = []
 
     async def apply(self, event: ChangeEvent, pk_columns: list[str] | None = None) -> bool:
         """Apply a single change event to the target database.
@@ -67,16 +76,31 @@ class ChangeApplier:
         dedup_key = DedupKey.for_event(event)
         if await self._dedup.already_applied(dedup_key.value, qualified):
             logger.debug("Skipping duplicate event %s for %s", dedup_key.value, qualified)
+            self.stats["duplicate"] += 1
             return True
 
-        if event.operation == ChangeOperation.DELETE:
-            sql, params = self._build_delete(event, pk_columns or list(event.before_values or {}))
-        else:
-            sql, params = self._build_upsert(event, pk_columns or self._detect_pk(event))
+        try:
+            if event.operation == ChangeOperation.DELETE:
+                sql, params = self._build_delete(
+                    event, pk_columns or list(event.before_values or {}),
+                )
+            else:
+                sql, params = self._build_upsert(event, pk_columns or self._detect_pk(event))
 
-        await self._conn.execute(sql, params)
+            await self._conn.execute(sql, params)
+        except Exception as exc:
+            self.stats["failed"] += 1
+            msg = f"{qualified} {event.operation.value}: {exc}"
+            self.recent_errors.append(msg)
+            if len(self.recent_errors) > 20:
+                self.recent_errors.pop(0)
+            raise
 
         await self._dedup.record(dedup_key.value, qualified)
+        self.stats["applied"] += 1
+        op_key = event.operation.value.lower()
+        if op_key in self.stats:
+            self.stats[op_key] += 1
         # Checkpoints track LSN-based resume position; only meaningful when the
         # source supplied an authoritative LSN.
         if event.lsn:

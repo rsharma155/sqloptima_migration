@@ -209,6 +209,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
     }
 
     async def dispatch(self, request: Request, call_next: Callable) -> Any:
+        # Browsers send OPTIONS preflight without Authorization; CORS middleware answers it.
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
         path = request.url.path
         if path in self.PUBLIC_PATHS or path.startswith(("/docs", "/openapi.json", "/redoc")):
             return await call_next(request)

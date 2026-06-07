@@ -40,6 +40,16 @@ _CATALOG: dict[str, PlatformError] = {
         remediation="Re-enter credentials in Connections; confirm the account exists and is unlocked.",
         doc_anchor="operations#connection-errors",
     ),
+    "MIG_TARGET_CONFLICT": PlatformError(
+        code="MIG_TARGET_CONFLICT",
+        title="Target tables already exist",
+        cause="PostgreSQL already has one or more of the selected tables.",
+        remediation=(
+            "Use the conflict dialog: choose “Skip data load” if migration already completed, "
+            "“Truncate and reload” for a full refresh, or resume a paused job."
+        ),
+        doc_anchor="operations#target-table-conflicts",
+    ),
     "MIG_SNAPSHOT_REQUIRED": PlatformError(
         code="MIG_SNAPSHOT_REQUIRED",
         title="Target snapshot required",
@@ -75,6 +85,7 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(?i)hyt00|login timeout|timeout expired|timed out"), "CONN_SOURCE_UNREACHABLE"),
     (re.compile(r"(?i)pyodbc|sql server|1433|connection.*refused|odbc driver"), "CONN_SOURCE_UNREACHABLE"),
     (re.compile(r"(?i)asyncpg|postgres|5432|pg_hba|host is down|errno 64|no route to host"), "CONN_TARGET_UNREACHABLE"),
+    (re.compile(r"(?i)target table conflict|choose a policy"), "MIG_TARGET_CONFLICT"),
     (re.compile(r"(?i)snapshot gate|pg_dump|require.*snapshot"), "MIG_SNAPSHOT_REQUIRED"),
     (re.compile(r"(?i)strict masking|sensitive column"), "MIG_MASKING_STRICT"),
     (re.compile(r"(?i)schema.*mismatch|validation failed"), "VAL_SCHEMA_MISMATCH"),

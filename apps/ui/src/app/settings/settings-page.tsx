@@ -29,6 +29,7 @@ import {
   Mail,
   Webhook,
   TriangleAlert,
+  Timer,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -51,10 +52,16 @@ import {
   testRawConnection as apiTestRawConnection,
   refreshApiBase,
   getAlertConfig,
+  saveAlertConfig,
   testAlertChannels,
+  getMigrationSettings,
+  saveMigrationSettings,
   type AlertConfigResponse,
+  type AlertConfigUpdateRequest,
+  type MigrationSettingsResponse,
+  type MigrationSettingsUpdateRequest,
 } from "@/lib/api";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type Connection,
   CONNECTIONS_UPDATED_EVENT,
@@ -69,6 +76,7 @@ import {
   findDuplicateName,
   findSimilarConnections,
 } from "@/lib/connection-dedupe";
+import { ConnectionPrivilegeScriptsPanel } from "@/components/connections/connection-privilege-scripts-panel";
 import {
   loadMigrationEnvironment,
   saveMigrationEnvironment,
@@ -113,7 +121,30 @@ export default function SettingsPage() {
   const [testOnSave, setTestOnSave] = useState(false);
   const [similarConfirm, setSimilarConfirm] = useState(false);
   const [testingAlerts, setTestingAlerts] = useState(false);
+  const [savingAlerts, setSavingAlerts] = useState(false);
+  const [savingMigration, setSavingMigration] = useState(false);
+  const [showSmtpPassword, setShowSmtpPassword] = useState(false);
+  const [alertForm, setAlertForm] = useState<AlertConfigUpdateRequest>({
+    webhook_enabled: false,
+    webhook_url: "",
+    email_enabled: false,
+    smtp_host: "",
+    smtp_port: 587,
+    smtp_user: "",
+    smtp_password: "",
+    alert_email_to: "",
+    alert_email_from: "",
+  });
+  const [migrationForm, setMigrationForm] = useState<MigrationSettingsUpdateRequest>({
+    source_throttle_enabled: true,
+    small_table_delay_sec: 1,
+    large_table_delay_sec: 4,
+    large_table_row_threshold: 100_000,
+    large_table_size_mb_threshold: 50,
+    max_tables_per_job: 25,
+  });
   const dialogRef = useRef<HTMLDivElement>(null);
+  const queryClient = useQueryClient();
 
   const { data: alertConfig } = useQuery<AlertConfigResponse>({
     queryKey: ["alert-config"],
@@ -121,15 +152,50 @@ export default function SettingsPage() {
     staleTime: 60_000,
   });
 
+  const { data: migrationConfig } = useQuery<MigrationSettingsResponse>({
+    queryKey: ["migration-settings"],
+    queryFn: getMigrationSettings,
+    staleTime: 60_000,
+  });
+
+  useEffect(() => {
+    if (!migrationConfig) return;
+    setMigrationForm({
+      source_throttle_enabled: migrationConfig.source_throttle_enabled,
+      small_table_delay_sec: migrationConfig.small_table_delay_sec,
+      large_table_delay_sec: migrationConfig.large_table_delay_sec,
+      large_table_row_threshold: migrationConfig.large_table_row_threshold,
+      large_table_size_mb_threshold: migrationConfig.large_table_size_mb_threshold,
+      max_tables_per_job: migrationConfig.max_tables_per_job,
+    });
+  }, [migrationConfig]);
+
+  useEffect(() => {
+    if (!alertConfig) return;
+    setAlertForm({
+      webhook_enabled: alertConfig.webhook_enabled,
+      webhook_url: "",
+      email_enabled: alertConfig.email_enabled,
+      smtp_host: alertConfig.smtp_host,
+      smtp_port: alertConfig.smtp_port,
+      smtp_user: alertConfig.smtp_user,
+      smtp_password: "",
+      alert_email_to: alertConfig.alert_email_to || alertConfig.email_to || "",
+      alert_email_from: alertConfig.alert_email_from,
+    });
+  }, [alertConfig]);
+
   const similarConnections = useMemo(
     () =>
       findSimilarConnections(
         connections,
+        (form.type as "source" | "target") ?? "source",
         form.host ?? "",
         form.database ?? "",
+        form.port,
         editingId,
       ),
-    [connections, form.host, form.database, editingId],
+    [connections, form.type, form.host, form.database, form.port, editingId],
   );
 
   useEffect(() => {
@@ -209,6 +275,72 @@ export default function SettingsPage() {
       toast.error(e instanceof Error ? e.message : "Alert test failed (admin role required)");
     } finally {
       setTestingAlerts(false);
+    }
+  };
+
+  const handleSaveAlerts = async () => {
+    if (alertForm.webhook_enabled && !alertForm.webhook_url && !alertConfig?.webhook_configured) {
+      toast.error("Enter a webhook URL or disable webhook alerts");
+      return;
+    }
+    if (alertForm.email_enabled) {
+      if (!alertForm.smtp_host.trim()) {
+        toast.error("SMTP host is required for email alerts");
+        return;
+      }
+      if (!alertForm.alert_email_to.trim()) {
+        toast.error("Alert recipient email is required");
+        return;
+      }
+    }
+    setSavingAlerts(true);
+    try {
+      const saved = await saveAlertConfig(alertForm);
+      await queryClient.invalidateQueries({ queryKey: ["alert-config"] });
+      setAlertForm((prev) => ({ ...prev, webhook_url: "", smtp_password: "" }));
+      toast.success("Notification settings saved");
+      if (saved.source === "environment") {
+        toast.message("Environment variables still provide fallback channels");
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to save notification settings");
+    } finally {
+      setSavingAlerts(false);
+    }
+  };
+
+  const updateAlertField = <K extends keyof AlertConfigUpdateRequest>(
+    field: K,
+    value: AlertConfigUpdateRequest[K],
+  ) => {
+    setAlertForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const updateMigrationField = <K extends keyof MigrationSettingsUpdateRequest>(
+    field: K,
+    value: MigrationSettingsUpdateRequest[K],
+  ) => {
+    setMigrationForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const handleSaveMigrationSettings = async () => {
+    if (
+      migrationForm.small_table_delay_sec > migrationForm.large_table_delay_sec
+    ) {
+      toast.error("Small-table delay must not exceed large-table delay");
+      return;
+    }
+    setSavingMigration(true);
+    try {
+      await saveMigrationSettings(migrationForm);
+      await queryClient.invalidateQueries({ queryKey: ["migration-settings"] });
+      toast.success("Migration settings saved");
+    } catch (e) {
+      toast.error(
+        e instanceof Error ? e.message : "Failed to save migration settings (admin role required)",
+      );
+    } finally {
+      setSavingMigration(false);
     }
   };
 
@@ -432,6 +564,7 @@ export default function SettingsPage() {
         (c) =>
           c.type === trimmed.type &&
           c.host === trimmed.host &&
+          c.port === trimmed.port &&
           c.database === trimmed.database &&
           c.name.trim().toLowerCase() === trimmed.name.trim().toLowerCase(),
       );
@@ -645,6 +778,14 @@ export default function SettingsPage() {
             <Database className="h-4 w-4" aria-hidden="true" />
             Connections
           </TabsTrigger>
+          <TabsTrigger value="notifications" className="flex items-center gap-2">
+            <Bell className="h-4 w-4" aria-hidden="true" />
+            Notifications
+          </TabsTrigger>
+          <TabsTrigger value="migration" className="flex items-center gap-2">
+            <Timer className="h-4 w-4" aria-hidden="true" />
+            Migration
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="general" className="space-y-4" role="tabpanel">
@@ -755,19 +896,41 @@ export default function SettingsPage() {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Bell className="h-5 w-5" />
+                In-app alerts
+              </CardTitle>
+              <CardDescription>
+                Failed migrations and setup issues appear in the dashboard alert banner (polled every 30s).
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <p className="text-sm text-muted-foreground">
+                Configure external webhook and email channels in the{" "}
+                <span className="font-medium text-foreground">Notifications</span> tab to receive
+                Slack, Teams, or SMTP alerts when migrations start, complete, or fail.
+              </p>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="notifications" className="space-y-4" role="tabpanel">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Bell className="h-5 w-5" />
                 Alerting &amp; Notifications
               </CardTitle>
               <CardDescription>
-                External alerts for migration failures — configured via server environment variables
+                Send external alerts on migration start, complete, and failure. Settings are stored
+                securely in the platform database (admin only).
               </CardDescription>
             </CardHeader>
-            <CardContent className="space-y-4">
+            <CardContent className="space-y-6">
               <div className="flex flex-wrap gap-3 text-sm">
                 <div className="flex items-center gap-2 rounded-md border px-3 py-2">
                   <Webhook className="h-4 w-4 text-muted-foreground" />
                   <span>Webhook</span>
                   <Badge variant={alertConfig?.webhook_configured ? "default" : "secondary"}>
-                    {alertConfig?.webhook_configured ? "Configured" : "Not set"}
+                    {alertConfig?.webhook_configured ? "Active" : "Inactive"}
                   </Badge>
                 </div>
                 <div className="flex items-center gap-2 rounded-md border px-3 py-2">
@@ -776,46 +939,313 @@ export default function SettingsPage() {
                   <Badge variant={alertConfig?.email_configured ? "default" : "secondary"}>
                     {alertConfig?.email_configured
                       ? `→ ${alertConfig.email_to}`
-                      : "Not set"}
+                      : "Inactive"}
                   </Badge>
                 </div>
+                {alertConfig?.source === "environment" && (
+                  <Badge variant="outline">Env fallback active</Badge>
+                )}
               </div>
 
-              <div className="rounded-md border bg-muted/30 p-4 space-y-2 text-xs font-mono text-muted-foreground">
-                <p className="font-sans text-sm font-medium text-foreground">Webhook (Slack / Teams / PagerDuty)</p>
-                <p>MIGRATION_WEBHOOK_URL=https://hooks.slack.com/services/…</p>
-                <p className="font-sans text-sm font-medium text-foreground pt-2">Email (SMTP)</p>
-                <p>MIGRATION_SMTP_HOST=smtp.example.com</p>
-                <p>MIGRATION_SMTP_PORT=587</p>
-                <p>MIGRATION_SMTP_USER=alerts@example.com</p>
-                <p>MIGRATION_SMTP_PASSWORD=…</p>
-                <p>MIGRATION_ALERT_EMAIL_TO=dba-team@example.com</p>
-                <p>MIGRATION_ALERT_EMAIL_FROM=alerts@example.com</p>
+              <div className="space-y-4 rounded-md border p-4">
+                <label className="flex items-start gap-3 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={alertForm.webhook_enabled}
+                    onChange={(e) => updateAlertField("webhook_enabled", e.target.checked)}
+                    className="mt-1 h-4 w-4 rounded"
+                  />
+                  <span>
+                    <span className="block text-sm font-medium">Webhook alerts</span>
+                    <span className="block text-xs text-muted-foreground">
+                      Slack, Microsoft Teams, PagerDuty, or any JSON webhook endpoint
+                    </span>
+                  </span>
+                </label>
+                {alertForm.webhook_enabled && (
+                  <div className="space-y-2 pl-7">
+                    <Label htmlFor="webhook-url">Webhook URL</Label>
+                    <Input
+                      id="webhook-url"
+                      type="url"
+                      value={alertForm.webhook_url}
+                      onChange={(e) => updateAlertField("webhook_url", e.target.value)}
+                      placeholder={
+                        alertConfig?.webhook_configured
+                          ? `Configured: ${alertConfig.webhook_url || "••••••"} — enter new URL to change`
+                          : "https://hooks.slack.com/services/…"
+                      }
+                      className="font-mono text-sm"
+                    />
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-4 rounded-md border p-4">
+                <label className="flex items-start gap-3 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={alertForm.email_enabled}
+                    onChange={(e) => updateAlertField("email_enabled", e.target.checked)}
+                    className="mt-1 h-4 w-4 rounded"
+                  />
+                  <span>
+                    <span className="block text-sm font-medium">Email alerts (SMTP)</span>
+                    <span className="block text-xs text-muted-foreground">
+                      TLS on port 587 (STARTTLS) — typical for Office 365, Gmail relay, SendGrid
+                    </span>
+                  </span>
+                </label>
+                {alertForm.email_enabled && (
+                  <div className="grid gap-4 pl-7 sm:grid-cols-2">
+                    <div className="space-y-2 sm:col-span-2">
+                      <Label htmlFor="smtp-host">SMTP host</Label>
+                      <Input
+                        id="smtp-host"
+                        value={alertForm.smtp_host}
+                        onChange={(e) => updateAlertField("smtp_host", e.target.value)}
+                        placeholder="smtp.example.com"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="smtp-port">SMTP port</Label>
+                      <Input
+                        id="smtp-port"
+                        type="number"
+                        min={1}
+                        max={65535}
+                        value={alertForm.smtp_port}
+                        onChange={(e) => updateAlertField("smtp_port", Number(e.target.value))}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="smtp-user">SMTP username</Label>
+                      <Input
+                        id="smtp-user"
+                        value={alertForm.smtp_user}
+                        onChange={(e) => updateAlertField("smtp_user", e.target.value)}
+                        placeholder="alerts@example.com"
+                      />
+                    </div>
+                    <div className="space-y-2 sm:col-span-2">
+                      <Label htmlFor="smtp-password">SMTP password</Label>
+                      <div className="relative">
+                        <Input
+                          id="smtp-password"
+                          type={showSmtpPassword ? "text" : "password"}
+                          value={alertForm.smtp_password}
+                          onChange={(e) => updateAlertField("smtp_password", e.target.value)}
+                          placeholder={
+                            alertConfig?.smtp_password_set
+                              ? "Leave blank to keep current password"
+                              : "App password or SMTP credential"
+                          }
+                          className="pr-10"
+                          autoComplete="new-password"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowSmtpPassword(!showSmtpPassword)}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                          aria-label={showSmtpPassword ? "Hide password" : "Show password"}
+                        >
+                          {showSmtpPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="alert-email-to">Send alerts to</Label>
+                      <Input
+                        id="alert-email-to"
+                        type="email"
+                        value={alertForm.alert_email_to}
+                        onChange={(e) => updateAlertField("alert_email_to", e.target.value)}
+                        placeholder="dba-team@example.com"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="alert-email-from">From address</Label>
+                      <Input
+                        id="alert-email-from"
+                        type="email"
+                        value={alertForm.alert_email_from}
+                        onChange={(e) => updateAlertField("alert_email_from", e.target.value)}
+                        placeholder="alerts@example.com (optional)"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <Button onClick={handleSaveAlerts} disabled={savingAlerts}>
+                  {savingAlerts ? (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  ) : (
+                    <Save className="h-4 w-4 mr-2" />
+                  )}
+                  {savingAlerts ? "Saving…" : "Save notification settings"}
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={handleTestAlerts}
+                  disabled={testingAlerts || !alertConfig?.channels_active}
+                >
+                  {testingAlerts ? (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  ) : (
+                    <Bell className="h-4 w-4 mr-2" />
+                  )}
+                  Send test alert
+                </Button>
               </div>
 
               <p className="text-xs text-muted-foreground">
-                The in-app alert banner polls <code className="text-[10px]">GET /api/v1/alerts</code> every 30s on all pages.
-                Webhook/email fire automatically on migration start, complete, and fail.
+                Requires admin role to save or test. Legacy <code className="text-[10px]">MIGRATION_*</code>{" "}
+                environment variables still work as a fallback when app settings are empty.
               </p>
+            </CardContent>
+          </Card>
+        </TabsContent>
 
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleTestAlerts}
-                disabled={testingAlerts || !alertConfig?.channels_active}
-              >
-                {testingAlerts ? (
+        <TabsContent value="migration" className="space-y-4" role="tabpanel">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Timer className="h-5 w-5" />
+                Migration job limits
+              </CardTitle>
+              <CardDescription>
+                Control how many tables can be included in one migration job. The Go migration
+                engine processes one job at a time and migrates tables sequentially within each job.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-2 max-w-xs">
+                <Label htmlFor="max-tables-per-job">Maximum tables per job</Label>
+                <Input
+                  id="max-tables-per-job"
+                  type="number"
+                  min={1}
+                  max={500}
+                  value={migrationForm.max_tables_per_job}
+                  onChange={(e) =>
+                    updateMigrationField("max_tables_per_job", Number(e.target.value))
+                  }
+                />
+                <p className="text-xs text-muted-foreground">
+                  Prevents oversized jobs that slow the UI and monopolize the migration worker.
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Source read throttle</CardTitle>
+              <CardDescription>
+                Pause between chunk reads from SQL Server to reduce load on busy source databases.
+                A table is treated as &quot;large&quot; when its estimated row count or on-disk size
+                exceeds either threshold below.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <label className="flex items-start gap-3 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={migrationForm.source_throttle_enabled}
+                  onChange={(e) =>
+                    updateMigrationField("source_throttle_enabled", e.target.checked)
+                  }
+                  className="mt-1 h-4 w-4 rounded"
+                />
+                <span>
+                  <span className="block text-sm font-medium">Enable source throttle</span>
+                  <span className="block text-xs text-muted-foreground">
+                    When disabled, chunks are read back-to-back with no delay
+                  </span>
+                </span>
+              </label>
+
+              {migrationForm.source_throttle_enabled && (
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="small-table-delay">Small table delay (seconds)</Label>
+                    <Input
+                      id="small-table-delay"
+                      type="number"
+                      min={0}
+                      max={300}
+                      step={0.5}
+                      value={migrationForm.small_table_delay_sec}
+                      onChange={(e) =>
+                        updateMigrationField("small_table_delay_sec", Number(e.target.value))
+                      }
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="large-table-delay">Large table delay (seconds)</Label>
+                    <Input
+                      id="large-table-delay"
+                      type="number"
+                      min={0}
+                      max={600}
+                      step={0.5}
+                      value={migrationForm.large_table_delay_sec}
+                      onChange={(e) =>
+                        updateMigrationField("large_table_delay_sec", Number(e.target.value))
+                      }
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="large-row-threshold">Large table row threshold</Label>
+                    <Input
+                      id="large-row-threshold"
+                      type="number"
+                      min={1}
+                      value={migrationForm.large_table_row_threshold}
+                      onChange={(e) =>
+                        updateMigrationField(
+                          "large_table_row_threshold",
+                          Number(e.target.value),
+                        )
+                      }
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="large-size-threshold">Large table size threshold (MB)</Label>
+                    <Input
+                      id="large-size-threshold"
+                      type="number"
+                      min={0.1}
+                      step={1}
+                      value={migrationForm.large_table_size_mb_threshold}
+                      onChange={(e) =>
+                        updateMigrationField(
+                          "large_table_size_mb_threshold",
+                          Number(e.target.value),
+                        )
+                      }
+                    />
+                  </div>
+                </div>
+              )}
+
+              <Button onClick={handleSaveMigrationSettings} disabled={savingMigration}>
+                {savingMigration ? (
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
                 ) : (
-                  <Bell className="h-4 w-4 mr-2" />
+                  <Save className="h-4 w-4 mr-2" />
                 )}
-                Send test alert
+                {savingMigration ? "Saving…" : "Save migration settings"}
               </Button>
-              {!alertConfig?.channels_active && (
-                <p className="text-xs text-amber-600 dark:text-amber-400">
-                  Configure at least one channel in <code className="text-[10px]">.env</code> and restart the API to enable test sends.
-                </p>
-              )}
+
+              <p className="text-xs text-muted-foreground">
+                Requires admin role to save. Settings apply to all new migration jobs immediately.
+                {migrationConfig?.updated_at && (
+                  <> Last updated: {new Date(migrationConfig.updated_at).toLocaleString()}.</>
+                )}
+              </p>
             </CardContent>
           </Card>
         </TabsContent>
@@ -833,6 +1263,8 @@ export default function SettingsPage() {
               Add Connection
             </Button>
           </div>
+
+          <ConnectionPrivilegeScriptsPanel />
 
           {connections.length === 0 && (
             <Card>
@@ -1162,14 +1594,14 @@ export default function SettingsPage() {
                           : "Similar connections already exist"}
                       </p>
                       <p className="text-xs text-amber-800/90 dark:text-amber-200/90">
-                        The same host and database are already configured:
+                        The same type, host, port, and database are already configured:
                       </p>
                       <ul className="text-xs list-disc pl-4 space-y-0.5">
                         {similarConnections.map((c) => (
                           <li key={c.id}>
                             <span className="font-medium">{c.name}</span>
                             {" "}
-                            ({c.host} / {c.database})
+                            ({c.type} · {c.host}:{c.port} / {c.database})
                           </li>
                         ))}
                       </ul>
@@ -1233,14 +1665,14 @@ export default function SettingsPage() {
               <div className="space-y-2">
                 <h3 className="text-lg font-semibold">Similar connection exists</h3>
                 <p className="text-sm text-muted-foreground">
-                  A connection with the same host and database is already saved. Add another anyway?
+                  A connection with the same type, host, port, and database is already saved. Add another anyway?
                 </p>
                 <ul className="text-sm list-disc pl-4 space-y-1">
                   {similarConnections.map((c) => (
                     <li key={c.id}>
                       <span className="font-medium">{c.name}</span>
                       {" "}
-                      ({c.host} / {c.database})
+                      ({c.type} · {c.host}:{c.port} / {c.database})
                     </li>
                   ))}
                 </ul>

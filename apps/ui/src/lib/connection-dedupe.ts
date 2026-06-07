@@ -8,6 +8,7 @@ export interface ConnectionIdentity {
   name: string;
   type: "source" | "target";
   host: string;
+  port: number;
   database: string;
   password?: string;
   status?: "connected" | "disconnected" | "error";
@@ -21,13 +22,23 @@ export function normalizeConnectionDatabase(database: string): string {
   return database.trim().toLowerCase();
 }
 
-/** Stable key for host + database endpoint matching (case-insensitive). */
-export function connectionEndpointKey(host: string, database: string): string {
-  return `${normalizeConnectionHost(host)}:${normalizeConnectionDatabase(database)}`;
+export function normalizeConnectionPort(port: number | string | undefined): number {
+  const n = Number(port);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0;
+}
+
+/** Stable key for type + host + port + database endpoint matching (case-insensitive host/database). */
+export function connectionEndpointKey(
+  type: "source" | "target",
+  host: string,
+  database: string,
+  port: number | string | undefined,
+): string {
+  return `${type}:${normalizeConnectionHost(host)}:${normalizeConnectionPort(port)}:${normalizeConnectionDatabase(database)}`;
 }
 
 export function connectionKey(c: ConnectionIdentity): string {
-  return `${c.type}:${normalizeConnectionHost(c.host)}:${normalizeConnectionDatabase(c.database)}:${c.name.trim().toLowerCase()}`;
+  return `${c.type}:${normalizeConnectionHost(c.host)}:${normalizeConnectionPort(c.port)}:${normalizeConnectionDatabase(c.database)}:${c.name.trim().toLowerCase()}`;
 }
 
 /** Find an existing connection with the same name (case-insensitive). */
@@ -43,17 +54,21 @@ export function findDuplicateName<T extends ConnectionIdentity>(
   );
 }
 
-/** Find connections pointing at the same host and database. */
+/** Find connections pointing at the same type, host, port, and database. */
 export function findSimilarConnections<T extends ConnectionIdentity>(
   connections: T[],
+  type: "source" | "target",
   host: string,
   database: string,
+  port: number | string | undefined,
   excludeId?: string | null,
 ): T[] {
-  const endpoint = connectionEndpointKey(host, database);
+  const endpoint = connectionEndpointKey(type, host, database, port);
   if (!host.trim() || !database.trim()) return [];
   return connections.filter(
-    (c) => c.id !== excludeId && connectionEndpointKey(c.host, c.database) === endpoint,
+    (c) =>
+      c.id !== excludeId &&
+      connectionEndpointKey(c.type, c.host, c.database, c.port) === endpoint,
   );
 }
 

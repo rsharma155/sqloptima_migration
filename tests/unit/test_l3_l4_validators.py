@@ -84,7 +84,7 @@ class TestL3ChunkHashValidator:
         src_conn = _mock_connector([{"cnt": 100, "min_pk": 1, "max_pk": 100}])
         tgt_conn = _mock_connector([{"cnt": 100, "min_pk": 1, "max_pk": 100}])
         result = await validator.validate_chunk(
-            src_conn, tgt_conn, "orders", "id", 1, 100, schema="dbo"
+            src_conn, tgt_conn, "orders", ["id"], 1, 100, schema="dbo"
         )
         assert result.status == ValidationStatus.PASSED
         assert result.source_count == 100
@@ -96,7 +96,7 @@ class TestL3ChunkHashValidator:
         src_conn = _mock_connector([{"cnt": 100, "min_pk": 1, "max_pk": 100}])
         tgt_conn = _mock_connector([{"cnt": 95, "min_pk": 1, "max_pk": 100}])
         result = await validator.validate_chunk(
-            src_conn, tgt_conn, "orders", "id", 1, 100, schema="dbo"
+            src_conn, tgt_conn, "orders", ["id"], 1, 100, schema="dbo"
         )
         assert result.status == ValidationStatus.FAILED
         assert result.issues
@@ -108,7 +108,7 @@ class TestL3ChunkHashValidator:
         src_conn = _mock_connector([{"cnt": 100, "min_pk": 1, "max_pk": 100}])
         tgt_conn = _mock_connector([{"cnt": 100, "min_pk": 1, "max_pk": 99}])
         result = await validator.validate_chunk(
-            src_conn, tgt_conn, "orders", "id", 1, 100, schema="dbo"
+            src_conn, tgt_conn, "orders", ["id"], 1, 100, schema="dbo"
         )
         assert result.status == ValidationStatus.FAILED
 
@@ -118,7 +118,7 @@ class TestL3ChunkHashValidator:
         src_conn = _mock_connector([{"cnt": 10, "min_pk": 1, "max_pk": 10, "sum_amount": 500.0}])
         tgt_conn = _mock_connector([{"cnt": 10, "min_pk": 1, "max_pk": 10, "sum_amount": 450.0}])
         result = await validator.validate_chunk(
-            src_conn, tgt_conn, "orders", "id", 1, 10,
+            src_conn, tgt_conn, "orders", ["id"], 1, 10,
             schema="dbo", numeric_columns=["amount"]
         )
         assert result.status == ValidationStatus.FAILED
@@ -129,7 +129,7 @@ class TestL3ChunkHashValidator:
         src_conn = _mock_connector([{"cnt": 10, "min_pk": 1, "max_pk": 10, "sum_amount": 500.0}])
         tgt_conn = _mock_connector([{"cnt": 10, "min_pk": 1, "max_pk": 10, "sum_amount": 500.0}])
         result = await validator.validate_chunk(
-            src_conn, tgt_conn, "orders", "id", 1, 10,
+            src_conn, tgt_conn, "orders", ["id"], 1, 10,
             schema="dbo", numeric_columns=["amount"]
         )
         assert result.status == ValidationStatus.PASSED
@@ -140,7 +140,7 @@ class TestL3ChunkHashValidator:
         src_conn = _mock_connector([{"cnt": 10, "min_pk": 1, "max_pk": 10}])
         tgt_conn = _mock_connector([{"cnt": 10, "min_pk": 1, "max_pk": 10}])
         result = await validator.validate_chunk(
-            src_conn, tgt_conn, "orders", "id", None, None, schema="dbo"
+            src_conn, tgt_conn, "orders", ["id"], None, None, schema="dbo"
         )
         assert result.status == ValidationStatus.PASSED
         src_sql = src_conn.execute.await_args.args[0]
@@ -153,7 +153,7 @@ class TestL3ChunkHashValidator:
         src_conn.execute = AsyncMock(side_effect=Exception("connection lost"))
         tgt_conn = _mock_connector([{"cnt": 10, "min_pk": 1, "max_pk": 10}])
         result = await validator.validate_chunk(
-            src_conn, tgt_conn, "orders", "id", 1, 10, schema="dbo"
+            src_conn, tgt_conn, "orders", ["id"], 1, 10, schema="dbo"
         )
         assert result.status == ValidationStatus.ERROR
 
@@ -164,10 +164,49 @@ class TestL3ChunkHashValidator:
         tgt_conn = _mock_connector([{"cnt": 10, "min_pk": 1, "max_pk": 10}])
         chunks = [(1, 10), (11, 20), (21, 30)]
         results = await validator.validate_all_chunks(
-            src_conn, tgt_conn, "orders", "id", chunks, schema="dbo"
+            src_conn, tgt_conn, "orders", ["id"], chunks, schema="dbo"
         )
         assert len(results) == 3
         assert all(r.status == ValidationStatus.PASSED for r in results)
+
+    @pytest.mark.asyncio
+    async def test_composite_pk_full_table_uses_count_only(self):
+        validator = L3ChunkHashValidator()
+        src_conn = _mock_connector([{"cnt": 42}])
+        tgt_conn = _mock_connector([{"cnt": 42}])
+        result = await validator.validate_chunk(
+            src_conn,
+            tgt_conn,
+            "EmployeePayHistory",
+            ["BusinessEntityID", "RateChangeDate", "Rate"],
+            None,
+            None,
+            schema="HumanResources",
+            target_schema="public",
+        )
+        assert result.status == ValidationStatus.PASSED
+        src_sql = src_conn.execute.await_args.args[0]
+        assert "MIN" not in src_sql
+        tgt_sql = tgt_conn.execute.await_args.args[0]
+        assert '"public".' in tgt_sql
+
+    @pytest.mark.asyncio
+    async def test_target_query_uses_positional_params(self):
+        validator = L3ChunkHashValidator()
+        src_conn = _mock_connector([{"cnt": 5, "min_pk": 1, "max_pk": 5}])
+        tgt_conn = _mock_connector([{"cnt": 5, "min_pk": 1, "max_pk": 5}])
+        await validator.validate_chunk(
+            src_conn,
+            tgt_conn,
+            "orders",
+            ["id"],
+            1,
+            5,
+            schema="dbo",
+            target_schema="app",
+        )
+        tgt_call = tgt_conn.execute.await_args
+        assert tgt_call.args[1:] == (1, 5)
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +238,7 @@ class TestL4StatisticalSamplingValidator:
             [{"id": 2, "name": "B"}],  # fetch row 2 from target
         ])
         result = await validator.validate(
-            src_conn, tgt_conn, "users", "id", schema="dbo", row_count=3
+            src_conn, tgt_conn, "users", ["id"], schema="dbo", row_count=3
         )
         assert result.status == ValidationStatus.PASSED
 
@@ -215,7 +254,7 @@ class TestL4StatisticalSamplingValidator:
         tgt_conn = MagicMock()
         tgt_conn.execute = AsyncMock(return_value=[{"id": 1, "name": "Bob"}])
         result = await validator.validate(
-            src_conn, tgt_conn, "users", "id", schema="dbo", row_count=1
+            src_conn, tgt_conn, "users", ["id"], schema="dbo", row_count=1
         )
         assert result.status == ValidationStatus.FAILED
         assert result.issues
@@ -232,7 +271,7 @@ class TestL4StatisticalSamplingValidator:
         tgt_conn = MagicMock()
         tgt_conn.execute = AsyncMock(return_value=[])  # row missing in target
         result = await validator.validate(
-            src_conn, tgt_conn, "items", "id", schema="dbo", row_count=1
+            src_conn, tgt_conn, "items", ["id"], schema="dbo", row_count=1
         )
         assert result.status == ValidationStatus.FAILED
         assert any("missing in target" in i.message for i in result.issues)
@@ -248,6 +287,80 @@ class TestL4StatisticalSamplingValidator:
         tgt_conn = MagicMock()
         tgt_conn.execute = AsyncMock(return_value=[])
         result = await validator.validate(
-            src_conn, tgt_conn, "empty_table", "id", schema="dbo", row_count=0
+            src_conn, tgt_conn, "empty_table", ["id"], schema="dbo", row_count=0
         )
         assert result.status == ValidationStatus.SKIPPED
+
+    @pytest.mark.asyncio
+    async def test_composite_pk_sampling_passes(self):
+        validator = L4StatisticalSamplingValidator(sample_pct=100.0, min_sample=1)
+        src_conn = MagicMock()
+        src_conn.execute = AsyncMock(side_effect=[
+            [{"BusinessEntityID": 1, "RateChangeDate": "2020-01-01", "Rate": 40.0}],
+            [{"BusinessEntityID": 1, "RateChangeDate": "2020-01-01", "Rate": 40.0, "name": "x"}],
+        ])
+        tgt_conn = MagicMock()
+        tgt_conn.execute = AsyncMock(return_value=[
+            {"BusinessEntityID": 1, "RateChangeDate": "2020-01-01", "Rate": 40.0, "name": "x"},
+        ])
+        result = await validator.validate(
+            src_conn,
+            tgt_conn,
+            "EmployeePayHistory",
+            ["BusinessEntityID", "RateChangeDate", "Rate"],
+            schema="HumanResources",
+            target_schema="public",
+            row_count=1,
+        )
+        assert result.status == ValidationStatus.PASSED
+        tgt_call = tgt_conn.execute.await_args
+        assert tgt_call.args[1:] == (1, "2020-01-01", 40.0)
+
+    @pytest.mark.asyncio
+    async def test_source_fetch_error_reports_distinct_message(self):
+        validator = L4StatisticalSamplingValidator(min_sample=1)
+        src_conn = MagicMock()
+        src_conn.execute = AsyncMock(side_effect=[
+            [{"id": 2117}],
+            Exception("pyodbc cannot read hierarchyid"),
+        ])
+        tgt_conn = MagicMock()
+        tgt_conn.execute = AsyncMock(return_value=[{"id": 2117, "name": "x"}])
+        result = await validator.validate(
+            src_conn, tgt_conn, "dt_MiscTypes", ["id"], schema="dbo", row_count=1
+        )
+        assert result.status == ValidationStatus.FAILED
+        assert any(
+            "could not be read from source" in i.message for i in result.issues
+        )
+        assert not any(
+            "missing in source" in i.message for i in result.issues
+        )
+
+    @pytest.mark.asyncio
+    async def test_uses_fetch_source_row_safe_when_source_database_set(self):
+        validator = L4StatisticalSamplingValidator(min_sample=1)
+        src_conn = MagicMock()
+        src_conn.execute = AsyncMock(return_value=[{"id": 1}])
+        tgt_conn = MagicMock()
+        tgt_conn.execute = AsyncMock(return_value=[{"id": 1, "val": "x"}])
+
+        with patch(
+            "domains.validation.l3_l4_validators.fetch_source_row_safe",
+            new_callable=AsyncMock,
+        ) as mock_safe:
+            from domains.migration.column_type_override import SourceRowFetchResult
+
+            mock_safe.return_value = SourceRowFetchResult(row={"id": 1, "val": "x"})
+            result = await validator.validate(
+                src_conn,
+                tgt_conn,
+                "dt_MiscTypes",
+                ["id"],
+                schema="dbo",
+                row_count=1,
+                source_database="AppDb",
+            )
+        assert result.status == ValidationStatus.PASSED
+        mock_safe.assert_awaited_once()
+        assert src_conn.execute.await_count == 1

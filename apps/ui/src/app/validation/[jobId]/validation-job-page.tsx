@@ -2,7 +2,7 @@
 
 /**
  * Module: app/validation/[jobId]/page.tsx
- * Purpose: Per-job validation page — shows L1–L4 validation run results with
+ * Purpose: Per-job validation page — shows L1–L3 validation run results with
  *          prominent pass/fail hero icons, a Download dropdown per run card,
  *          and skeleton loaders on initial load.
  * Author: Ravi Sharma
@@ -61,19 +61,46 @@ import Link from "next/link";
 // Constants
 // ---------------------------------------------------------------------------
 
+const SUPPORTED_LEVELS = [1, 2, 3] as const;
+
+function isSupportedValidationLevel(level: number): level is (typeof SUPPORTED_LEVELS)[number] {
+  return (SUPPORTED_LEVELS as readonly number[]).includes(level);
+}
+
 const LEVEL_LABELS: Record<number, string> = {
   1: "L1 — Row Count",
   2: "L2 — Aggregates",
   3: "L3 — Chunk Hashes",
-  4: "L4 — Statistical Sampling",
 };
 
 const LEVEL_DESC: Record<number, string> = {
   1: "Compares total row count source vs target",
-  2: "Compares MIN/MAX/SUM per column",
+  2: "Compares MIN/MAX/SUM/AVG per numeric column",
   3: "Per-chunk count and aggregate pushdown",
-  4: "Random statistical row sampling",
 };
+
+function normalizeAggMap(raw?: Record<string, unknown>): Record<string, unknown> {
+  if (!raw) return {};
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    out[key.toLowerCase()] = value;
+  }
+  return out;
+}
+
+function formatAggCell(
+  source?: Record<string, unknown>,
+  target?: Record<string, unknown>,
+  key?: string,
+): string {
+  if (!key) return "—";
+  const src = normalizeAggMap(source);
+  const tgt = normalizeAggMap(target);
+  const s = src[key];
+  const t = tgt[key];
+  if (s == null && t == null) return "—";
+  return `${s ?? "—"} → ${t ?? "—"}`;
+}
 
 // ---------------------------------------------------------------------------
 // Run card
@@ -184,36 +211,103 @@ function RunCard({
               </div>
             )}
             {report && report.results.length > 0 && (
-              <div className="max-h-56 overflow-y-auto">
-                {run.level === 2 &&
-                  Array.isArray(report.results[0]?.details?.aggregate_functions) && (
+              <div className="max-h-72 overflow-y-auto">
+                {run.level === 2 && (
                   <p className="px-2 py-1.5 text-[10px] text-muted-foreground border-b bg-muted/10">
-                    Checks per column:{" "}
-                    {(report.results[0].details!.aggregate_functions as string[]).join(", ")}
-                    {Array.isArray(report.results[0].details?.columns_checked) && (
-                      <> · columns: {(report.results[0].details!.columns_checked as string[]).join(", ")}</>
-                    )}
+                    Functions: MIN, MAX, SUM, AVG per numeric column
                   </p>
                 )}
+                {run.level === 2 ? (
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-muted/80 backdrop-blur-sm">
+                      <tr className="border-b">
+                        <th className="px-2 py-1.5 text-left font-medium text-muted-foreground">Table</th>
+                        <th className="px-2 py-1.5 text-left font-medium text-muted-foreground">Column</th>
+                        <th className="px-2 py-1.5 text-left font-medium text-muted-foreground">Status</th>
+                        <th className="px-2 py-1.5 text-left font-medium text-muted-foreground">MIN</th>
+                        <th className="px-2 py-1.5 text-left font-medium text-muted-foreground">MAX</th>
+                        <th className="px-2 py-1.5 text-left font-medium text-muted-foreground">SUM</th>
+                        <th className="px-2 py-1.5 text-left font-medium text-muted-foreground">AVG</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {report.results.flatMap((row) => {
+                        const cols = (row.details?.column_results as Array<{
+                          column: string;
+                          status: string;
+                          source?: Record<string, unknown>;
+                          target?: Record<string, unknown>;
+                        }> | undefined) ?? [];
+                        if (cols.length === 0) {
+                          return [
+                            <tr key={row.validation_id} className="border-b border-border/50">
+                              <td className="px-2 py-1.5 font-mono truncate max-w-[100px]" title={row.object_name}>
+                                {row.object_name}
+                              </td>
+                              <td colSpan={6} className="px-2 py-1.5 text-muted-foreground">
+                                {row.status}
+                                {row.details?.skip_reason === "no_numeric_columns"
+                                  ? " — no numeric columns"
+                                  : ""}
+                              </td>
+                            </tr>,
+                          ];
+                        }
+                        return cols.map((col, idx) => (
+                          <tr
+                            key={`${row.validation_id}-${col.column}`}
+                            className="border-b border-border/50"
+                          >
+                            <td className="px-2 py-1.5 font-mono truncate max-w-[100px]" title={row.object_name}>
+                              {idx === 0 ? row.object_name : ""}
+                            </td>
+                            <td className="px-2 py-1.5 font-mono">{col.column}</td>
+                            <td className="px-2 py-1.5">
+                              <span
+                                className={
+                                  col.status === "passed"
+                                    ? "text-emerald-400"
+                                    : col.status === "failed" || col.status === "error"
+                                    ? "text-red-400"
+                                    : "text-amber-400"
+                                }
+                              >
+                                {col.status}
+                              </span>
+                            </td>
+                            <td className="px-2 py-1.5 font-mono tabular-nums text-[10px]">
+                              {formatAggCell(col.source, col.target, "min")}
+                            </td>
+                            <td className="px-2 py-1.5 font-mono tabular-nums text-[10px]">
+                              {formatAggCell(col.source, col.target, "max")}
+                            </td>
+                            <td className="px-2 py-1.5 font-mono tabular-nums text-[10px]">
+                              {formatAggCell(col.source, col.target, "sum")}
+                            </td>
+                            <td className="px-2 py-1.5 font-mono tabular-nums text-[10px]">
+                              {formatAggCell(col.source, col.target, "avg")}
+                            </td>
+                          </tr>
+                        ));
+                      })}
+                    </tbody>
+                  </table>
+                ) : (
                 <table className="w-full text-xs">
                   <thead className="sticky top-0 bg-muted/80 backdrop-blur-sm">
                     <tr className="border-b">
-                      <th className="px-2 py-1.5 text-left font-medium text-muted-foreground">Object</th>
+                      <th className="px-2 py-1.5 text-left font-medium text-muted-foreground">
+                        {run.level === 3 ? "Chunk" : "Object"}
+                      </th>
                       <th className="px-2 py-1.5 text-left font-medium text-muted-foreground">Status</th>
-                      {run.level === 2 ? (
-                        <th className="px-2 py-1.5 text-left font-medium text-muted-foreground">Aggregates</th>
-                      ) : (
-                        <>
-                          <th className="px-2 py-1.5 text-right font-medium text-muted-foreground">Source</th>
-                          <th className="px-2 py-1.5 text-right font-medium text-muted-foreground">Target</th>
-                        </>
-                      )}
+                      <th className="px-2 py-1.5 text-right font-medium text-muted-foreground">Source</th>
+                      <th className="px-2 py-1.5 text-right font-medium text-muted-foreground">Target</th>
                     </tr>
                   </thead>
                   <tbody>
                     {report.results.map((row) => (
                       <tr key={row.validation_id} className="border-b border-border/50">
-                        <td className="px-2 py-1.5 font-mono truncate max-w-[120px]" title={row.object_name}>
+                        <td className="px-2 py-1.5 font-mono truncate max-w-[140px]" title={row.object_name}>
                           {row.object_name}
                         </td>
                         <td className="px-2 py-1.5">
@@ -229,24 +323,17 @@ function RunCard({
                             {row.status}
                           </span>
                         </td>
-                        {run.level === 2 ? (
-                          <td className="px-2 py-1.5 text-muted-foreground">
-                            {(row.details?.columns_checked as string[] | undefined)?.join(", ") ?? "MIN/MAX/SUM/AVG"}
-                          </td>
-                        ) : (
-                          <>
-                            <td className="px-2 py-1.5 text-right font-mono tabular-nums">
-                              {row.source_count ?? "—"}
-                            </td>
-                            <td className="px-2 py-1.5 text-right font-mono tabular-nums">
-                              {row.target_count ?? "—"}
-                            </td>
-                          </>
-                        )}
+                        <td className="px-2 py-1.5 text-right font-mono tabular-nums">
+                          {row.source_count ?? "—"}
+                        </td>
+                        <td className="px-2 py-1.5 text-right font-mono tabular-nums">
+                          {row.target_count ?? "—"}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
+                )}
               </div>
             )}
             {report && report.results.some(
@@ -353,14 +440,16 @@ export default function ValidationPage() {
   const [loading, setLoading] = useState(true);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
-  const [selectedLevels, setSelectedLevels] = useState<Set<number>>(new Set([1, 2, 3, 4]));
+  const [selectedLevels, setSelectedLevels] = useState<Set<number>>(new Set([1, 2, 3]));
   const [autoRunAttempted, setAutoRunAttempted] = useState(false);
   const [rowSamples, setRowSamples] = useState<RowSampleResponse | null>(null);
   const [rowSamplesLoading, setRowSamplesLoading] = useState(false);
 
   const loadReports = useCallback(async (runList: ValidationRunSummary[]) => {
     const finished = runList.filter(
-      (r) => r.status === "COMPLETED" || r.status === "FAILED",
+      (r) =>
+        isSupportedValidationLevel(r.level) &&
+        (r.status === "COMPLETED" || r.status === "FAILED"),
     );
     if (finished.length === 0) {
       setReports({});
@@ -447,11 +536,12 @@ export default function ValidationPage() {
   }, [jobId, jobInfo, selectedLevels, load]);
 
   useEffect(() => {
-    if (!loading && runs.length === 0 && jobInfo && !autoRunAttempted && !running) {
+    const hasSupportedRuns = runs.some((r) => isSupportedValidationLevel(r.level));
+    if (!loading && !hasSupportedRuns && jobInfo && !autoRunAttempted && !running) {
       setAutoRunAttempted(true);
       void handleRunValidation();
     }
-  }, [loading, runs.length, jobInfo, autoRunAttempted, running, handleRunValidation]);
+  }, [loading, runs, jobInfo, autoRunAttempted, running, handleRunValidation]);
 
   const handleLoadRowSamples = async () => {
     if (!jobId || !jobInfo) return;
@@ -498,10 +588,12 @@ export default function ValidationPage() {
     }
   };
 
-  const passedRuns = runs.filter(
+  const visibleRuns = runs.filter((r) => isSupportedValidationLevel(r.level));
+
+  const passedRuns = visibleRuns.filter(
     (r) => r.status === "COMPLETED" && r.fail_count === 0,
   ).length;
-  const failedRuns = runs.filter(
+  const failedRuns = visibleRuns.filter(
     (r) => r.fail_count > 0 || r.status === "FAILED",
   ).length;
 
@@ -539,7 +631,7 @@ export default function ValidationPage() {
       {/* Level selector */}
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-xs text-muted-foreground">Run levels:</span>
-        {[1, 2, 3, 4].map((lvl) => (
+        {[1, 2, 3].map((lvl) => (
           <button
             key={lvl}
             onClick={() =>
@@ -559,12 +651,12 @@ export default function ValidationPage() {
           </button>
         ))}
         <span className="text-xs text-muted-foreground ml-1">
-          L1 row count · L2 MIN/MAX/SUM/AVG · L3 chunk hashes · L4 sampling — all run by default on first visit
+          L1 row count · L2 MIN/MAX/SUM/AVG · L3 chunk hashes — use row samples below for spot checks
         </span>
       </div>
 
       {/* Summary badges */}
-      {runs.length > 0 && !loading && (
+      {visibleRuns.length > 0 && !loading && (
         <div className="flex gap-4 text-sm">
           <Badge
             variant="outline"
@@ -584,20 +676,20 @@ export default function ValidationPage() {
       )}
 
       {loading ? (
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          {[1, 2, 3, 4].map((i) => (
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {[1, 2, 3].map((i) => (
             <RunCardSkeleton key={i} />
           ))}
         </div>
-      ) : runs.length === 0 ? (
+      ) : visibleRuns.length === 0 ? (
         <EmptyState
           icon={ClipboardCheck}
           title="No validation runs yet"
-          description="Start a validation from the Migrations page by selecting a completed job and choosing validation levels."
+          description="Run L1–L3 validation using the button above, or start from the Migrations page."
         />
       ) : (
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          {runs
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {visibleRuns
             .sort((a, b) => a.level - b.level)
             .map((run) => (
               <RunCard

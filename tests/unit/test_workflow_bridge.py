@@ -345,6 +345,24 @@ class TestResolveConnection:
         assert config["password"] == "decrypted-password"
         assert config["db_type"] == "sqlserver"
 
+    async def test_resolve_connection_includes_ssl_flags(self, test_session_factory):
+        conn = _make_connection("sqlserver")
+        conn.ssl_enabled = True
+        async with test_session_factory() as sess:
+            sess.add(conn)
+            await sess.commit()
+
+        mock_sm = MagicMock()
+        mock_sm.decrypt_auto.return_value = "decrypted-password"
+        svc = WorkflowBridgeService(
+            session_factory=test_session_factory,
+            temporal_client=AsyncMock(),
+            secrets_manager=mock_sm,
+        )
+        config = await svc.resolve_connection(conn.project_connection_id)
+        assert config["ssl_enabled"] is True
+        assert config["trust_server_certificate"] is True
+
     async def test_raises_when_connection_not_found(self, test_session_factory):
         mock_temporal = AsyncMock()
         svc = WorkflowBridgeService(

@@ -58,6 +58,20 @@ class TsqlPatternConverter:
         sql, w = _flag_global_temp_tables(sql)
         warnings.extend(w)
 
+        from domains.transpilation.converters.plpgsql._body_transforms import _convert_for_xml_path
+
+        before_xml = sql
+        sql = _convert_for_xml_path(sql)
+        if sql != before_xml:
+            if re.search(r"\bSTRING_AGG\b", sql, re.IGNORECASE):
+                warnings.append(
+                    "FOR XML PATH (STUFF pattern): converted to STRING_AGG — verify separator and null handling"
+                )
+            else:
+                warnings.append(
+                    "FOR XML: MANUAL REVIEW REQUIRED — rewrite using STRING_AGG, xmlagg, or xmlelement"
+                )
+
         sql, w = _convert_raiserror(sql)
         warnings.extend(w)
 
@@ -506,36 +520,44 @@ def _convert_output_clause(sql: str) -> tuple[str, list[str]]:
     # --- OUTPUT INTO <table variable>: no PG equivalent, annotate only ---
     if re.search(r"\bOUTPUT\b.+\bINTO\b", sql, re.IGNORECASE | re.DOTALL):
         sql = re.sub(
-            r"\bOUTPUT\b",
-            "/* ⚠️ MANUAL REVIEW REQUIRED: OUTPUT INTO <table_variable> — "
-            "no direct PostgreSQL equivalent; rewrite using a CTE with RETURNING */ OUTPUT",
+            r"\bOUTPUT\b[^;]+?\bINTO\s+@?\w+",
+            "/* MANUAL REVIEW: OUTPUT INTO table variable — rewrite using CTE with RETURNING */",
             sql,
-            count=1,
             flags=re.IGNORECASE,
         )
         warnings.append(
-            "OUTPUT INTO: ⚠️ MANUAL REVIEW REQUIRED — "
+            "OUTPUT INTO: MANUAL REVIEW REQUIRED — "
             "rewrite using a CTE with RETURNING"
         )
         return sql, warnings
 
-    # --- Simple OUTPUT col list: extract, remove, append as RETURNING ---
-    m = _OUTPUT_CLAUSE.search(sql)
-    if not m:
-        return sql, warnings
+    def _convert_one_statement(stmt: str) -> str:
+        m = _OUTPUT_CLAUSE.search(stmt)
+        if not m:
+            return stmt
 
-    col_list_raw = m.group(1)
-    returning_cols = _strip_inserted_deleted(col_list_raw).strip()
+        returning_cols = _strip_inserted_deleted(m.group(1)).strip()
+        without_output = stmt[: m.start()] + stmt[m.end() :]
+        core = without_output.rstrip().rstrip(";").rstrip()
+        converted = f"{core} RETURNING {returning_cols};"
+        warnings.append(
+            f"OUTPUT: converted to RETURNING {returning_cols} — "
+            "verify column names match the target table definition"
+        )
+        return converted
 
-    # Excise the entire OUTPUT … col_list span from the statement
-    sql_without_output = sql[: m.start()] + sql[m.end():]
+    # Convert OUTPUT per semicolon-delimited statement so RETURNING stays on the DML.
+    if ";" in sql:
+        parts = re.split(r"(;)", sql)
+        statements: list[str] = []
+        buf = ""
+        for part in parts:
+            buf += part
+            if part == ";":
+                statements.append(buf)
+                buf = ""
+        if buf:
+            statements.append(buf)
+        return "".join(_convert_one_statement(s) for s in statements), warnings
 
-    # Strip trailing whitespace and semicolon, then append RETURNING
-    sql_core = sql_without_output.rstrip().rstrip(";").rstrip()
-    sql = f"{sql_core}\nRETURNING {returning_cols};"
-
-    warnings.append(
-        f"OUTPUT: converted to RETURNING {returning_cols} — "
-        "verify column names match the target table definition"
-    )
-    return sql, warnings
+    return _convert_one_statement(sql), warnings

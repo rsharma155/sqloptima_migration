@@ -93,12 +93,15 @@ class DryRunMigration:
             source_reachable=False,
             target_reachable=False,
         )
-        # Source check: count rows
+        # Source check: approximate row count via sys.partitions (no full-table scan)
         try:
-            rows = await self._source.execute(
-                f"SELECT COUNT(*) AS cnt FROM [{plan.schema_name}].[{plan.table_name}]"
+            from infrastructure.sqlserver.row_count_estimate import (
+                fetch_sqlserver_table_row_estimate,
             )
-            result.estimated_rows = int(rows[0]["cnt"]) if rows else 0
+
+            result.estimated_rows = await fetch_sqlserver_table_row_estimate(
+                self._source, plan.schema_name, plan.table_name,
+            )
             result.source_reachable = True
             chunk_size = plan.chunk_size if hasattr(plan, "chunk_size") and plan.chunk_size else self._chunk_size
             result.chunk_count = max(1, (result.estimated_rows + chunk_size - 1) // chunk_size)

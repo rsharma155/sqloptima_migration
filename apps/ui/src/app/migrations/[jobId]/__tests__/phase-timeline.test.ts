@@ -47,8 +47,8 @@ describe('derivePhase', () => {
       expect(derivePhase('IN_PROGRESS', 99)).toBe('validation');
     });
 
-    it('returns validation for COMPLETED status', () => {
-      expect(derivePhase('COMPLETED', 100)).toBe('validation');
+    it('returns finalize for COMPLETED status', () => {
+      expect(derivePhase('COMPLETED', 100)).toBe('finalize');
     });
   });
 
@@ -70,7 +70,7 @@ describe('derivePhase', () => {
     it('handles lowercase status strings', () => {
       expect(derivePhase('pending', 0)).toBe('discovery');
       expect(derivePhase('running', 50)).toBe('data');
-      expect(derivePhase('completed', 100)).toBe('validation');
+      expect(derivePhase('completed', 100)).toBe('finalize');
     });
   });
 });

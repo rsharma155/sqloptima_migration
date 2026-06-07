@@ -72,6 +72,40 @@ class ReplicationStreamRepository:
         await self._session.refresh(record)
         return record
 
+    async def update_record(
+        self,
+        stream_id: str,
+        *,
+        stream_name: str | None = None,
+        project_connection_id: str | None = None,
+        target_project_connection_id: str | None = None,
+        config_json: dict[str, Any] | None = None,
+        concerns_json: list[dict[str, Any]] | None = None,
+        status: str | None = None,
+        error_message: str | None = None,
+    ) -> ReplicationStreamRecord | None:
+        record = await self.get(stream_id)
+        if record is None:
+            return None
+        if stream_name is not None:
+            record.stream_name = stream_name
+        if project_connection_id is not None:
+            record.project_connection_id = project_connection_id
+        if target_project_connection_id is not None:
+            record.target_project_connection_id = target_project_connection_id
+        if config_json is not None:
+            record.config_json = config_json
+        if concerns_json is not None:
+            record.concerns_json = concerns_json
+        if status is not None:
+            record.status = status
+        if error_message is not None:
+            record.error_message = error_message
+        record.updated_at = datetime.now(UTC)
+        await self._session.commit()
+        await self._session.refresh(record)
+        return record
+
     async def delete(self, stream_id: str) -> bool:
         record = await self.get(stream_id)
         if record is None:

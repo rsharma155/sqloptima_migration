@@ -58,7 +58,7 @@ class TestForXmlPathDirect:
         """Bare FOR XML PATH not in STUFF context should emit a TODO comment."""
         sql = "SELECT id, name FROM t FOR XML PATH('row')"
         result = _convert_for_xml_path(sql)
-        assert "TODO" in result.upper(), (
+        assert "TODO" in result.upper() or "MANUAL REVIEW" in result.upper(), (
             f"Bare FOR XML PATH should emit a TODO comment, got: {result!r}"
         )
 
@@ -101,14 +101,14 @@ class TestXmlPathViaConverter:
     def test_bare_for_xml_pipeline(self):
         sql = "SELECT col1 FROM t FOR XML PATH('')"
         result = _convert(sql)
-        assert "TODO" in result.upper(), (
+        assert "TODO" in result.upper() or "MANUAL REVIEW" in result.upper(), (
             f"Bare FOR XML PATH should produce TODO in pipeline: {result!r}"
         )
 
     def test_openxml_pipeline(self):
         sql = "INSERT INTO t SELECT * FROM OPENXML(@h, '/r', 2) WITH (id INT, v VARCHAR(10))"
         result = _convert(sql)
-        assert "TODO" in result.upper(), (
+        assert "TODO" in result.upper() or "MANUAL REVIEW" in result.upper(), (
             f"OPENXML should produce TODO in pipeline: {result!r}"
         )
 

@@ -318,3 +318,37 @@ class TestSqlServerConnectionConfig:
         config = _make_config(password="super_secret")
         assert "super_secret" not in config.dsn
         assert "UID=sa" in config.dsn
+
+    def test_sqlserver_config_from_entry_honors_ssl_enabled(self):
+        from infrastructure.sqlserver.sqlserver_connector import sqlserver_config_from_entry
+
+        config = sqlserver_config_from_entry(
+            {
+                "host": "localhost",
+                "port": 1433,
+                "database": "db",
+                "username": "sa",
+                "ssl_enabled": True,
+            },
+            password="pw",
+        )
+        assert config.trust_server_certificate is True
+        assert "TrustServerCertificate=yes" in config.connection_string
+
+    def test_sqlserver_config_from_resolved_honors_trust_flag(self):
+        from infrastructure.sqlserver.sqlserver_connector import sqlserver_config_from_resolved
+
+        config = sqlserver_config_from_resolved(
+            {
+                "host": "localhost",
+                "port": 1433,
+                "database": "db",
+                "username": "sa",
+                "trust_server_certificate": True,
+            },
+            password="pw",
+            schema="Sales",
+        )
+        assert config.trust_server_certificate is True
+        assert config.schema == "Sales"
+        assert "TrustServerCertificate=yes" in config.connection_string

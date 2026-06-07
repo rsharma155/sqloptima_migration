@@ -1,47 +1,98 @@
 {
-  "name": "migration-platform-metadata-schema",
-  "version": "2.0.0",
-  "description": "PostgreSQL DDL for the platform metadata store. Primary keys use table-specific names (e.g. migration_job_id).",
-  "target": {
+  "name": "migration-platform-sql-scripts",
+  "version": "2.1.0",
+  "description": "SQL bootstrap scripts for platform metadata, migration source (SQL Server), and migration target (PostgreSQL).",
+  "author": "Migration Platform Team",
+  "copyright": "Copyright (c) 2026 Ravi Sharma",
+  "license": "SPDX-License-Identifier: MIT",
+  "metadata_store": {
     "engine": "postgresql",
     "min_version": "14",
     "recommended_version": "16",
     "database": "migration_checklist",
     "docker_service": "postgres_checklist",
-    "default_port": 5555
+    "default_port": 5555,
+    "connection": {
+      "env_var": "METADATA_DB_URL",
+      "example": "postgresql+asyncpg://postgres:postgres@localhost:5555/migration_checklist"
+    },
+    "orm": "infrastructure/metadata_db/models.py",
+    "primary_key_convention": {
+      "auth_users": "auth_user_id",
+      "auth_sessions": "auth_session_id",
+      "project_connections": "project_connection_id",
+      "project_projects": "project_id",
+      "migration_jobs": "migration_job_id",
+      "migration_table_plans": "migration_table_plan_id",
+      "migration_commands": "migration_job_id",
+      "migration_job_logs": "migration_job_log_id",
+      "migration_quarantine": "migration_quarantine_id",
+      "validation_runs": "validation_run_id",
+      "validation_mismatches": "validation_mismatch_id",
+      "audit_log": "audit_log_id",
+      "auth_token_denylist": "jti",
+      "cutover_checkpoints": "cutover_checkpoint_id",
+      "replication_streams": "replication_stream_id",
+      "migration_programs": "migration_program_id",
+      "migration_waves": "migration_wave_id"
+    }
   },
-  "connection": {
-    "env_var": "METADATA_DB_URL",
-    "example": "postgresql+asyncpg://postgres:postgres@localhost:5555/migration_checklist"
+  "migration_source": {
+    "engine": "sqlserver",
+    "min_version": "2016",
+    "recommended_login": "migration_reader",
+    "privileges": [
+      "db_datareader",
+      "VIEW DEFINITION",
+      "VIEW DATABASE STATE"
+    ],
+    "capabilities": [
+      "Schema discovery via sys.* catalog views",
+      "Row-count estimates for migration planning",
+      "Chunked SELECT extraction (read-only on source)"
+    ],
+    "not_granted": [
+      "sysadmin",
+      "db_owner",
+      "DDL or DML write on source tables",
+      "CDC / replication agent roles"
+    ]
   },
-  "orm": "infrastructure/metadata_db/models.py",
-  "primary_key_convention": {
-    "auth_users": "auth_user_id",
-    "auth_sessions": "auth_session_id",
-    "project_connections": "project_connection_id",
-    "project_projects": "project_id",
-    "migration_jobs": "migration_job_id",
-    "migration_table_plans": "migration_table_plan_id",
-    "migration_commands": "migration_job_id",
-    "migration_quarantine": "migration_quarantine_id",
-    "validation_runs": "validation_run_id",
-    "validation_mismatches": "validation_mismatch_id",
-    "audit_log": "audit_log_id",
-    "auth_token_denylist": "jti",
-    "cutover_checkpoints": "cutover_checkpoint_id",
-    "replication_streams": "replication_stream_id",
-    "migration_programs": "migration_program_id",
-    "migration_waves": "migration_wave_id"
+  "migration_target": {
+    "engine": "postgresql",
+    "min_version": "14",
+    "recommended_role": "migration_writer",
+    "default_schema": "public",
+    "privileges": [
+      "CONNECT on target database",
+      "USAGE, CREATE on migration schema",
+      "SELECT, INSERT, UPDATE, DELETE, TRUNCATE on schema tables",
+      "USAGE, SELECT on schema sequences"
+    ],
+    "capabilities": [
+      "Target table provisioning (CREATE TABLE IF NOT EXISTS)",
+      "Bulk COPY / UPSERT load from Go migration-engine",
+      "Truncate/reload and drop-empty-recreate preflight policies",
+      "Post-migration row-count validation"
+    ],
+    "not_granted": [
+      "SUPERUSER",
+      "CREATEDB",
+      "CREATEROLE",
+      "Access to platform metadata database"
+    ]
   },
   "scripts": [
     {
       "file": "postgres/000_create_database.sql",
-      "purpose": "Create the migration_checklist database",
+      "purpose": "Create the migration_checklist metadata database",
+      "target": "metadata_store",
       "depends_on": []
     },
     {
       "file": "postgres/001_metadata_schema.sql",
-      "purpose": "Full metadata schema (all 16 tables, current head)",
+      "purpose": "Full platform metadata schema (16 tables, current head)",
+      "target": "metadata_store",
       "depends_on": ["postgres/000_create_database.sql"],
       "tables": [
         "project_connections",
@@ -52,6 +103,7 @@
         "migration_jobs",
         "migration_table_plans",
         "migration_commands",
+        "migration_job_logs",
         "migration_quarantine",
         "validation_runs",
         "validation_mismatches",
@@ -61,9 +113,31 @@
         "migration_programs",
         "migration_waves"
       ]
+    },
+    {
+      "file": "sqlserver/001_create_source_migration_user.sql",
+      "purpose": "Least-privilege SQL Server login/user for migration source read access",
+      "target": "migration_source",
+      "depends_on": [],
+      "variables": {
+        "SourceLogin": "migration_reader",
+        "SourcePassword": "ChangeMe_Strong_Password!",
+        "TargetDatabase": "source_db",
+        "SourceSchema": "dbo"
+      },
+      "run_example": "sqlcmd -S localhost,1433 -U sa -v TargetDatabase=source_db -i infrastructure/sql_scripts/sqlserver/001_create_source_migration_user.sql"
+    },
+    {
+      "file": "postgres/002_create_target_migration_user.sql",
+      "purpose": "Scoped PostgreSQL role for migration target DDL/DML and validation",
+      "target": "migration_target",
+      "depends_on": [],
+      "variables": {
+        "target_user": "migration_writer",
+        "target_password": "ChangeMe_Strong_Password!",
+        "target_schema": "public"
+      },
+      "run_example": "psql -h localhost -p 5432 -U postgres -d target_db -f infrastructure/sql_scripts/postgres/002_create_target_migration_user.sql"
     }
-  ],
-  "author": "Migration Platform Team",
-  "copyright": "Copyright (c) 2026 Ravi Sharma",
-  "license": "SPDX-License-Identifier: MIT"
+  ]
 }

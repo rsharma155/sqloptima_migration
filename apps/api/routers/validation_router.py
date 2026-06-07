@@ -1,6 +1,6 @@
 """
 Module: apps/api/routers/validation_router.py
-Purpose: Validation endpoints — run L1–L4 validation levels against a migration
+Purpose: Validation endpoints — run L1–L3 validation levels against a migration
          job, persist results, and export reports in JSON/CSV/HTML.
 Author: Ravi Sharma
 Copyright (c) 2026 Ravi Sharma
@@ -44,7 +44,7 @@ class LeveledValidationRequest(BaseModel):
     source_connection_id: UUID
     target_connection_id: UUID
     tables: list[dict[str, Any]] = Field(default_factory=list)
-    levels: list[int] = Field(default_factory=lambda: [1, 2, 3, 4])
+    levels: list[int] = Field(default_factory=lambda: [1, 2, 3])
     pk_column: str = "id"
     sample_pct: float = Field(default=1.0, ge=0.01, le=100.0)
     # For L3: supply (pk_start, pk_end) pairs
@@ -157,12 +157,13 @@ async def run_validation_levels(
     req: LeveledValidationRequest,
     _: dict = require_role(UserRole.OPERATOR),
 ) -> list[ValidationRunSummary]:
-    """Run one or more L1–L4 validation levels; persist each run to the DB.
+    """Run one or more L1–L3 validation levels; persist each run to the DB.
 
     Level 1 — row-count comparison
     Level 2 — aggregate (MIN/MAX/SUM) comparison
     Level 3 — per-chunk count + aggregate (supply ``chunks`` field)
-    Level 4 — random statistical sampling (configure ``sample_pct``)
+
+    For lightweight row spot-checks use ``POST /jobs/{job_id}/row-samples``.
     """
     source_connector, target_connector = _get_connectors(
         str(req.source_connection_id), str(req.target_connection_id)
@@ -214,10 +215,28 @@ async def compare_row_samples(
 ) -> dict[str, Any]:
     """Fetch top N rows from source and target sorted by PK (or first column)."""
     from application.go_engine_migration.target_table_provisioner import _fetch_pk_columns
+    from apps.api.connection_store import get_entry
+    from domains.migration.column_type_override import (
+        fetch_source_rows_top_n_safe,
+        load_resolved_overrides_from_job,
+    )
 
     source_connector, target_connector = _get_connectors(
         str(req.source_connection_id), str(req.target_connection_id),
     )
+    src_entry = get_entry(str(req.source_connection_id))
+    source_database = (src_entry or {}).get("database", "")
+    job = None
+    type_overrides = None
+    try:
+        from application.migration_service import get_job
+
+        job = get_job(job_id)
+        if job:
+            type_overrides = load_resolved_overrides_from_job(job) or None
+    except Exception:
+        type_overrides = None
+
     await source_connector.connect()
     await target_connector.connect()
     try:
@@ -237,10 +256,22 @@ async def compare_row_samples(
             )
             sort_col = col_rows[0]["column_name"] if col_rows else "1"
 
-        src_rows = await source_connector.execute(
-            f"SELECT TOP {req.limit} * FROM [{req.source_schema}].[{req.table_name}] "
-            f"ORDER BY [{sort_col}]"
-        )
+        if source_database:
+            src_rows = await fetch_source_rows_top_n_safe(
+                source_connector,
+                req.source_schema,
+                req.table_name,
+                database=source_database,
+                limit=req.limit,
+                order_column=sort_col,
+                resolved_overrides=type_overrides,
+            )
+        else:
+            src_rows = await source_connector.execute(
+                f"SELECT TOP {req.limit} * FROM [{req.source_schema}].[{req.table_name}] "
+                f"ORDER BY [{sort_col}]"
+            )
+            src_rows = [dict(r) for r in src_rows]
         tgt_rows = await target_connector.execute(
             f'SELECT * FROM "{req.target_schema}"."{req.table_name}" '
             f'ORDER BY "{sort_col}" LIMIT {req.limit}'

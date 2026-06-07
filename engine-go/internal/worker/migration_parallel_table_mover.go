@@ -69,7 +69,7 @@ func (m *MigrationTableDataMover) moveParallel(
 						return err
 					}
 				}
-				outcome, err := m.executeChunk(gctx, pipeline, chunk, table, schema, transforms, opts)
+				outcome, err := m.executeChunk(gctx, jobID, pipeline, chunk, table, schema, transforms, opts)
 				if err != nil {
 					_ = m.handleChunkFailure(gctx, jobID, table, chunk, workerSizer, err)
 					return fmt.Errorf("worker %d chunk %d: %w", workerIdx, chunk.ChunkIndex, err)
@@ -83,10 +83,18 @@ func (m *MigrationTableDataMover) moveParallel(
 				totalChunks.Add(1)
 
 				progressMu.Lock()
+				tableRows := totalRows.Load()
 				_ = m.meta.UpdateTablePlanProgress(
-					gctx, jobID, table.TableName, "migrating", totalRows.Load(),
+					gctx, jobID, table.TableName, "migrating", tableRows,
+				)
+				_ = m.meta.UpdateMigrationJobTotals(
+					gctx, jobID, opts.jobBase.RowsMigrated+tableRows, opts.jobBase.TablesDone,
 				)
 				progressMu.Unlock()
+
+				if err := sleepBetweenSourceChunks(gctx, resolveChunkDelay(table, opts.sourceThrottle)); err != nil {
+					return err
+				}
 			}
 			return nil
 		})
@@ -148,7 +156,7 @@ func (m *MigrationTableDataMover) moveParallelQueued(
 				if chunk == nil {
 					return nil
 				}
-				outcome, err := m.executeChunk(gctx, pipeline, *chunk, table, schema, transforms, opts)
+				outcome, err := m.executeChunk(gctx, jobID, pipeline, *chunk, table, schema, transforms, opts)
 				if err != nil {
 					_ = m.handleChunkFailure(gctx, jobID, table, *chunk, workerSizer, err)
 					return fmt.Errorf("chunk %d: %w", chunk.ChunkIndex, err)
@@ -159,10 +167,18 @@ func (m *MigrationTableDataMover) moveParallelQueued(
 				totalChunks.Add(1)
 
 				progressMu.Lock()
+				tableRows := totalRows.Load()
 				_ = m.meta.UpdateTablePlanProgress(
-					gctx, jobID, table.TableName, "migrating", totalRows.Load(),
+					gctx, jobID, table.TableName, "migrating", tableRows,
+				)
+				_ = m.meta.UpdateMigrationJobTotals(
+					gctx, jobID, opts.jobBase.RowsMigrated+tableRows, opts.jobBase.TablesDone,
 				)
 				progressMu.Unlock()
+
+				if err := sleepBetweenSourceChunks(gctx, resolveChunkDelay(table, opts.sourceThrottle)); err != nil {
+					return err
+				}
 			}
 		})
 	}

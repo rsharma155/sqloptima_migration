@@ -179,20 +179,77 @@ class ReplicationRuntimeManager:
             await self.stop_stream(stream_id)
 
     def status_payload(self, stream_id: str) -> dict[str, Any]:
+        return self._metrics_payload(stream_id, detailed=False)
+
+    def details_payload(self, stream_id: str) -> dict[str, Any]:
+        return self._metrics_payload(stream_id, detailed=True)
+
+    def _metrics_payload(self, stream_id: str, *, detailed: bool) -> dict[str, Any]:
         runtime = self._require(stream_id)
-        captured = runtime.capture_agent.events_captured if runtime.capture_agent else 0
-        applied = runtime.consumer.events_applied if runtime.consumer else 0
+        agent = runtime.capture_agent
+        consumer = runtime.consumer
+        captured = agent.events_captured if agent else 0
+        applied = consumer.events_applied if consumer else 0
         queue_depth = runtime.bus.depth if runtime.bus else 0
-        return {
+        applier_stats = dict(consumer._applier.stats) if consumer else {}
+        payload: dict[str, Any] = {
             "stream_id": stream_id,
+            "is_active": True,
+            "is_running": bool(agent and agent._running and not agent._paused),
+            "is_paused": bool(agent and agent._paused),
             "state": runtime.state_machine.current_state.value,
             "events_captured": captured,
             "events_applied": applied,
             "queue_depth": queue_depth,
+            "pending_lag": max(0, captured - applied),
             "errors": list(runtime.errors),
             "concerns": list(runtime.concerns),
             "started_at": runtime.started_at.isoformat() if runtime.started_at else None,
+            "operations": {
+                "insert": applier_stats.get("insert", 0),
+                "update": applier_stats.get("update", 0),
+                "delete": applier_stats.get("delete", 0),
+            },
+            "duplicates_skipped": applier_stats.get("duplicate", 0),
+            "apply_failures": applier_stats.get("failed", 0),
+            "batches_polled": agent.batches_polled if agent else 0,
+            "batches_with_changes": agent.batches_with_changes if agent else 0,
+            "batch_size": runtime.config.batch_size,
+            "poll_interval_ms": runtime.config.poll_interval_ms,
+            "mode": runtime.config.mode,
         }
+        if detailed:
+            capture_errors = list(agent.capture_errors) if agent else []
+            apply_errors = list(consumer._applier.recent_errors) if consumer else []
+            payload.update({
+                "source_schema": runtime.config.source_schema,
+                "target_schema": runtime.config.target_schema,
+                "tables": [
+                    {
+                        "name": t.name,
+                        "pk_columns": list(t.pk_columns),
+                        "source_qualified": (
+                            f"{runtime.config.source_schema}.{t.name}"
+                        ),
+                        "target_qualified": (
+                            f"{runtime.config.target_schema}.{t.name.lower()}"
+                        ),
+                    }
+                    for t in runtime.config.tables
+                ],
+                "table_progress": list(agent.progress.values()) if agent else [],
+                "capture_errors": capture_errors,
+                "apply_errors": apply_errors,
+                "runtime_errors": list(runtime.errors),
+            })
+        return payload
+
+    def try_metrics_payload(self, stream_id: str, *, detailed: bool = False) -> dict[str, Any] | None:
+        if stream_id not in self._streams:
+            return None
+        if detailed:
+            return self.details_payload(stream_id)
+        return self.status_payload(stream_id)
 
     def _require(self, stream_id: str) -> ActiveStreamRuntime:
         runtime = self._streams.get(stream_id)
