@@ -20,7 +20,7 @@ jobs:
           pip install ".[dev]"
           pip install pip-audit
       - name: Run pip-audit
-        run: pip-audit --desc --skip-editable --skip migration-platform
+        run: pip-audit --desc --skip-editable
 
   sbom:
     runs-on: ubuntu-latest
