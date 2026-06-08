@@ -17,10 +17,10 @@ jobs:
           python-version: "3.11"
       - name: Install project + pip-audit
         run: |
-          pip install -e ".[dev]"
+          pip install ".[dev]"
           pip install pip-audit
       - name: Run pip-audit
-        run: pip-audit --desc --skip-editable
+        run: pip-audit --desc --skip-editable --skip migration-platform
 
   sbom:
     runs-on: ubuntu-latest
