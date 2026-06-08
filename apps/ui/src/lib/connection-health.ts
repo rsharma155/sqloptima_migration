@@ -55,6 +55,28 @@ async function probeRawFallback(
   return healthFromTest(res, meta);
 }
 
+async function probeWithRawFallback(
+  fallback: ConnectionFallback,
+  meta?: { host?: string; database?: string },
+): Promise<ConnectionHealth | null> {
+  try {
+    return await probeRawFallback(fallback, meta);
+  } catch (rawErr) {
+    const message =
+      rawErr instanceof ApiError
+        ? rawErr.message
+        : rawErr instanceof Error
+          ? rawErr.message
+          : "Unable to reach the database server";
+    return {
+      status: "unreachable",
+      message,
+      host: meta?.host,
+      database: meta?.database,
+    };
+  }
+}
+
 export async function probeConnection(
   id: string,
   meta?: { host?: string; database?: string },
@@ -62,26 +84,19 @@ export async function probeConnection(
 ): Promise<ConnectionHealth> {
   try {
     const res = await testConnection(id);
+    if (res.status === "connected") {
+      return healthFromTest(res, meta);
+    }
+    // Stored credentials on the API may be stale — retry with local password when available.
+    if (fallback?.password) {
+      const raw = await probeWithRawFallback(fallback, meta);
+      if (raw) return raw;
+    }
     return healthFromTest(res, meta);
   } catch (err) {
-    if (err instanceof ApiError && err.status === 404 && fallback) {
-      try {
-        const raw = await probeRawFallback(fallback, meta);
-        if (raw) return raw;
-      } catch (rawErr) {
-        const message =
-          rawErr instanceof ApiError
-            ? rawErr.message
-            : rawErr instanceof Error
-              ? rawErr.message
-              : "Unable to reach the database server";
-        return {
-          status: "unreachable",
-          message,
-          host: meta?.host,
-          database: meta?.database,
-        };
-      }
+    if (fallback?.password) {
+      const raw = await probeWithRawFallback(fallback, meta);
+      if (raw) return raw;
     }
     const message =
       err instanceof ApiError
@@ -96,6 +111,33 @@ export async function probeConnection(
       database: meta?.database,
     };
   }
+}
+
+/** Probe every saved connection and refresh local connected/error status. */
+export async function refreshAllConnectionStatuses(
+  connections: Array<
+    ConnectionFallback & { id: string; status?: "connected" | "disconnected" | "error" }
+  >,
+): Promise<
+  Array<ConnectionFallback & { id: string; status: "connected" | "disconnected" | "error" }>
+> {
+  const results = await Promise.all(
+    connections.map(async (conn) => {
+      const health = await probeConnection(
+        conn.id,
+        { host: conn.host, database: conn.database },
+        conn,
+      );
+      const status: "connected" | "disconnected" | "error" =
+        health.status === "reachable"
+          ? "connected"
+          : health.status === "unreachable"
+            ? "error"
+            : conn.status ?? "disconnected";
+      return { ...conn, status };
+    }),
+  );
+  return results;
 }
 
 export function formatUnreachableMessage(

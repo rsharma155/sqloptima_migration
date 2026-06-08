@@ -54,7 +54,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import Link from "next/link";
 import { toast } from "sonner";
 import { useConnections, type Connection } from "@/lib/ConnectionContext";
-import { fetchAndSyncConnections, loadConnections } from "@/lib/connection-store";
+import {
+  connectionKey,
+  fetchAndSyncConnections,
+  loadConnections,
+} from "@/lib/connection-store";
 import {
   assessDatabase,
   discoverSchema,
@@ -66,6 +70,7 @@ import {
   getMigrationSettings,
   previewProceduralMigration,
   type TableAssessment,
+  type RoutineAssessment,
   type DatabaseAssessment,
   type MigrationPreflightResponse,
   type TargetTablePolicy,
@@ -78,6 +83,8 @@ import {
   summarizeProceduralPreview,
   proceduralPreviewGate,
   summarizeSelectedTables,
+  summarizeSelectedRoutines,
+  mergeAssessmentSummaries,
   type MigrationWizardStep,
 } from "@/lib/migration-readiness";
 import { MigrationAssessmentReview } from "@/components/migrations/migration-assessment-review";
@@ -92,7 +99,7 @@ import {
   MIGRATION_ENV_UPDATED_EVENT,
   type MigrationEnvironment,
 } from "@/lib/migration-snapshot";
-import { resolveTargetSchema } from "@/lib/schema-mapping";
+import { resolveTargetSchema, type DboSchemaStrategy } from "@/lib/schema-mapping";
 
 interface DiscoveredObject {
   name: string;
@@ -352,12 +359,14 @@ export default function MigrationsPage() {
   const [targetConn, setTargetConn] = useState<Connection | null>(null);
   const [schema, setSchema] = useState("dbo");
   const [targetSchema, setTargetSchema] = useState("public");
+  const [dboSchemaStrategy, setDboSchemaStrategy] = useState<DboSchemaStrategy>("map_to_public");
   const [availableSchemas, setAvailableSchemas] = useState<string[]>([]);
   const [discoveredTables, setDiscoveredTables] = useState<DiscoveredObject[]>([]);
   const [selectedTables, setSelectedTables] = useState<Set<string>>(new Set());
   const [discovering, setDiscovering] = useState(false);
   const [assessing, setAssessing] = useState(false);
   const [tableAssessments, setTableAssessments] = useState<Record<string, TableAssessment>>({});
+  const [routineAssessments, setRoutineAssessments] = useState<Record<string, RoutineAssessment>>({});
   const [databaseAssessment, setDatabaseAssessment] = useState<DatabaseAssessment | null>(null);
   const [wizardStep, setWizardStep] = useState<MigrationWizardStep>("setup");
   const [expandedAssessment, setExpandedAssessment] = useState<string | null>(null);
@@ -418,6 +427,96 @@ export default function MigrationsPage() {
     refetchIntervalInBackground: false,
   });
 
+  const resolveSyncedConnection = useCallback(
+    async (conn: Connection, type: "source" | "target"): Promise<Connection> => {
+      const synced = await fetchAndSyncConnections().catch(() => loadConnections());
+      refreshConnections();
+      const match =
+        synced.find((c) => c.id === conn.id) ??
+        synced.find((c) => c.type === type && connectionKey(c) === connectionKey(conn));
+      return match ?? conn;
+    },
+    [refreshConnections],
+  );
+
+  const runSourceHealthCheck = useCallback(
+    async (conn: Connection, cancelled: () => boolean) => {
+      setSourceHealth({
+        status: "checking",
+        message: "Checking source connection…",
+        host: conn.host,
+        database: conn.database,
+      });
+      setSourceConnError(null);
+      setAvailableSchemas([]);
+      setSchemasLoading(true);
+
+      const resolved = await resolveSyncedConnection(conn, "source");
+      if (cancelled()) return;
+      if (resolved.id !== conn.id || resolved.password !== conn.password) {
+        setSourceConn(resolved);
+      }
+
+      const health = await probeConnection(
+        resolved.id,
+        { host: resolved.host, database: resolved.database },
+        resolved,
+      );
+      if (cancelled()) return;
+      setSourceHealth(health);
+
+      if (health.status !== "reachable") {
+        setSourceConnError(formatUnreachableMessage(`Source "${resolved.name}"`, health));
+        setSchemasLoading(false);
+        return;
+      }
+
+      try {
+        const schemas = await listSchemas(resolved.id, resolved);
+        if (cancelled()) return;
+        setAvailableSchemas(schemas);
+        if (schemas.length > 0 && !schemas.includes(schema)) setSchema(schemas[0]);
+      } catch (err) {
+        if (!cancelled()) {
+          setSourceConnError(err instanceof Error ? err.message : "Failed to list source schemas");
+        }
+      } finally {
+        if (!cancelled()) setSchemasLoading(false);
+      }
+    },
+    [resolveSyncedConnection, schema],
+  );
+
+  const runTargetHealthCheck = useCallback(
+    async (conn: Connection, cancelled: () => boolean) => {
+      setTargetHealth({
+        status: "checking",
+        message: "Checking target connection…",
+        host: conn.host,
+        database: conn.database,
+      });
+      setTargetConnError(null);
+
+      const resolved = await resolveSyncedConnection(conn, "target");
+      if (cancelled()) return;
+      if (resolved.id !== conn.id || resolved.password !== conn.password) {
+        setTargetConn(resolved);
+      }
+
+      const health = await probeConnection(
+        resolved.id,
+        { host: resolved.host, database: resolved.database },
+        resolved,
+      );
+      if (cancelled()) return;
+      setTargetHealth(health);
+      if (health.status !== "reachable") {
+        setTargetConnError(formatUnreachableMessage(`Target "${resolved.name}"`, health));
+      }
+    },
+    [resolveSyncedConnection],
+  );
+
   useEffect(() => {
     if (!showNewDialog || !sourceConn) {
       setAvailableSchemas([]);
@@ -428,47 +527,9 @@ export default function MigrationsPage() {
     }
 
     let cancelled = false;
-    setSourceHealth({
-      status: "checking",
-      message: "Checking source connection…",
-      host: sourceConn.host,
-      database: sourceConn.database,
-    });
-    setSourceConnError(null);
-    setAvailableSchemas([]);
-    setSchemasLoading(true);
-
-    (async () => {
-      const health = await probeConnection(
-        sourceConn.id,
-        { host: sourceConn.host, database: sourceConn.database },
-        sourceConn,
-      );
-      if (cancelled) return;
-      setSourceHealth(health);
-
-      if (health.status !== "reachable") {
-        setSourceConnError(formatUnreachableMessage(`Source "${sourceConn.name}"`, health));
-        setSchemasLoading(false);
-        return;
-      }
-
-      try {
-        const schemas = await listSchemas(sourceConn.id, sourceConn);
-        if (cancelled) return;
-        setAvailableSchemas(schemas);
-        if (schemas.length > 0 && !schemas.includes(schema)) setSchema(schemas[0]);
-      } catch (err) {
-        if (!cancelled) {
-          setSourceConnError(err instanceof Error ? err.message : "Failed to list source schemas");
-        }
-      } finally {
-        if (!cancelled) setSchemasLoading(false);
-      }
-    })();
-
+    void runSourceHealthCheck(sourceConn, () => cancelled);
     return () => { cancelled = true; };
-  }, [showNewDialog, sourceConn]);
+  }, [showNewDialog, sourceConn, runSourceHealthCheck]);
 
   useEffect(() => {
     if (!showNewDialog || !targetConn) {
@@ -478,35 +539,21 @@ export default function MigrationsPage() {
     }
 
     let cancelled = false;
-    setTargetHealth({
-      status: "checking",
-      message: "Checking target connection…",
-      host: targetConn.host,
-      database: targetConn.database,
-    });
-    setTargetConnError(null);
-
-    (async () => {
-      const health = await probeConnection(
-        targetConn.id,
-        { host: targetConn.host, database: targetConn.database },
-        targetConn,
-      );
-      if (cancelled) return;
-      setTargetHealth(health);
-      if (health.status !== "reachable") {
-        setTargetConnError(formatUnreachableMessage(`Target "${targetConn.name}"`, health));
-      }
-    })();
-
+    void runTargetHealthCheck(targetConn, () => cancelled);
     return () => { cancelled = true; };
-  }, [showNewDialog, targetConn]);
+  }, [showNewDialog, targetConn, runTargetHealthCheck]);
+
+  const retryConnectionChecks = useCallback(async () => {
+    if (sourceConn) await runSourceHealthCheck(sourceConn, () => false);
+    if (targetConn) await runTargetHealthCheck(targetConn, () => false);
+  }, [sourceConn, targetConn, runSourceHealthCheck, runTargetHealthCheck]);
 
   useEffect(() => {
     if (!showNewDialog) {
       setDiscoveredTables([]);
       setSelectedTables(new Set());
       setTableAssessments({});
+      setRoutineAssessments({});
       setDatabaseAssessment(null);
       setWizardStep("setup");
       setExpandedAssessment(null);
@@ -532,10 +579,52 @@ export default function MigrationsPage() {
     }
   }, [showNewDialog, wizardStep]);
 
-  // Default target schema: dbo → public, other schemas keep the same name
+  // Default target schema: dbo → public (or preserve dbo), other schemas keep the same name
   useEffect(() => {
-    setTargetSchema(resolveTargetSchema(schema || "dbo"));
-  }, [schema]);
+    setTargetSchema(resolveTargetSchema(schema || "dbo", undefined, dboSchemaStrategy));
+  }, [schema, dboSchemaStrategy]);
+
+  const applyAssessmentResult = useCallback((assessment: DatabaseAssessment) => {
+    const tableByName: Record<string, TableAssessment> = {};
+    for (const row of assessment.tables) {
+      tableByName[row.table_name.toLowerCase()] = row;
+    }
+    const routineByName: Record<string, RoutineAssessment> = {};
+    for (const row of assessment.routines ?? []) {
+      routineByName[row.routine_name.toLowerCase()] = row;
+    }
+    setTableAssessments(tableByName);
+    setRoutineAssessments(routineByName);
+    setDatabaseAssessment(assessment);
+    return assessment.blocker_count + (assessment.routine_blocker_count ?? 0);
+  }, []);
+
+  const runMigrationAssessment = useCallback(
+    async (options?: { selectedTables?: string[]; quiet?: boolean }) => {
+      if (!sourceConn) return null;
+      const resolvedTargetSchema = resolveTargetSchema(schema || "dbo", targetSchema, dboSchemaStrategy);
+      const assessment = await assessDatabase({
+        connection_id: sourceConn.id,
+        database: sourceConn.database,
+        schema: schema || "dbo",
+        target_connection_id: targetConn?.id,
+        target_schema: resolvedTargetSchema,
+        selected_tables: options?.selectedTables,
+      });
+      const totalBlockers = applyAssessmentResult(assessment);
+      if (!options?.quiet) {
+        if (totalBlockers > 0) {
+          toast.warning(
+            `${totalBlockers} object(s) have blockers — review the assessment before migrating`,
+          );
+        } else {
+          toast.success("Assessment complete — review results before starting migration");
+        }
+      }
+      return assessment;
+    },
+    [sourceConn, targetConn, schema, targetSchema, dboSchemaStrategy, applyAssessmentResult],
+  );
 
   const handleDiscover = useCallback(async () => {
     if (!sourceConn) { toast.error("Select a source connection first"); return; }
@@ -552,6 +641,7 @@ export default function MigrationsPage() {
     setSelectedProcedures(new Set());
     setSelectedFunctions(new Set());
     setTableAssessments({});
+    setRoutineAssessments({});
     setDatabaseAssessment(null);
     setWizardStep("setup");
     try {
@@ -570,35 +660,21 @@ export default function MigrationsPage() {
         setDiscoverError(
           `No tables, procedures, or functions found in schema "${schema || "dbo"}". Try a different schema name.`,
         );
-      } else if (tables.length === 0) {
-        toast.success(
-          `Discovered ${procedural.length} routine(s) — select procedures/functions to migrate`,
-        );
       } else {
-        toast.success(`Discovered ${tables.length} tables — running migration assessment…`);
+        const parts: string[] = [];
+        if (tables.length > 0) parts.push(`${tables.length} table(s)`);
+        if (procedural.length > 0) {
+          parts.push(`${procedural.length} routine(s)`);
+        }
+        toast.success(`Discovered ${parts.join(" and ")} — running migration assessment…`);
         setAssessing(true);
         try {
-          const assessment = await assessDatabase({
-            connection_id: sourceConn.id,
-            database: sourceConn.database,
-            schema: schema || "dbo",
-          });
-          const byName: Record<string, TableAssessment> = {};
-          for (const row of assessment.tables) {
-            byName[row.table_name.toLowerCase()] = row;
-          }
-          setTableAssessments(byName);
-          setDatabaseAssessment(assessment);
-          if (assessment.blocker_count > 0) {
-            toast.warning(
-              `${assessment.blocker_count} table(s) have blockers — review the assessment before migrating`,
-            );
-          } else {
-            toast.success("Assessment complete — review results before starting migration");
-          }
+          await runMigrationAssessment();
         } catch (assessErr) {
           toast.error(
-            assessErr instanceof Error ? assessErr.message : "Assessment failed — tables listed without readiness scores",
+            assessErr instanceof Error
+              ? assessErr.message
+              : "Assessment failed — objects listed without readiness scores",
           );
         } finally {
           setAssessing(false);
@@ -611,7 +687,7 @@ export default function MigrationsPage() {
     } finally {
       setDiscovering(false);
     }
-  }, [sourceConn, schema, sourceHealth, sourceConnError]);
+  }, [sourceConn, schema, sourceHealth, sourceConnError, runMigrationAssessment]);
 
   const toggleTable = (name: string) => {
     setSelectedTables((prev) => {
@@ -643,11 +719,32 @@ export default function MigrationsPage() {
     );
   };
 
-  const assessmentComplete = Object.keys(tableAssessments).length > 0;
+  const assessmentComplete =
+    (discoveredTables.length === 0 || Object.keys(tableAssessments).length > 0) &&
+    (discoveredProceduralObjects.length === 0 || Object.keys(routineAssessments).length > 0);
   const selectedRoutineCount = selectedProcedures.size + selectedFunctions.size;
   const hasMigrationSelection = selectedTables.size > 0 || selectedRoutineCount > 0;
   const discoveryComplete =
     discoveredTables.length > 0 || discoveredProceduralObjects.length > 0;
+
+  const handleEnterReview = useCallback(async () => {
+    if (selectedRoutineCount > 0 && targetConn) {
+      setAssessing(true);
+      try {
+        await runMigrationAssessment({
+          selectedTables: Array.from(selectedTables),
+          quiet: true,
+        });
+      } catch (err) {
+        toast.error(
+          err instanceof Error ? err.message : "Routine dependency assessment failed",
+        );
+      } finally {
+        setAssessing(false);
+      }
+    }
+    setWizardStep("review");
+  }, [selectedRoutineCount, targetConn, selectedTables, runMigrationAssessment]);
 
   const proceduralPreviewSummary = useMemo(
     () =>
@@ -666,7 +763,7 @@ export default function MigrationsPage() {
     setProceduralPreviewLoading(true);
     setProceduralPreviewError(null);
     try {
-      const resolvedTargetSchema = resolveTargetSchema(schema || "dbo", targetSchema);
+      const resolvedTargetSchema = resolveTargetSchema(schema || "dbo", targetSchema, dboSchemaStrategy);
       const previewObjects = [
         ...Array.from(selectedProcedures).map((name) => ({
           name,
@@ -706,10 +803,22 @@ export default function MigrationsPage() {
     void fetchProceduralPreview();
   }, [wizardStep, selectedRoutineCount, fetchProceduralPreview]);
 
-  const selectionSummary = useMemo(
-    () => summarizeSelectedTables(selectedTables, tableAssessments, columnTypeOverrides),
-    [selectedTables, tableAssessments, columnTypeOverrides],
-  );
+  const selectionSummary = useMemo(() => {
+    const tables = summarizeSelectedTables(selectedTables, tableAssessments, columnTypeOverrides);
+    const routines = summarizeSelectedRoutines(
+      selectedProcedures,
+      selectedFunctions,
+      routineAssessments,
+    );
+    return mergeAssessmentSummaries(tables, routines);
+  }, [
+    selectedTables,
+    tableAssessments,
+    columnTypeOverrides,
+    selectedProcedures,
+    selectedFunctions,
+    routineAssessments,
+  ]);
 
   const migrationGate = useMemo(() => {
     if (selectedTables.size > maxTablesPerJob) {
@@ -749,7 +858,7 @@ export default function MigrationsPage() {
   const runMigration = useCallback(async (policies: Record<string, TargetTablePolicy>) => {
     if (!sourceConn || !targetConn) return;
     setMigrating(true);
-    const resolvedTargetSchema = resolveTargetSchema(schema || "dbo", targetSchema);
+    const resolvedTargetSchema = resolveTargetSchema(schema || "dbo", targetSchema, dboSchemaStrategy);
     try {
       const result = await startMigration({
         source_connection_id: sourceConn.id,
@@ -795,7 +904,7 @@ export default function MigrationsPage() {
     }
 
     setPreflighting(true);
-    const resolvedTargetSchema = resolveTargetSchema(schema || "dbo", targetSchema);
+    const resolvedTargetSchema = resolveTargetSchema(schema || "dbo", targetSchema, dboSchemaStrategy);
     try {
       const result = await preflightMigration({
         source_connection_id: sourceConn.id,
@@ -1051,6 +1160,9 @@ export default function MigrationsPage() {
                 databaseAssessment={databaseAssessment}
                 selectedTables={selectedTables}
                 tableAssessments={tableAssessments}
+                routineAssessments={routineAssessments}
+                selectedProcedures={selectedProcedures}
+                selectedFunctions={selectedFunctions}
                 sourceSchema={schema || "dbo"}
                 targetSchema={targetSchema || "public"}
                 migrationBlockedReason={migrationGate.allowed ? null : migrationGate.reason}
@@ -1101,9 +1213,28 @@ export default function MigrationsPage() {
                     </div>
                   </div>
                 )}
-                <p className="text-xs text-muted-foreground">
-                  <a href="/settings" className="underline">Update connections in Settings</a> or start databases with{" "}
-                  <code className="text-[10px]">docker-compose up</code>.
+                <p className="text-xs text-muted-foreground space-y-1">
+                  <span>
+                    Connections are tested from the <strong>migration API server</strong> (not your browser).
+                    If you use <code className="text-[10px]">localhost</code>, that means the host where the API runs
+                    — start SQL Server/PostgreSQL there (e.g. <code className="text-[10px]">docker-compose up</code>).
+                  </span>
+                  <span className="flex flex-wrap items-center gap-2 pt-1">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={() => void retryConnectionChecks()}
+                      disabled={
+                        sourceHealth.status === "checking" || targetHealth.status === "checking"
+                      }
+                    >
+                      <RefreshCw className="h-3 w-3 mr-1" />
+                      Retry connection check
+                    </Button>
+                    <a href="/settings" className="underline">Update connections in Settings</a>
+                  </span>
                 </p>
               </div>
             )}
@@ -1210,12 +1341,36 @@ export default function MigrationsPage() {
                   />
                 </div>
               </div>
+              {(schema || "dbo").toLowerCase() === "dbo" && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[10px] text-muted-foreground">dbo handling:</span>
+                  <Button
+                    type="button"
+                    variant={dboSchemaStrategy === "map_to_public" ? "default" : "outline"}
+                    size="sm"
+                    className="h-7 text-[10px]"
+                    onClick={() => setDboSchemaStrategy("map_to_public")}
+                  >
+                    Map to public
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={dboSchemaStrategy === "preserve_dbo" ? "default" : "outline"}
+                    size="sm"
+                    className="h-7 text-[10px]"
+                    onClick={() => setDboSchemaStrategy("preserve_dbo")}
+                  >
+                    Keep dbo schema
+                  </Button>
+                </div>
+              )}
               <p className="text-[10px] text-muted-foreground leading-tight">
                 Target schemas are created automatically on PostgreSQL when missing (except{" "}
-                <code className="text-[10px]">public</code>, which already exists). Only{" "}
-                <code className="text-[10px]">dbo</code> maps to{" "}
-                <code className="text-[10px]">public</code> by default — other source schemas
-                (e.g. Sales, Person) keep the same name so stored procedures resolve correctly.
+                <code className="text-[10px]">public</code>, which already exists). For{" "}
+                <code className="text-[10px]">dbo</code>, choose map to{" "}
+                <code className="text-[10px]">public</code> or keep{" "}
+                <code className="text-[10px]">dbo</code> so schema-qualified SP references resolve.
+                Other source schemas (e.g. Sales, Person) keep the same name.
               </p>
               <div className="flex flex-wrap gap-3">
                 <Button
@@ -1460,7 +1615,7 @@ export default function MigrationsPage() {
               <Button variant="outline" onClick={() => setShowNewDialog(false)}>Cancel</Button>
               {wizardStep === "setup" ? (
                 <Button
-                  onClick={() => setWizardStep("review")}
+                  onClick={() => void handleEnterReview()}
                   disabled={
                     !hasMigrationSelection ||
                     (selectedTables.size > 0 && !assessmentComplete) ||

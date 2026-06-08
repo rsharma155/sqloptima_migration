@@ -79,6 +79,7 @@ class DiscoveryEngine:
             key = f"{database}.{schema}"
 
             tables = await self._discovery.discover_tables(database, schema)
+            await self._attach_indexes_to_tables(database, schema, tables)
             result.tables[key] = tables
             result.all_objects.extend(tables)
             logger.debug("Discovered tables", schema=schema, count=len(tables))
@@ -107,3 +108,14 @@ class DiscoveryEngine:
         )
 
         return result
+
+    async def _attach_indexes_to_tables(
+        self, database: str, schema: str, tables: list[Table],
+    ) -> None:
+        """Attach per-table index metadata so schema comparison can diff indexes."""
+        for table in tables:
+            indexes = await self._discovery.discover_indexes(
+                database, schema, table.object_name,
+            )
+            table.properties["indexes"] = indexes
+            table.index_count = len(indexes)

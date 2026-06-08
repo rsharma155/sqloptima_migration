@@ -340,14 +340,13 @@ export default function ReplicationPage() {
         });
         const msg =
           startErr instanceof Error ? startErr.message : "Failed to start replication";
-        toast.error(`Stream saved but could not start: ${msg}`, { duration: 10_000 });
+        toast.error(`Stream saved but could not start: ${msg}`);
         setShowStreamDialog(false);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to save stream";
       toast.error(
         editingStreamId ? `Failed to update stream: ${msg}` : `Failed to create stream: ${msg}`,
-        { duration: 10_000 },
       );
     } finally {
       setLoading(false);
@@ -413,7 +412,6 @@ export default function ReplicationPage() {
             sourceName: sourceConn.name,
             targetName: targetConn.name,
           }),
-          { duration: 8000 },
         );
       }
     } catch {

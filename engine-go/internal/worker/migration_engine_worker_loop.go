@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	engineVersion        = "0.1.0"
+	engineVersion        = "0.2.0"
 	defaultPollInterval  = 2 * time.Second
 	defaultHeartbeatSecs = 15
 )

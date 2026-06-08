@@ -121,17 +121,22 @@ ORDER BY p.proname
 
 QUERY_INDEXES = """
 SELECT
-    i.relname AS index_name,
+    idx.relname AS index_name,
     a.amname AS index_type,
     i.indisunique AS is_unique,
     i.indisprimary AS is_primary_key,
-    pg_get_indexdef(i.indexrelid) AS index_definition
+    pg_get_indexdef(i.indexrelid) AS index_definition,
+    string_agg(att.attname, ',' ORDER BY k.ord) AS column_names
 FROM pg_index i
 JOIN pg_class t ON i.indrelid = t.oid
 JOIN pg_class idx ON i.indexrelid = idx.oid
 JOIN pg_am a ON idx.relam = a.oid
+LEFT JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
+LEFT JOIN pg_attribute att
+    ON att.attrelid = t.oid AND att.attnum = k.attnum AND k.attnum > 0
 WHERE t.relname = $1
   AND t.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = $2)
+GROUP BY idx.relname, a.amname, i.indisunique, i.indisprimary, i.indexrelid
 ORDER BY idx.relname
 """
 
@@ -294,6 +299,7 @@ class PostgresMetadataDiscovery(MetadataDiscoveryPort):
                     "index_type": r["index_type"],
                     "is_unique": bool(r["is_unique"]),
                     "is_primary_key": bool(r["is_primary_key"]),
+                    "columns": r.get("column_names") or "",
                 },
             )
             for r in results

@@ -22,6 +22,10 @@ import {
   ArrowRight,
   Table2,
   Columns3,
+  ListOrdered,
+  FileCode2,
+  FunctionSquare,
+  FolderTree,
   GitCompare,
   ChevronDown,
   ChevronRight,
@@ -46,6 +50,11 @@ import {
   type ConnectionHealth,
 } from "@/lib/connection-health";
 
+interface ObjectCountPair {
+  source: number;
+  target: number;
+}
+
 interface CompareSummary {
   total_source_objects: number;
   total_target_objects: number;
@@ -57,6 +66,12 @@ interface CompareSummary {
   target_database: string;
   source_schema?: string;
   target_schema?: string;
+  object_counts?: {
+    tables?: ObjectCountPair;
+    procedures?: ObjectCountPair;
+    functions?: ObjectCountPair;
+    indexes?: ObjectCountPair;
+  };
 }
 
 interface CompareTreeItem {
@@ -124,8 +139,13 @@ function rowBg(status: string) {
 }
 
 function nodeTypeIcon(nodeType: string) {
-  if (nodeType === "TABLE" || nodeType === "table") return <Table2 className="h-3.5 w-3.5 text-muted-foreground shrink-0" />;
-  if (nodeType === "COLUMN" || nodeType === "column") return <Columns3 className="h-3.5 w-3.5 text-muted-foreground shrink-0" />;
+  const t = nodeType.toLowerCase();
+  if (t === "table") return <Table2 className="h-3.5 w-3.5 text-muted-foreground shrink-0" />;
+  if (t === "column") return <Columns3 className="h-3.5 w-3.5 text-muted-foreground shrink-0" />;
+  if (t === "index") return <ListOrdered className="h-3.5 w-3.5 text-muted-foreground shrink-0" />;
+  if (t === "procedure") return <FileCode2 className="h-3.5 w-3.5 text-muted-foreground shrink-0" />;
+  if (t === "function") return <FunctionSquare className="h-3.5 w-3.5 text-muted-foreground shrink-0" />;
+  if (t === "category") return <FolderTree className="h-3.5 w-3.5 text-muted-foreground shrink-0" />;
   return null;
 }
 
@@ -266,6 +286,14 @@ function SideTreeNode({
         : (props.target_type ?? props.data_type);
       if (sideType) {
         return `${item.name} (${String(sideType)})`;
+      }
+    }
+    if (nodeType === "index") {
+      const sideCols = side === "source"
+        ? (props.source_columns ?? props.key_columns)
+        : (props.target_columns ?? props.key_columns);
+      if (Array.isArray(sideCols) && sideCols.length > 0) {
+        return `${item.name} (${sideCols.join(", ")})`;
       }
     }
     return item.name;
@@ -577,7 +605,7 @@ export default function ComparisonPage() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Schema Comparison</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Source (SQL Server) databases on the left · Target (PostgreSQL) on the right
+            Compare tables, columns, indexes, stored procedures, and functions between SQL Server and PostgreSQL
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -806,24 +834,48 @@ export default function ComparisonPage() {
 
       {/* Summary stats */}
       {result && (
-        <div className="grid gap-4 md:grid-cols-4">
-          <Card>
-            <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Matched</CardTitle></CardHeader>
-            <CardContent><div className="text-2xl font-bold text-emerald-500">{result.summary.matched}</div></CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Source Only</CardTitle></CardHeader>
-            <CardContent><div className="text-2xl font-bold text-destructive">{result.summary.source_only}</div></CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Target Only</CardTitle></CardHeader>
-            <CardContent><div className="text-2xl font-bold text-amber-500">{result.summary.target_only}</div></CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Partial Match</CardTitle></CardHeader>
-            <CardContent><div className="text-2xl font-bold text-orange-500">{result.summary.partial_match}</div></CardContent>
-          </Card>
-        </div>
+        <>
+          <div className="grid gap-4 md:grid-cols-4">
+            <Card>
+              <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Matched</CardTitle></CardHeader>
+              <CardContent><div className="text-2xl font-bold text-emerald-500">{result.summary.matched}</div></CardContent>
+            </Card>
+            <Card>
+              <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Source Only</CardTitle></CardHeader>
+              <CardContent><div className="text-2xl font-bold text-destructive">{result.summary.source_only}</div></CardContent>
+            </Card>
+            <Card>
+              <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Target Only</CardTitle></CardHeader>
+              <CardContent><div className="text-2xl font-bold text-amber-500">{result.summary.target_only}</div></CardContent>
+            </Card>
+            <Card>
+              <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Partial Match</CardTitle></CardHeader>
+              <CardContent><div className="text-2xl font-bold text-orange-500">{result.summary.partial_match}</div></CardContent>
+            </Card>
+          </div>
+          {result.summary.object_counts && (
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-xs">
+              {([
+                ["tables", "Tables", Table2],
+                ["procedures", "Stored Procedures", FileCode2],
+                ["functions", "Functions", FunctionSquare],
+                ["indexes", "Indexes", ListOrdered],
+              ] as const).map(([key, label, Icon]) => {
+                const counts = result.summary.object_counts?.[key];
+                if (!counts) return null;
+                return (
+                  <div key={key} className="rounded-md border border-border px-3 py-2 flex items-center gap-2">
+                    <Icon className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                    <span className="font-medium">{label}</span>
+                    <span className="ml-auto text-muted-foreground font-mono">
+                      {counts.source} → {counts.target}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
       )}
 
       {/* Legend */}

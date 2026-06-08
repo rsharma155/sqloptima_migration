@@ -556,7 +556,12 @@ class ProceduralConverter:
                 obj_type = ObjectType.FUNCTION.value
 
         if obj_type in (ObjectType.PROCEDURE.value, ObjectType.FUNCTION.value):
-            return self._auto_convert_sproc(sql)
+            hint = (
+                ObjectType.FUNCTION
+                if obj_type == ObjectType.FUNCTION.value
+                else ObjectType.PROCEDURE
+            )
+            return self._convert_sproc_unified(sql, object_type_hint=hint)
 
         if obj_type == ObjectType.TRIGGER.value:
             import re
@@ -577,16 +582,38 @@ class ProceduralConverter:
 
         return self.convert_adhoc(sql)
 
-    def _auto_convert_sproc(self, sql: str) -> ConversionResult:
-        """Use the comprehensive TsqlToPlpgsqlConverter for PROCEDURE/FUNCTION objects."""
+    def _convert_sproc_unified(
+        self,
+        sql: str,
+        *,
+        object_type_hint: ObjectType | None = None,
+    ) -> ConversionResult:
+        """Single pipeline for all PROCEDURE/FUNCTION conversions.
+
+        Phase 0: dynamic SQL pre-pass (inline EXEC/sp_executesql)
+        Phase 1: PivotConverter when applicable
+        Phase 2: TsqlToPlpgsqlConverter (always)
+        Phase 3: schema mapping (when configured)
+        """
+        from domains.transpilation.converters.pivot_converter import PivotConverter
         from domains.transpilation.converters.tsql_to_plpgsql import (
             TsqlHeaderParser,
             TsqlToPlpgsqlConverter,
         )
+        from domains.transpilation.dynamic_sql.prepass import apply_dynamic_sql_prepass
 
-        # Parse header for metadata (used to build ProceduralObject for result)
         unblocked, unblock_warnings, unblock_steps = self._unblock_source(sql, aggressive=False)
-        info = TsqlHeaderParser.parse(unblocked)
+        prepass = apply_dynamic_sql_prepass(unblocked)
+        working_sql = prepass.sql
+
+        info = TsqlHeaderParser.parse(working_sql)
+        detected_type = object_type_hint
+        if detected_type is None:
+            detected_type = (
+                ObjectType.FUNCTION
+                if re.search(r"\bCREATE\s+FUNCTION\b", working_sql, re.IGNORECASE)
+                else ObjectType.PROCEDURE
+            )
         params = [
             ParameterInfo(
                 name=f"p_{p.name}",
@@ -597,26 +624,40 @@ class ProceduralConverter:
             for p in info.parameters
         ]
         obj = ProceduralObject(
-            object_type=ObjectType.PROCEDURE,
+            object_type=detected_type,
             schema_name=info.schema,
             object_name=info.name,
             parameters=params,
-            body_sql=unblocked,
-            difficulty=TSqlPatternMatcher.detect_difficulty(unblocked),
-            detected_patterns=TSqlPatternMatcher.detect_patterns(unblocked),
+            body_sql=working_sql,
+            difficulty=TSqlPatternMatcher.detect_difficulty(working_sql),
+            detected_patterns=TSqlPatternMatcher.detect_patterns(working_sql),
         )
         result = ConversionResult(source=obj)
         result.warnings.extend(unblock_warnings)
         self._record_unblockers(result, unblock_steps)
+        if prepass.applied:
+            result.warnings.extend(prepass.warnings)
+
+        if PivotConverter.can_handle(working_sql):
+            pivot_result = PivotConverter.convert(working_sql)
+            result.warnings.extend(pivot_result.warnings)
+            if pivot_result.success and pivot_result.converted_sql:
+                result.converted_sql = pivot_result.converted_sql
+                result.success = True
+                if self._schema_mapper is not None:
+                    result.converted_sql = self._schema_mapper.apply(result.converted_sql)
+                return result
+
         try:
             try:
-                result.converted_sql = TsqlToPlpgsqlConverter().convert(unblocked)
+                result.converted_sql = TsqlToPlpgsqlConverter().convert(working_sql)
             except Exception:
                 aggressive_sql, aggressive_warnings, aggressive_steps = self._unblock_source(
-                    unblocked, aggressive=True
+                    working_sql, aggressive=True
                 )
                 result.warnings.extend(aggressive_warnings)
                 self._record_unblockers(result, aggressive_steps)
+                aggressive_sql = apply_dynamic_sql_prepass(aggressive_sql).sql
                 result.converted_sql = TsqlToPlpgsqlConverter().convert(aggressive_sql)
                 result.warnings.append(
                     "Retried conversion with aggressive T-SQL parse unblockers after initial failure"
@@ -630,7 +671,32 @@ class ProceduralConverter:
         except Exception as exc:
             result.errors.append(str(exc))
             result.success = False
+            return result
+
+        if self._schema_mapper is not None and result.converted_sql:
+            result.converted_sql = self._schema_mapper.apply(result.converted_sql)
         return result
+
+    def _auto_convert_sproc(self, sql: str) -> ConversionResult:
+        """Backward-compatible alias for the unified sproc pipeline."""
+        return self._convert_sproc_unified(sql)
+
+    @staticmethod
+    def _ensure_sproc_ddl(
+        body: str,
+        *,
+        schema: str,
+        name: str,
+        object_type: ObjectType,
+    ) -> str:
+        stripped = body.strip()
+        if stripped.upper().startswith("CREATE"):
+            return stripped
+        keyword = "PROCEDURE" if object_type == ObjectType.PROCEDURE else "FUNCTION"
+        return (
+            f"CREATE {keyword} {schema}.{name}\n"
+            f"AS\nBEGIN\n{stripped}\nEND"
+        )
 
     def convert_procedure(
         self,
@@ -639,17 +705,14 @@ class ProceduralConverter:
         parameters: list[ParameterInfo],
         body: str,
     ) -> ConversionResult:
-        """Convert a T-SQL stored procedure to PL/pgSQL function."""
-        obj = ProceduralObject(
+        """Convert a T-SQL stored procedure to PL/pgSQL."""
+        sql = self._ensure_sproc_ddl(
+            body,
+            schema=schema,
+            name=name,
             object_type=ObjectType.PROCEDURE,
-            schema_name=schema,
-            object_name=name,
-            parameters=parameters,
-            body_sql=body,
-            difficulty=TSqlPatternMatcher.detect_difficulty(body),
-            detected_patterns=TSqlPatternMatcher.detect_patterns(body),
         )
-        return self._convert(obj)
+        return self._convert_sproc_unified(sql, object_type_hint=ObjectType.PROCEDURE)
 
     def convert_function(
         self,
@@ -661,18 +724,13 @@ class ProceduralConverter:
         returns_table: bool = False,
     ) -> ConversionResult:
         """Convert a T-SQL function to PL/pgSQL function."""
-        obj = ProceduralObject(
+        sql = self._ensure_sproc_ddl(
+            body,
+            schema=schema,
+            name=name,
             object_type=ObjectType.FUNCTION,
-            schema_name=schema,
-            object_name=name,
-            parameters=parameters,
-            body_sql=body,
-            return_type=return_type,
-            returns_table=returns_table,
-            difficulty=TSqlPatternMatcher.detect_difficulty(body),
-            detected_patterns=TSqlPatternMatcher.detect_patterns(body),
         )
-        return self._convert(obj)
+        return self._convert_sproc_unified(sql, object_type_hint=ObjectType.FUNCTION)
 
     def convert_trigger(
         self,

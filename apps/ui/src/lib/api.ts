@@ -423,12 +423,15 @@ export async function runPostMigrationFinalize(
 
 // ---- SQL Conversion ----
 
+export type DboSchemaStrategy = "map_to_public" | "preserve_dbo";
+
 export interface ConvertRequest {
   sql: string;
   object_type?: string;
   object_name?: string;
   schema?: string;
   parameters?: Array<{ name: string; type: string }>;
+  dbo_schema_strategy?: DboSchemaStrategy;
 }
 
 export interface PostgresSyntaxIssue {
@@ -729,24 +732,57 @@ export interface TableAssessment {
   prerequisites: string[];
 }
 
+export interface RoutineTableDependency {
+  source_schema: string;
+  object_name: string;
+  object_type: string;
+  target_schema: string;
+  target_object: string;
+  status: "on_target" | "included_in_job" | "missing" | "unchecked" | string;
+}
+
+export interface RoutineAssessment {
+  routine_name: string;
+  schema_name: string;
+  object_type: "procedure" | "function" | string;
+  migration_tier: "SAFE" | "WARNING" | "BLOCKER";
+  complexity_score: number;
+  estimated_minutes: number;
+  conversion_difficulty: string;
+  detected_patterns: string[];
+  blockers: string[];
+  warnings: string[];
+  prerequisites: string[];
+  table_dependencies?: RoutineTableDependency[];
+  missing_target_tables?: string[];
+}
+
 export interface DatabaseAssessment {
   database_name: string;
   overall_tier: "SAFE" | "WARNING" | "BLOCKER";
   total_tables: number;
+  total_routines: number;
   safe_count: number;
   warning_count: number;
   blocker_count: number;
+  routine_safe_count: number;
+  routine_warning_count: number;
+  routine_blocker_count: number;
   estimated_total_minutes: number;
   cdc_enabled_db: boolean;
   global_prerequisites: string[];
   linked_server_refs: unknown[];
   tables: TableAssessment[];
+  routines: RoutineAssessment[];
 }
 
 export interface AssessmentRequest {
   connection_id: string;
   database?: string;
   schema?: string;
+  target_connection_id?: string;
+  target_schema?: string;
+  selected_tables?: string[];
 }
 
 export async function assessDatabase(req: AssessmentRequest): Promise<DatabaseAssessment> {

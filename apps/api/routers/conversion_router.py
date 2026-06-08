@@ -58,6 +58,8 @@ class ConvertRequest(BaseModel):
     parameters: list[dict] = []
     # Optional schema mapping: {"dbo": "public", "hr": "staff"}
     schema_mapping: dict[str, str] | None = None
+    # map_to_public (default) or preserve_dbo — keep dbo schema on PostgreSQL
+    dbo_schema_strategy: str = "map_to_public"
 
 
 class PostgresSyntaxIssueResponse(BaseModel):
@@ -122,9 +124,15 @@ async def convert_sql(req: ConvertRequest, _: dict = require_role(UserRole.OPERA
         service = build_conversion_service(
             req.schema_name,
             schema_mapping=req.schema_mapping,
+            dbo_schema_strategy=req.dbo_schema_strategy,
         )
     else:
-        service = build_conversion_service(req.schema_name)
+        target = "dbo" if req.dbo_schema_strategy == "preserve_dbo" else None
+        service = build_conversion_service(
+            req.schema_name,
+            target,
+            dbo_schema_strategy=req.dbo_schema_strategy,
+        )
 
     if req.object_type == "trigger":
         timing, events = _parse_trigger_metadata(req.sql)

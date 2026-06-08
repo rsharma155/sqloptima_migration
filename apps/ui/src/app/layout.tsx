@@ -71,7 +71,7 @@ export default function RootLayout({
             </GlobalAlertsProvider>
           </Providers>
         </ThemeProvider>
-        <Toaster richColors expand position="top-right" />
+        <Toaster richColors expand position="top-right" duration={1000} />
       </body>
     </html>
   );

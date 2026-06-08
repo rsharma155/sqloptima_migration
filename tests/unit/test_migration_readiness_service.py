@@ -6,12 +6,15 @@ import pytest
 
 from application.migration_readiness_service import (
     MigrationReadinessError,
+    assert_routines_ready_for_migration,
     assert_tables_ready_for_migration,
+    selected_routine_blockers,
     selected_table_blockers,
 )
 from domains.assessment.assessment_engine import (
     DatabaseAssessment,
     MigrationTier,
+    RoutineAssessment,
     TableAssessment,
 )
 
@@ -75,3 +78,46 @@ def test_assert_tables_ready_allows_safe_tables():
         tables=[_table("Customers", MigrationTier.SAFE)],
     )
     assert_tables_ready_for_migration(assessment, ["Customers"])
+
+
+def _routine(name: str, tier: MigrationTier, blockers: list[str] | None = None) -> RoutineAssessment:
+    return RoutineAssessment(
+        routine_name=name,
+        schema_name="dbo",
+        object_type="procedure",
+        migration_tier=tier,
+        blockers=blockers or [],
+    )
+
+
+def test_selected_routine_blockers_returns_blocker_routines():
+    assessment = DatabaseAssessment(
+        database_name="AppDb",
+        routines=[
+            _routine("usp_ok", MigrationTier.SAFE),
+            _routine(
+                "uspGetBillOfMaterials",
+                MigrationTier.BLOCKER,
+                ["Missing required table(s)/view(s) on PostgreSQL target: Production.billofmaterials"],
+            ),
+        ],
+    )
+    blocked = selected_routine_blockers(assessment, ["uspGetBillOfMaterials"], [])
+    assert len(blocked) == 1
+    assert blocked[0][0] == "procedure uspGetBillOfMaterials"
+    assert "Production.billofmaterials" in blocked[0][1][0]
+
+
+def test_assert_routines_ready_raises_for_missing_dependencies():
+    assessment = DatabaseAssessment(
+        database_name="AppDb",
+        routines=[
+            _routine(
+                "uspGetEmployeeManagers",
+                MigrationTier.BLOCKER,
+                ["Missing required table(s)/view(s) on PostgreSQL target: HumanResources.employee"],
+            ),
+        ],
+    )
+    with pytest.raises(MigrationReadinessError, match="routine"):
+        assert_routines_ready_for_migration(assessment, ["uspGetEmployeeManagers"], [])

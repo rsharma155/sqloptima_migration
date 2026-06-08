@@ -2,7 +2,7 @@
  * Helpers for pre-migration readiness assessment in the Migration Center wizard.
  */
 
-import type { DatabaseAssessment, ProceduralPreviewItem, TableAssessment } from "@/lib/api";
+import type { DatabaseAssessment, ProceduralPreviewItem, RoutineAssessment, TableAssessment } from "@/lib/api";
 
 export type MigrationWizardStep = "setup" | "review";
 
@@ -257,11 +257,14 @@ export function canStartMigrationFromAssessment(
   if (options.selectedTableCount > 0 && !options.assessmentComplete) {
     return {
       allowed: false,
-      reason: "Run Discover Table, SP and FN to complete the readiness assessment before migrating.",
+      reason: "Run Discover to complete the readiness assessment before migrating.",
     };
   }
-  if (options.selectedTableCount === 0) {
-    return { allowed: true, reason: null };
+  if (options.selectedRoutineCount > 0 && !options.assessmentComplete) {
+    return {
+      allowed: false,
+      reason: "Run Discover to complete the readiness assessment for routines before migrating.",
+    };
   }
   if (summary.missingAssessment.length > 0) {
     return {
@@ -298,4 +301,82 @@ export function selectionAssessmentFromDatabase(
     byName[row.table_name.toLowerCase()] = row;
   }
   return summarizeSelectedTables(selectedTables, byName, columnTypeOverrides);
+}
+
+export function summarizeSelectedRoutines(
+  selectedProcedures: Iterable<string>,
+  selectedFunctions: Iterable<string>,
+  routineAssessments: Record<string, RoutineAssessment>,
+): Omit<SelectedAssessmentSummary, "overallTier" | "typeOverridePending"> {
+  let safe = 0;
+  let warning = 0;
+  let blocker = 0;
+  let estimatedMinutes = 0;
+  const blockerTables: Array<{ name: string; messages: string[] }> = [];
+  const warningTables: Array<{ name: string; messages: string[] }> = [];
+  const missingAssessment: string[] = [];
+
+  const selected = [
+    ...Array.from(selectedProcedures).map((name) => ({ name, kind: "procedure" as const })),
+    ...Array.from(selectedFunctions).map((name) => ({ name, kind: "function" as const })),
+  ];
+
+  for (const { name, kind } of selected) {
+    const assess = routineAssessments[name.toLowerCase()];
+    if (!assess) {
+      missingAssessment.push(`${kind} ${name}`);
+      continue;
+    }
+    estimatedMinutes += assess.estimated_minutes;
+    const label = `${kind} ${name}`;
+    if (assess.migration_tier === "BLOCKER") {
+      blocker += 1;
+      blockerTables.push({
+        name: label,
+        messages:
+          assess.blockers.length > 0
+            ? assess.blockers
+            : ["Critical blocker — manual remediation required"],
+      });
+    } else if (assess.migration_tier === "WARNING") {
+      warning += 1;
+      if (assess.warnings.length > 0) {
+        warningTables.push({ name: label, messages: assess.warnings });
+      }
+    } else {
+      safe += 1;
+    }
+  }
+
+  return {
+    safe,
+    warning,
+    blocker,
+    estimatedMinutes,
+    blockerTables,
+    warningTables,
+    missingAssessment,
+  };
+}
+
+export function mergeAssessmentSummaries(
+  tables: SelectedAssessmentSummary,
+  routines: Omit<SelectedAssessmentSummary, "overallTier" | "typeOverridePending">,
+): SelectedAssessmentSummary {
+  const blocker = tables.blocker + routines.blocker;
+  const warning = tables.warning + routines.warning;
+  const overallTier: "SAFE" | "WARNING" | "BLOCKER" =
+    blocker > 0 ? "BLOCKER" : warning > 0 ? "WARNING" : "SAFE";
+
+  return {
+    safe: tables.safe + routines.safe,
+    warning,
+    blocker,
+    estimatedMinutes: tables.estimatedMinutes + routines.estimatedMinutes,
+    overallTier,
+    blockerTables: [...tables.blockerTables, ...routines.blockerTables],
+    warningTables: [...tables.warningTables, ...routines.warningTables],
+    missingAssessment: [...tables.missingAssessment, ...routines.missingAssessment],
+    typeOverridePending: tables.typeOverridePending,
+  };
 }

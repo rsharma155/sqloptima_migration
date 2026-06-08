@@ -14,7 +14,9 @@ import {
   CONNECTIONS_UPDATED_EVENT,
   fetchAndSyncConnections,
   loadConnections,
+  saveConnections,
 } from "./connection-store";
+import { refreshAllConnectionStatuses } from "./connection-health";
 
 export type { Connection };
 export { CONNECTIONS_UPDATED_EVENT };
@@ -40,7 +42,16 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
 
   const refreshConnections = useCallback(() => {
     fetchAndSyncConnections()
-      .then(setConnections)
+      .then((synced) => {
+        setConnections(synced);
+        // Background health check — keeps saved connection status current without visiting Settings.
+        void refreshAllConnectionStatuses(synced)
+          .then((withHealth) => {
+            saveConnections(withHealth as Connection[]);
+            setConnections(withHealth as Connection[]);
+          })
+          .catch(() => {});
+      })
       .catch(() => setConnections(loadConnections()));
   }, []);
 

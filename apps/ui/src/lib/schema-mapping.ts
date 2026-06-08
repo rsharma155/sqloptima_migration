@@ -1,13 +1,19 @@
+export type DboSchemaStrategy = "map_to_public" | "preserve_dbo";
+
 /**
  * Resolve PostgreSQL target schema from SQL Server source schema.
- * dbo → public; all other schemas keep the same name (matches backend resolver).
+ * dbo → public by default; preserve_dbo keeps dbo (matches backend resolver).
  */
 export function resolveTargetSchema(
   sourceSchema: string,
   explicitTarget?: string | null,
+  dboStrategy: DboSchemaStrategy = "map_to_public",
 ): string {
   const src = (sourceSchema || "dbo").trim();
   const explicit = explicitTarget?.trim();
+  if (dboStrategy === "preserve_dbo" && src.toLowerCase() === "dbo") {
+    return "dbo";
+  }
   if (!explicit) {
     return src.toLowerCase() === "dbo" ? "public" : src;
   }

@@ -31,6 +31,8 @@ class ConversionRequest:
     object_type: str = "auto"   # 'auto' | 'procedure' | 'function' | 'trigger' | 'raw'
     schema: str = "dbo"
     name: str = ""
+    # dbo → public (default) or keep dbo on PostgreSQL for schema-qualified references
+    dbo_schema_strategy: str = "map_to_public"
 
 
 class ConversionService:

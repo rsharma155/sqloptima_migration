@@ -220,7 +220,7 @@ class ObjectComparator:
                 property_name="definition",
                 source_value="<source definition>",
                 target_value="<target definition>",
-                severity="info",
+                severity="warning",
             ))
 
         source_params = source.properties.get("parameters", "")

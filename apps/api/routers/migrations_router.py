@@ -274,7 +274,11 @@ async def list_migrations(
 async def start_migration(req: MigrationRequest, _: dict = require_role(UserRole.OPERATOR)):
     require_valid_license()
     require_feature("migration")
-    from application.migration_readiness_service import MigrationReadinessError, validate_migration_tables_ready
+    from application.migration_readiness_service import (
+        MigrationReadinessError,
+        validate_migration_routines_ready,
+        validate_migration_tables_ready,
+    )
     from application.migration_settings_config import get_max_tables_per_job
     from apps.api.connection_store import get_decrypted_password, get_entry
 
@@ -298,6 +302,9 @@ async def start_migration(req: MigrationRequest, _: dict = require_role(UserRole
     src_entry = get_entry(str(req.source_connection_id))
     if not src_entry:
         raise HTTPException(status_code=404, detail="Source connection not found")
+    tgt_entry = get_entry(str(req.target_connection_id))
+    if not tgt_entry:
+        raise HTTPException(status_code=404, detail="Target connection not found")
     database = src_entry.get("database", "")
     if not database:
         raise HTTPException(status_code=400, detail="Source connection has no database configured")
@@ -313,6 +320,19 @@ async def start_migration(req: MigrationRequest, _: dict = require_role(UserRole
                 entry=src_entry,
                 password=get_decrypted_password(src_entry),
                 column_type_overrides=req.column_type_overrides or None,
+            )
+        if has_routines:
+            await validate_migration_routines_ready(
+                database=database,
+                schema=req.schema_name,
+                procedure_names=req.procedures or [],
+                function_names=req.functions or [],
+                entry=src_entry,
+                password=get_decrypted_password(src_entry),
+                target_entry=tgt_entry,
+                target_password=get_decrypted_password(tgt_entry),
+                target_schema=req.target_schema,
+                selected_tables=req.tables or None,
             )
         job = await svc.start_migration(
             source_connection_id=req.source_connection_id,

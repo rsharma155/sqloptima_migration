@@ -65,7 +65,7 @@ def print_banner():
  \__ \ (_) | |__  | (_) | '_ \  _| | '  \/ _` | | |\/| | / _` | '_/ _` |  _| / _ \ ' \
  |___/\__\_\____|  \___/| .__/\__|_|_|_|_\__,_| |_|  |_|_\__, |_| \__,_|\__|_\___/_||_|
                         |_|                               |___/
-{C.CYAN}{C.DIM}  SQL Server → PostgreSQL  |  DDD + Clean Arch  |  v0.1.0{C.END}
+{C.CYAN}{C.DIM}  SQL Server → PostgreSQL  |  DDD + Clean Arch  |  v0.2.0{C.END}
     """
     print(banner)
 
@@ -424,6 +424,41 @@ def run_metadata_migrations() -> bool:
 processes: list[subprocess.Popen] = []
 
 
+def _should_print_service_log(line: str) -> bool:
+    """Return True only for real warnings/errors from subprocess stdout.
+
+    Avoid printing INFO structlog lines that merely contain field names like
+    ``warning=11`` or ``overall_tier=WARNING`` (assessment counters).
+    """
+    low = line.lower()
+    if "[info" in low or "[debug" in low:
+        return False
+    if "[warning" in low or "[error" in low or "[critical" in low:
+        return True
+    if any(k in low for k in ("traceback", "exception (", " critical:")):
+        return True
+    if " failed" in low or low.startswith("failed"):
+        return True
+    return False
+
+
+def _should_print_ui_log(line: str) -> bool:
+    """Next.js dev server — surface compile warnings and errors."""
+    low = line.lower()
+    return any(
+        k in low
+        for k in ("error", "warn", "critical", "exception", "traceback", "failed")
+    )
+
+
+def _api_subprocess_env() -> dict[str, str]:
+    """Child env for the API: quiet console logs unless explicitly configured."""
+    load_env()
+    env = os.environ.copy()
+    env.setdefault("MIGRATION_LOG_LEVEL", "WARNING")
+    return env
+
+
 def start_go_engine() -> subprocess.Popen | None:
     """Start the Go migration-engine worker."""
     if not shutil.which("go"):
@@ -491,6 +526,7 @@ def start_api() -> subprocess.Popen | None:
              "--host", "0.0.0.0", "--port", "8508", "--reload",
              "--log-level", "warning"],
             cwd=ROOT,
+            env=_api_subprocess_env(),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             encoding='utf-8',
@@ -507,8 +543,7 @@ def start_api() -> subprocess.Popen | None:
                 if not line:
                     break
                 l = line.rstrip()
-                low = l.lower()
-                if any(k in low for k in ("error", "warning", "warn", "critical", "exception", "traceback", "failed")):
+                if _should_print_service_log(l):
                     print(f"  {l}")
 
         t = threading.Thread(target=stream_output, daemon=True)
@@ -559,8 +594,7 @@ def start_ui() -> subprocess.Popen | None:
                 if not line:
                     break
                 l = line.rstrip()
-                low = l.lower()
-                if any(k in low for k in ("error", "warning", "warn", "critical", "exception", "traceback", "failed")):
+                if _should_print_ui_log(l):
                     print(f"  {l}")
 
         t = threading.Thread(target=stream_output, daemon=True)

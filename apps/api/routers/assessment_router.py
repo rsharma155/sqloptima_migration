@@ -20,6 +20,7 @@ from apps.api.middleware.auth import UserRole, require_role
 from domains.assessment.assessment_engine import (
     AssessmentEngine,
     DatabaseAssessment,
+    RoutineAssessment,
     TableAssessment,
 )
 from shared.logging.structured_logging import get_logger
@@ -34,12 +35,24 @@ router = APIRouter(tags=["assessment"])
 # ---------------------------------------------------------------------------
 
 
+class RoutineTableDependencyOut(BaseModel):
+    source_schema: str
+    object_name: str
+    object_type: str
+    target_schema: str
+    target_object: str
+    status: str
+
+
 class AssessmentRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     connection_id: UUID
     database: str = ""
     schema_name: str = Field(default="dbo", alias="schema")
+    target_connection_id: UUID | None = None
+    target_schema: str | None = None
+    selected_tables: list[str] = Field(default_factory=list)
 
 
 class TableAssessmentOut(BaseModel):
@@ -58,13 +71,33 @@ class TableAssessmentOut(BaseModel):
     prerequisites: list[str]
 
 
+class RoutineAssessmentOut(BaseModel):
+    routine_name: str
+    schema_name: str
+    object_type: str
+    migration_tier: str
+    complexity_score: int
+    estimated_minutes: float
+    conversion_difficulty: str
+    detected_patterns: list[str]
+    blockers: list[str]
+    warnings: list[str]
+    prerequisites: list[str]
+    table_dependencies: list[RoutineTableDependencyOut] = Field(default_factory=list)
+    missing_target_tables: list[str] = Field(default_factory=list)
+
+
 class DatabaseAssessmentOut(BaseModel):
     database_name: str
     overall_tier: str
     total_tables: int
+    total_routines: int = 0
     safe_count: int
     warning_count: int
     blocker_count: int
+    routine_safe_count: int = 0
+    routine_warning_count: int = 0
+    routine_blocker_count: int = 0
     estimated_total_minutes: float
     cdc_enabled_db: bool
     global_prerequisites: list[str]
@@ -72,6 +105,7 @@ class DatabaseAssessmentOut(BaseModel):
     global_temp_table_refs: list[dict[str, Any]]
     agent_jobs: list[dict[str, Any]]
     tables: list[TableAssessmentOut]
+    routines: list[RoutineAssessmentOut] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -97,14 +131,38 @@ def _to_table_out(ta: TableAssessment) -> TableAssessmentOut:
     )
 
 
+def _to_routine_out(ra: RoutineAssessment) -> RoutineAssessmentOut:
+    return RoutineAssessmentOut(
+        routine_name=ra.routine_name,
+        schema_name=ra.schema_name,
+        object_type=ra.object_type,
+        migration_tier=ra.migration_tier.value,
+        complexity_score=ra.complexity_score,
+        estimated_minutes=ra.estimated_minutes,
+        conversion_difficulty=ra.conversion_difficulty,
+        detected_patterns=ra.detected_patterns,
+        blockers=ra.blockers,
+        warnings=ra.warnings,
+        prerequisites=ra.prerequisites,
+        table_dependencies=[
+            RoutineTableDependencyOut(**dep) for dep in ra.table_dependencies
+        ],
+        missing_target_tables=ra.missing_target_tables,
+    )
+
+
 def _to_db_out(da: DatabaseAssessment) -> DatabaseAssessmentOut:
     return DatabaseAssessmentOut(
         database_name=da.database_name,
         overall_tier=da.overall_tier.value,
         total_tables=da.total_tables,
+        total_routines=da.total_routines,
         safe_count=da.safe_count,
         warning_count=da.warning_count,
         blocker_count=da.blocker_count,
+        routine_safe_count=da.routine_safe_count,
+        routine_warning_count=da.routine_warning_count,
+        routine_blocker_count=da.routine_blocker_count,
         estimated_total_minutes=da.estimated_total_minutes,
         cdc_enabled_db=da.cdc_enabled_db,
         global_prerequisites=da.global_prerequisites,
@@ -112,6 +170,7 @@ def _to_db_out(da: DatabaseAssessment) -> DatabaseAssessmentOut:
         global_temp_table_refs=da.global_temp_table_refs,
         agent_jobs=da.agent_jobs,
         tables=[_to_table_out(t) for t in da.tables],
+        routines=[_to_routine_out(r) for r in da.routines],
     )
 
 
@@ -148,12 +207,24 @@ async def assess_database(
 
     from application.migration_readiness_service import assess_source_schema
 
+    target_entry = None
+    target_password = None
+    if req.target_connection_id is not None:
+        target_entry = get_entry(str(req.target_connection_id))
+        if not target_entry:
+            raise HTTPException(status_code=404, detail="Target connection not found")
+        target_password = get_decrypted_password(target_entry)
+
     try:
         db_assessment = await assess_source_schema(
             entry,
             database=database,
             schema=req.schema_name,
             password=password,
+            target_entry=target_entry,
+            target_password=target_password,
+            target_schema=req.target_schema,
+            selected_tables=req.selected_tables or None,
         )
         logger.info(
             "assessment_complete",
@@ -161,6 +232,7 @@ async def assess_database(
             schema=req.schema_name,
             overall_tier=db_assessment.overall_tier,
             tables=db_assessment.total_tables,
+            routines=db_assessment.total_routines,
         )
         return _to_db_out(db_assessment)
     except HTTPException:

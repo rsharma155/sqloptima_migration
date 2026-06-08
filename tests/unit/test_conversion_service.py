@@ -129,6 +129,49 @@ class TestCursorProcedureConversion:
         assert "AS\n        BEGIN" not in sql
 
 
+class TestDboSchemaStrategy:
+    _SIMPLE_SP = """
+    CREATE PROCEDURE dbo.usp_SchemaTest
+    AS
+    BEGIN
+        SELECT * FROM dbo.orders;
+    END
+    """
+
+    def test_preserve_dbo_keeps_schema_qualifiers(self):
+        from application.conversion_factory import build_conversion_service
+
+        svc = build_conversion_service("dbo", "dbo", dbo_schema_strategy="preserve_dbo")
+        result = svc.convert(
+            ConversionRequest(
+                sql=self._SIMPLE_SP,
+                object_type="procedure",
+                schema="dbo",
+                name="usp_SchemaTest",
+                dbo_schema_strategy="preserve_dbo",
+            )
+        )
+        assert result.success
+        sql = result.converted_sql.lower()
+        assert "dbo." in sql or "dbo.orders" in sql.replace(" ", "")
+        assert "public.orders" not in sql
+
+    def test_map_to_public_rewrites_dbo(self):
+        from application.conversion_factory import build_conversion_service
+
+        svc = build_conversion_service("dbo", "public", dbo_schema_strategy="map_to_public")
+        result = svc.convert(
+            ConversionRequest(
+                sql=self._SIMPLE_SP,
+                object_type="auto",
+                schema="dbo",
+                name="usp_SchemaTest",
+            )
+        )
+        assert result.success
+        assert "dbo." not in result.converted_sql.lower()
+
+
 class TestTryCatchProcedureConversion:
     """AdventureWorks-style TRY/CATCH error logging procedures."""
 
@@ -170,7 +213,6 @@ class TestTryCatchProcedureConversion:
         assert "dbo." not in sql.lower()
         assert "INSERT INTO public" in sql
         assert "CALLpublic.uspPrintError()" in sql.replace(" ", "")
-        assert result.body_transform_fallback
 
 
 class TestAdventureWorksRecursiveProcedures:

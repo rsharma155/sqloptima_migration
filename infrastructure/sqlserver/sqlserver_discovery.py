@@ -108,11 +108,11 @@ SELECT
     i.is_unique,
     i.is_primary_key,
     i.filter_definition,
-    STRING_AGG(ic.key_ordinal, ',') WITHIN GROUP (ORDER BY ic.key_ordinal) AS key_ordinals,
-    STRING_AGG(c.name, ',') WITHIN GROUP (ORDER BY ic.key_ordinal) AS column_names,
-    ic.is_included_column
+    STRING_AGG(CAST(ic.key_ordinal AS VARCHAR(10)), ',') WITHIN GROUP (ORDER BY ic.key_ordinal) AS key_ordinals,
+    STRING_AGG(c.name, ',') WITHIN GROUP (ORDER BY ic.key_ordinal) AS column_names
 FROM {database}.sys.indexes i
-INNER JOIN {database}.sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+INNER JOIN {database}.sys.index_columns ic
+    ON i.object_id = ic.object_id AND i.index_id = ic.index_id AND ic.is_included_column = 0
 INNER JOIN {database}.sys.columns c ON i.object_id = c.object_id AND ic.column_id = c.column_id
 WHERE i.object_id = OBJECT_ID(?)
     AND i.is_primary_key = 0
@@ -184,6 +184,28 @@ FROM {database}.sys.sql_expression_dependencies
 WHERE OBJECT_SCHEMA_NAME(referencing_id) NOT IN ('sys', 'INFORMATION_SCHEMA')
     AND referenced_schema_name NOT IN ('sys', 'INFORMATION_SCHEMA')
     AND referencing_id > 0
+"""
+
+QUERY_ROUTINE_TABLE_DEPENDENCIES = """
+SELECT
+    OBJECT_SCHEMA_NAME(d.referencing_id) AS referencing_schema,
+    OBJECT_NAME(d.referencing_id) AS referencing_object,
+    COALESCE(
+        NULLIF(d.referenced_schema_name, ''),
+        OBJECT_SCHEMA_NAME(d.referenced_id)
+    ) AS referenced_schema,
+    COALESCE(
+        NULLIF(d.referenced_entity_name, ''),
+        OBJECT_NAME(d.referenced_id)
+    ) AS referenced_object,
+    ref.type_desc AS referenced_type
+FROM {database}.sys.sql_expression_dependencies d
+INNER JOIN {database}.sys.objects ref ON ref.object_id = d.referenced_id
+INNER JOIN {database}.sys.objects src ON src.object_id = d.referencing_id
+WHERE src.type IN ('P', 'FN', 'IF', 'TF', 'FS', 'FT')
+  AND ref.type IN ('U', 'V')
+  AND OBJECT_SCHEMA_NAME(d.referencing_id) = ?
+ORDER BY referencing_schema, referencing_object, referenced_schema, referenced_object
 """
 
 QUERY_TRIGGERS = """
@@ -432,6 +454,18 @@ class SqlServerMetadataDiscovery(MetadataDiscoveryPort):
     async def discover_dependencies(self, database: str) -> list[dict[str, Any]]:
         self._database = database
         return await self._connector.execute(self._q(QUERY_DEPENDENCIES))
+
+    async def discover_routine_table_dependencies(
+        self,
+        database: str,
+        schema: str,
+    ) -> list[dict[str, Any]]:
+        """Return table/view dependencies for procedures and functions in *schema*."""
+        self._database = database
+        return await self._connector.execute(
+            self._q(QUERY_ROUTINE_TABLE_DEPENDENCIES),
+            {"schema": schema},
+        )
 
     async def get_schema_ddl(self, database: str, schema: str) -> dict[str, str]:
         tables = await self.discover_tables(database, schema)

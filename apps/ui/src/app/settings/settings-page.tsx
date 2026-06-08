@@ -118,7 +118,11 @@ export default function SettingsPage() {
   const [deleting, setDeleting] = useState(false);
   const [dialogTesting, setDialogTesting] = useState(false);
   const [testingIds, setTestingIds] = useState<Set<string>>(new Set());
-  const [testOnSave, setTestOnSave] = useState(false);
+  const [testOnSave, setTestOnSave] = useState(() => {
+    if (typeof window === "undefined") return true;
+    const stored = localStorage.getItem("connection_test_on_save");
+    return stored !== "false";
+  });
   const [similarConfirm, setSimilarConfirm] = useState(false);
   const [testingAlerts, setTestingAlerts] = useState(false);
   const [savingAlerts, setSavingAlerts] = useState(false);
@@ -1616,7 +1620,13 @@ export default function SettingsPage() {
                 <input
                   type="checkbox"
                   checked={testOnSave}
-                  onChange={(e) => setTestOnSave(e.target.checked)}
+                  onChange={(e) => {
+                    setTestOnSave(e.target.checked);
+                    localStorage.setItem(
+                      "connection_test_on_save",
+                      e.target.checked ? "true" : "false",
+                    );
+                  }}
                   className="h-3.5 w-3.5 rounded"
                 />
                 Test before saving
