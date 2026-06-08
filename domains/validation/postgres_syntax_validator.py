@@ -38,10 +38,6 @@ _TSQL_REMNANT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bVARCHAR\s*\(\s*MAX\s*\)", re.IGNORECASE), "SQL Server VARCHAR(MAX)"),
 )
 
-_DOLLAR_BODY_RE = re.compile(
-    r"\bAS\s+\$([\w]*)\$(.*?)\$\1\s*;",
-    re.IGNORECASE | re.DOTALL,
-)
 
 _SQL_FRAGMENT_START = re.compile(
     r"^\s*(SELECT|INSERT|UPDATE|DELETE|WITH|MERGE|CREATE|TRUNCATE|ALTER|DROP)\b",
@@ -68,6 +64,12 @@ class PostgresSyntaxResult:
     parser: str = "pgparse"
 
 
+def _strip_comments_for_remnant_scan(text: str) -> str:
+    """Remove comments so T-SQL remnant patterns do not match fixer placeholder text."""
+    without_block = re.sub(r"/\*.*?\*/", " ", text, flags=re.DOTALL)
+    return re.sub(r"--[^\n]*", " ", without_block)
+
+
 def _line_for_position(sql: str, position: int | None) -> int | None:
     if position is None or position < 0:
         return None
@@ -75,7 +77,21 @@ def _line_for_position(sql: str, position: int | None) -> int | None:
 
 
 def _extract_dollar_bodies(sql: str) -> list[str]:
-    return [match.group(2) for match in _DOLLAR_BODY_RE.finditer(sql)]
+    """Extract PL/pgSQL bodies from AS $$ ... $$ or AS $tag$ ... $tag$ wrappers."""
+    bodies: list[str] = []
+    bodies.extend(
+        m.group(1)
+        for m in re.finditer(r"\bAS\s+\$\$(.*?)\$\$", sql, re.IGNORECASE | re.DOTALL)
+    )
+    bodies.extend(
+        m.group(2)
+        for m in re.finditer(
+            r"\bAS\s+\$(\w+)\$(.*?)\$\1",
+            sql,
+            re.IGNORECASE | re.DOTALL,
+        )
+    )
+    return bodies
 
 
 def _split_fragments(body: str) -> list[str]:
@@ -166,8 +182,9 @@ class PostgresSyntaxValidator:
 
     def _pattern_issues(self, text: str) -> list[SyntaxIssue]:
         issues: list[SyntaxIssue] = []
+        scan_text = _strip_comments_for_remnant_scan(text)
         for pattern, label in _TSQL_REMNANT_PATTERNS:
-            for match in pattern.finditer(text):
+            for match in pattern.finditer(scan_text):
                 issues.append(
                     SyntaxIssue(
                         message=f"Unconverted T-SQL remnant: {label}",

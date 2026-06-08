@@ -12,9 +12,17 @@ SPDX-License-Identifier: MIT
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 
 # Default mapping covers the typical SQL Server → PostgreSQL migration path.
 _DEFAULT_MAPPING: dict[str, str] = {"dbo": "public"}
+
+
+class DboSchemaStrategy(StrEnum):
+    """How to map SQL Server's default ``dbo`` schema on PostgreSQL."""
+
+    MAP_TO_PUBLIC = "map_to_public"
+    PRESERVE_DBO = "preserve_dbo"
 
 
 @dataclass(frozen=True)
@@ -55,4 +63,19 @@ class SchemaMappingConfig:
     @classmethod
     def from_dict(cls, mapping: dict[str, str]) -> "SchemaMappingConfig":
         """Build from an arbitrary source→target dict."""
+        return cls(mapping=dict(mapping))
+
+    @classmethod
+    def from_dbo_strategy(
+        cls,
+        strategy: DboSchemaStrategy,
+        *,
+        extra: dict[str, str] | None = None,
+    ) -> "SchemaMappingConfig":
+        """Build mapping from the user's dbo handling preference."""
+        mapping: dict[str, str] = {}
+        if strategy == DboSchemaStrategy.MAP_TO_PUBLIC:
+            mapping["dbo"] = "public"
+        if extra:
+            mapping.update(extra)
         return cls(mapping=dict(mapping))

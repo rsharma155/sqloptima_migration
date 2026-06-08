@@ -89,7 +89,7 @@ def upgrade() -> None:
             "migration_worker_heartbeats",
             sa.Column("worker_id", sa.String(128), nullable=False),
             sa.Column("last_seen_at", sa.DateTime(timezone=True), nullable=False),
-            sa.Column("engine_version", sa.String(32), nullable=False, server_default="0.1.0"),
+            sa.Column("engine_version", sa.String(32), nullable=False, server_default="0.2.0"),
             sa.Column("status", sa.String(32), nullable=False, server_default="idle"),
             sa.PrimaryKeyConstraint("worker_id", name="pk_migration_worker_heartbeats"),
         )

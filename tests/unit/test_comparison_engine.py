@@ -244,7 +244,12 @@ class TestComparisonEngine:
         assert schema_node.name == "dbo"
         assert len(schema_node.children) == 1
 
-        table_node = schema_node.children[0]
+        tables_category = schema_node.children[0]
+        assert tables_category.node_type == "category"
+        assert tables_category.name == "Tables"
+        assert len(tables_category.children) == 1
+
+        table_node = tables_category.children[0]
         assert table_node.node_type == "table"
         assert table_node.name == "users"
         assert table_node.status == MatchStatus.EXACT

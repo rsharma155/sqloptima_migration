@@ -78,7 +78,8 @@ class SqlServerCdcProvider:
         # Determine from-LSN
         if last_position is None:
             min_rows = await self._connector.execute(
-                "SELECT sys.fn_cdc_get_min_lsn(?) AS min_lsn", capture_instance
+                "SELECT sys.fn_cdc_get_min_lsn(?) AS min_lsn",
+                {"capture_instance": capture_instance},
             )
             from_lsn_bytes: bytes = min_rows[0]["min_lsn"] if min_rows else b"\x00" * 12
         else:
@@ -90,14 +91,20 @@ class SqlServerCdcProvider:
         to_lsn_bytes: bytes = max_rows[0]["max_lsn"] if max_rows else from_lsn_bytes
 
         # Query CDC change table
-        col_list = ", ".join(f"[{c}]" for c in table.columns)
+        columns = table.columns
+        if not columns:
+            columns = await self._load_captured_columns(capture_instance)
+        col_list = ", ".join(f"[{c}]" for c in columns)
         query = (
             f"SELECT TOP {batch_size} "
             f"__$start_lsn, __$operation, __$update_mask, {col_list} "
             f"FROM cdc.fn_cdc_get_all_changes_{capture_instance}(?, ?, N'all') "
             f"ORDER BY __$start_lsn, __$seqval"
         )
-        rows = await self._connector.execute(query, from_lsn_bytes, to_lsn_bytes)
+        rows = await self._connector.execute(
+            query,
+            {"from_lsn": from_lsn_bytes, "to_lsn": to_lsn_bytes},
+        )
 
         changes: list[ChangeEvent] = []
         last_lsn_bytes = to_lsn_bytes
@@ -157,22 +164,60 @@ class SqlServerCdcProvider:
         """Return all CDC-enabled tables in the given schema."""
         rows = await self._connector.execute(
             """
-            SELECT s.name AS schema_name, t.name AS table_name
+            SELECT s.name AS schema_name, t.name AS table_name, ct.capture_instance
             FROM cdc.change_tables ct
             JOIN sys.tables t ON t.object_id = ct.source_object_id
             JOIN sys.schemas s ON s.schema_id = t.schema_id
             WHERE s.name = ?
             """,
-            schema,
+            {"schema": schema},
         )
-        return [
-            TableInfo(
-                schema_name=row["schema_name"],
-                table_name=row["table_name"],
-                columns=[],
+        tables: list[TableInfo] = []
+        for row in rows:
+            capture_instance = row["capture_instance"]
+            columns = await self._load_captured_columns(capture_instance)
+            pk_columns = await self._load_pk_columns(row["schema_name"], row["table_name"])
+            tables.append(
+                TableInfo(
+                    schema_name=row["schema_name"],
+                    table_name=row["table_name"],
+                    columns=columns,
+                    pk_columns=pk_columns,
+                    capture_instance=capture_instance,
+                ),
             )
-            for row in rows
-        ]
+        return tables
+
+    async def _load_captured_columns(self, capture_instance: str) -> list[str]:
+        rows = await self._connector.execute(
+            """
+            SELECT cc.name AS column_name
+            FROM cdc.change_tables ct
+            JOIN cdc.captured_columns cc ON cc.object_id = ct.object_id
+            WHERE ct.capture_instance = ?
+            ORDER BY cc.column_id
+            """,
+            {"capture_instance": capture_instance},
+        )
+        return [str(r["column_name"]) for r in rows]
+
+    async def _load_pk_columns(self, schema: str, table: str) -> list[str]:
+        rows = await self._connector.execute(
+            """
+            SELECT c.name AS column_name
+            FROM sys.key_constraints kc
+            JOIN sys.index_columns ic
+              ON ic.object_id = kc.parent_object_id AND ic.index_id = kc.unique_index_id
+            JOIN sys.columns c
+              ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+            WHERE kc.type = 'PK'
+              AND kc.parent_object_id = OBJECT_ID(?)
+            ORDER BY ic.key_ordinal
+            """,
+            {"full_name": f"{schema}.{table}"},
+        )
+        pk = [str(r["column_name"]) for r in rows]
+        return pk if pk else ["id"]
 
     async def take_snapshot(
         self,

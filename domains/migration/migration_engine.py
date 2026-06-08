@@ -58,6 +58,7 @@ class MigrationStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     COMPLETED = "completed"
+    PARTIAL = "partial"
     FAILED = "failed"
     STOPPED = "stopped"
     PAUSED = "paused"
@@ -132,6 +133,9 @@ class TableMigrationPlan:
     column_transforms: dict[str, str] | None = None
     column_sensitivity: dict[str, str] | None = None
     column_types: dict[str, str] | None = None
+    column_extract_casts: dict[str, str] | None = None
+    table_size_mb: float = 0.0
+    chunk_delay_sec: float = 0.0
 
 
 @dataclass
@@ -167,6 +171,11 @@ class MigrationJob:
     idempotent_writes: bool = False
     validate_after: bool = True
     snapshot_ref: str | None = None
+    finalize_after: bool = True
+    finalize_options: dict[str, Any] | None = None
+    column_type_overrides: dict[str, Any] = field(default_factory=dict)
+    procedural_migration: dict[str, Any] | None = None
+    source_throttle: Any | None = None
     logs: list[dict[str, Any]] = field(default_factory=list)
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))

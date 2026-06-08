@@ -12,8 +12,15 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from collections import defaultdict
+
 from domains.comparison.constraint_comparator import ConstraintComparator
-from domains.comparison.index_comparator import IndexComparator
+from domains.comparison.index_comparator import (
+    IndexComparator,
+    _index_is_pk,
+    _index_key_columns,
+    _index_name,
+)
 from domains.comparison.object_comparator import DiffEntry, ObjectComparator, significant_diffs
 from domains.discovery.discovery_engine import DiscoveryResult
 from shared.kernel.database_object import DatabaseObject, Table
@@ -64,6 +71,20 @@ _WORST_ORDER = {
     MatchStatus.PARTIAL: 1,
     MatchStatus.SOURCE_ONLY: 2,
     MatchStatus.TARGET_ONLY: 2,
+}
+
+_OBJECT_CATEGORY_ORDER = {
+    "table": 0,
+    "procedure": 1,
+    "function": 2,
+    "view": 3,
+}
+
+_OBJECT_CATEGORY_LABELS = {
+    "table": "Tables",
+    "procedure": "Stored Procedures",
+    "function": "Functions",
+    "view": "Views",
 }
 
 
@@ -238,14 +259,31 @@ class ComparisonEngine:
         )
         db_node.children.append(schema_node)
 
-        for table in sorted(tables, key=lambda t: t.object_name.lower()):
-            schema_node.children.append(self._inventory_table_node(table))
-        for proc in sorted(procedures, key=lambda p: p.object_name.lower()):
-            schema_node.children.append(self._inventory_object_node(proc, "procedure"))
-        for func in sorted(functions, key=lambda p: p.object_name.lower()):
-            schema_node.children.append(self._inventory_object_node(func, "function"))
+        if tables:
+            tables_node = self._category_node("table")
+            for table in sorted(tables, key=lambda t: t.object_name.lower()):
+                tables_node.children.append(self._inventory_table_node(table))
+            schema_node.children.append(tables_node)
+        if procedures:
+            procs_node = self._category_node("procedure")
+            for proc in sorted(procedures, key=lambda p: p.object_name.lower()):
+                procs_node.children.append(self._inventory_object_node(proc, "procedure"))
+            schema_node.children.append(procs_node)
+        if functions:
+            funcs_node = self._category_node("function")
+            for func in sorted(functions, key=lambda p: p.object_name.lower()):
+                funcs_node.children.append(self._inventory_object_node(func, "function"))
+            schema_node.children.append(funcs_node)
 
         return [db_node]
+
+    def _category_node(self, object_type: str) -> ComparisonTreeNode:
+        return ComparisonTreeNode(
+            name=_OBJECT_CATEGORY_LABELS.get(object_type, object_type.title()),
+            node_type="category",
+            status=MatchStatus.EXACT,
+            properties={"object_category": object_type},
+        )
 
     def _inventory_table_node(self, table: Table) -> ComparisonTreeNode:
         node = ComparisonTreeNode(
@@ -265,7 +303,28 @@ class ComparisonEngine:
                     },
                 )
             )
+        indexes = table.properties.get("indexes", [])
+        node.children.extend(self._index_inventory_children(indexes))
         return node
+
+    def _index_inventory_children(self, indexes: list) -> list[ComparisonTreeNode]:
+        children: list[ComparisonTreeNode] = []
+        for idx in sorted(indexes, key=lambda i: _index_name(i).lower()):
+            if _index_is_pk(idx):
+                continue
+            props = getattr(idx, "properties", {}) or {}
+            children.append(
+                ComparisonTreeNode(
+                    name=_index_name(idx),
+                    node_type="index",
+                    status=MatchStatus.EXACT,
+                    properties={
+                        "is_unique": props.get("is_unique", False),
+                        "key_columns": _index_key_columns(idx),
+                    },
+                )
+            )
+        return children
 
     def _inventory_object_node(
         self, obj: DatabaseObject, node_type: str,
@@ -480,13 +539,7 @@ class ComparisonEngine:
             )
             db_node.children.append(schema_node)
 
-            for match in all_matches:
-                obj = match.source_object or match.target_object
-                if not obj:
-                    continue
-                obj_type_str = obj.object_type.value if obj else "other"
-                obj_node = self._object_tree_node(obj, obj_type_str, match)
-                schema_node.children.append(obj_node)
+            self._append_grouped_matches(schema_node, all_matches)
 
             self._propagate_status(db_node)
             return [db_node]
@@ -505,13 +558,46 @@ class ComparisonEngine:
 
             db_node = db_nodes[db_name]
             schema_node = self._find_or_create_child(db_node, schema_name, "schema")
-            obj_type_str = obj.object_type.value if obj else "other"
-            schema_node.children.append(self._object_tree_node(obj, obj_type_str, match))
+            if not schema_node.properties.get("_grouped"):
+                self._append_grouped_matches(schema_node, [
+                    m for m in all_matches
+                    if (m.source_object or m.target_object)
+                    and (m.source_object or m.target_object).schema_name == schema_name
+                ])
+                schema_node.properties["_grouped"] = True
 
         for db_node in db_nodes.values():
             self._propagate_status(db_node)
 
         return list(db_nodes.values())
+
+    def _append_grouped_matches(
+        self,
+        schema_node: ComparisonTreeNode,
+        matches: list[ObjectMatch],
+    ) -> None:
+        by_type: dict[str, list[ObjectMatch]] = defaultdict(list)
+        for match in matches:
+            obj = match.source_object or match.target_object
+            if not obj:
+                continue
+            by_type[obj.object_type.value].append(match)
+
+        for obj_type in sorted(
+            by_type.keys(),
+            key=lambda t: _OBJECT_CATEGORY_ORDER.get(t, 99),
+        ):
+            category_node = self._category_node(obj_type)
+            for match in sorted(
+                by_type[obj_type],
+                key=lambda m: (m.source_object or m.target_object).object_name.lower(),
+            ):
+                obj = match.source_object or match.target_object
+                category_node.children.append(
+                    self._object_tree_node(obj, obj_type, match)
+                )
+            self._propagate_status(category_node)
+            schema_node.children.append(category_node)
 
     def _object_tree_node(
         self,
@@ -542,17 +628,19 @@ class ComparisonEngine:
             obj_node.children.extend(
                 self._column_diff_children(src_table, tgt_table, match.differences)
             )
+            obj_node.children.extend(
+                self._index_diff_children(src_table, tgt_table, match.differences)
+            )
 
         if match.differences:
             for diff in match.differences:
                 parts = diff.property_name.split(".")
-                if len(parts) >= 2 and parts[0] in ("index", "constraint"):
+                if len(parts) >= 2 and parts[0] == "constraint":
                     child_name = parts[1]
-                    child_type = parts[0]
                     obj_node.children.append(
                         ComparisonTreeNode(
                             name=child_name,
-                            node_type=child_type,
+                            node_type="constraint",
                             status=MatchStatus.PARTIAL,
                             properties={
                                 "diff": {
@@ -566,6 +654,56 @@ class ComparisonEngine:
                     )
 
         return obj_node
+
+    def _index_diff_children(
+        self,
+        source: Table | None,
+        target: Table | None,
+        differences: list[DiffEntry],
+    ) -> list[ComparisonTreeNode]:
+        src_indexes = (source.properties.get("indexes", []) if source else [])
+        tgt_indexes = (target.properties.get("indexes", []) if target else [])
+        src_map = {
+            _index_name(idx).lower(): idx
+            for idx in src_indexes
+            if not _index_is_pk(idx)
+        }
+        tgt_map = {
+            _index_name(idx).lower(): idx
+            for idx in tgt_indexes
+            if not _index_is_pk(idx)
+        }
+        diff_by_index: dict[str, list[DiffEntry]] = {}
+        for diff in significant_diffs(differences):
+            parts = diff.property_name.split(".")
+            if parts[0] == "index" and len(parts) >= 2:
+                diff_by_index.setdefault(parts[1].lower(), []).append(diff)
+
+        all_names = sorted(set(src_map) | set(tgt_map))
+        children: list[ComparisonTreeNode] = []
+        for name in all_names:
+            src_idx = src_map.get(name)
+            tgt_idx = tgt_map.get(name)
+            if src_idx and not tgt_idx:
+                status = MatchStatus.SOURCE_ONLY
+            elif tgt_idx and not src_idx:
+                status = MatchStatus.TARGET_ONLY
+            elif diff_by_index.get(name):
+                status = MatchStatus.PARTIAL
+            else:
+                status = MatchStatus.EXACT
+            children.append(
+                ComparisonTreeNode(
+                    name=_index_name(src_idx or tgt_idx),
+                    node_type="index",
+                    status=status,
+                    properties={
+                        "source_columns": _index_key_columns(src_idx) if src_idx else None,
+                        "target_columns": _index_key_columns(tgt_idx) if tgt_idx else None,
+                    },
+                )
+            )
+        return children
 
     def _column_diff_children(
         self,

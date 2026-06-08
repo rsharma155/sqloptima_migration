@@ -7,13 +7,13 @@ SPDX-License-Identifier: MIT
 
 from __future__ import annotations
 
-import os
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
 import application.migration_service as migration_svc
+from application.notification_config import notification_config_status
 from domains.migration.migration_engine import MigrationStatus
 
 
@@ -37,19 +37,6 @@ _SEVERITY_ORDER = {"critical": 0, "warning": 1, "info": 2}
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
-
-
-def notification_config_status() -> dict[str, Any]:
-    webhook = bool(os.environ.get("MIGRATION_WEBHOOK_URL"))
-    smtp_host = os.environ.get("MIGRATION_SMTP_HOST", "")
-    email_to = os.environ.get("MIGRATION_ALERT_EMAIL_TO", "")
-    email_configured = bool(smtp_host and email_to)
-    return {
-        "webhook_configured": webhook,
-        "email_configured": email_configured,
-        "email_to": email_to if email_configured else None,
-        "channels_active": webhook or email_configured,
-    }
 
 
 class AlertService:
@@ -176,9 +163,8 @@ class AlertService:
                 category="notification",
                 title="External alerting not configured",
                 message=(
-                    "Set MIGRATION_WEBHOOK_URL and/or MIGRATION_SMTP_HOST + "
-                    "MIGRATION_ALERT_EMAIL_TO in .env to receive email/Slack alerts "
-                    "when migrations fail overnight."
+                    "Configure webhook and/or email alerts in Settings to receive "
+                    "Slack, Teams, or email notifications when migrations fail overnight."
                 ),
                 href="/settings",
                 created_at=_now_iso(),

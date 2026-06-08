@@ -92,7 +92,7 @@ func TestChunkPipeline_SQLServerToPostgres_integration(t *testing.T) {
 	for _, chunk := range chunks {
 		rows, err := pipeline.Run(
 			ctx, chunk, "public", table, schema, false,
-			[]string{"id"}, extractor.ExtractOptions{}, nil,
+			[]string{"id"}, extractor.ExtractOptions{}, nil, nil,
 		)
 		if err != nil {
 			t.Fatalf("pipeline chunk %d: %v", chunk.ChunkIndex, err)

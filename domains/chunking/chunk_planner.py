@@ -307,27 +307,13 @@ class ChunkPlanner:
         return None, None
 
     async def _get_approximate_count(self, schema: str, table: str) -> int:
-        try:
-            rows = await self._connector.execute("""
-                SELECT SUM(p.rows) AS row_count
-                FROM sys.partitions p
-                INNER JOIN sys.objects o ON p.object_id = o.object_id
-                INNER JOIN sys.schemas s ON o.schema_id = s.schema_id
-                WHERE s.name = ? AND o.name = ? AND p.index_id IN (0, 1)
-            """, {"schema": schema, "table": table})
-            if rows and rows[0]["row_count"]:
-                return rows[0]["row_count"]
-        except Exception:
-            pass
-        try:
-            rows = await self._connector.execute(
-                f"SELECT COUNT(*) AS cnt FROM [{schema}].[{table}]"
-            )
-            if rows:
-                return rows[0]["cnt"]
-        except Exception:
-            pass
-        return 0
+        from infrastructure.sqlserver.row_count_estimate import (
+            fetch_sqlserver_table_row_estimate,
+        )
+
+        return await fetch_sqlserver_table_row_estimate(
+            self._connector, schema, table,
+        )
 
     def _generate_ranges(
         self,

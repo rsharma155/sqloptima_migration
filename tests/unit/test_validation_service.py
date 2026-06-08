@@ -105,6 +105,13 @@ class TestReportToDict:
         assert d["overall_status"] == "passed"
         assert d["total_objects"] == 1
 
+    def test_dict_contains_results_and_level(self):
+        results = [_make_passed_result()]
+        report = ValidationService._build_report(results, validation_level=1)
+        d = ValidationService._report_to_dict(report)
+        assert d["validation_level"] == 1
+        assert "details" in d["results"][0]
+
     def test_failed_result_issues_in_dict(self):
         results = [_make_failed_result()]
         report = ValidationService._build_report(results)
@@ -243,7 +250,7 @@ class TestGetReport:
         svc._repo.get_run = AsyncMock(return_value=run)
         content = await svc.get_report("run-123", "html")
         assert "<!DOCTYPE html>" in content
-        assert "Migration Validation Report" in content
+        assert "SQL Server → PostgreSQL Migration Platform" in content
 
     @pytest.mark.asyncio
     async def test_csv_export_returns_csv(self):

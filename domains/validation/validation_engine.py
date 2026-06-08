@@ -31,6 +31,8 @@ class ValidationStatus(StrEnum):
 class ValidationCategory(StrEnum):
     SCHEMA = "schema"
     ROW_COUNT = "row_count"
+    AGGREGATE = "aggregate"
+    CHUNK = "chunk"
     CHECKSUM = "checksum"
     QUERY_RESULT = "query_result"
     CONSTRAINT = "constraint"
@@ -79,6 +81,7 @@ class ValidationReport:
     warnings: int = 0
     duration_ms: float = 0.0
     overall_status: ValidationStatus = ValidationStatus.PASSED
+    validation_level: int | None = None
 
 
 # Fix 4.2: type equivalence map — known-safe SQL Server → PostgreSQL type mappings.
@@ -185,6 +188,7 @@ class RowCountValidator:
         schema: str = "public",
         *,
         target_schema: str | None = None,
+        expected_row_count: int | None = None,
     ) -> ValidationResult:
         """Compare row counts between source and target."""
         tgt_schema = target_schema or schema
@@ -193,22 +197,35 @@ class RowCountValidator:
             category=ValidationCategory.ROW_COUNT,
         )
 
-        source_count = await self._count_source(source_connector, schema, table_name)
         target_count = await self._count_target(
             target_connector, schema=tgt_schema, table=table_name,
         )
-
-        result.source_count = source_count
         result.target_count = target_count
 
-        if source_count == target_count:
+        if expected_row_count is not None:
+            source_count = expected_row_count
+            result.source_count = source_count
+            result.details["source_count_basis"] = "migration_metadata"
+        else:
+            source_count = await self._count_source(source_connector, schema, table_name)
+            result.source_count = source_count
+            result.details["source_count_basis"] = "sys.partitions_estimate"
+
+        if expected_row_count is not None:
+            counts_match = target_count == expected_row_count
+        else:
+            counts_match = _row_counts_within_tolerance(source_count, target_count)
+
+        if counts_match:
             result.status = ValidationStatus.PASSED
         else:
             result.status = ValidationStatus.FAILED
             result.issues.append(ValidationIssue(
                 category=ValidationCategory.ROW_COUNT,
                 severity="error",
-                message=f"Row count mismatch: source={source_count}, target={target_count}",
+                message=(
+                    f"Row count mismatch: source={source_count}, target={target_count}"
+                ),
                 source_value=source_count,
                 target_value=target_count,
             ))
@@ -221,13 +238,11 @@ class RowCountValidator:
 
     @staticmethod
     async def _count_source(connector: Any, schema: str, table: str) -> int:
-        try:
-            rows = await connector.execute(
-                f"SELECT COUNT(*) AS cnt FROM {RowCountValidator._q(schema)}.{RowCountValidator._q(table)}"
-            )
-            return rows[0]["cnt"] if rows else 0
-        except Exception:
-            return -1
+        from infrastructure.sqlserver.row_count_estimate import (
+            fetch_sqlserver_table_row_estimate,
+        )
+
+        return await fetch_sqlserver_table_row_estimate(connector, schema, table)
 
     @staticmethod
     async def _count_target(connector: Any, schema: str, table: str) -> int:
@@ -240,6 +255,15 @@ class RowCountValidator:
             return rows[0]["cnt"] if rows else 0
         except Exception:
             return -1
+
+
+def _row_counts_within_tolerance(estimated: int, actual: int) -> bool:
+    """True when DMV estimate matches target count or is within 1% (min 100 rows)."""
+    if estimated == actual:
+        return True
+    if actual == 0:
+        return estimated == 0
+    return abs(estimated - actual) <= max(100, int(0.01 * actual))
 
 
 class ChecksumValidator:
@@ -575,6 +599,12 @@ def _format_aggregate_value(value: Any) -> str:
         return str(value)
 
 
+def _normalize_aggregate_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Normalize MIN/MAX/SUM/AVG keys — pyodbc often returns uppercase aliases."""
+    lower = {str(k).lower(): v for k, v in row.items()}
+    return {k: lower.get(k) for k in ("min", "max", "sum", "avg")}
+
+
 def _aggregate_values_match(key: str, source: Any, target: Any) -> bool:
     """Compare aggregate results with rounding tolerance for cross-DB numeric drift."""
     if source is None and target is None:
@@ -594,6 +624,12 @@ def _aggregate_values_match(key: str, source: Any, target: Any) -> bool:
     return s == t
 
 
+_NUMERIC_SOURCE_TYPES = frozenset({
+    "int", "bigint", "smallint", "tinyint", "decimal", "numeric",
+    "float", "real", "money", "smallmoney", "bit",
+})
+
+
 class AggregateValidator:
     async def validate(
         self,
@@ -607,64 +643,132 @@ class AggregateValidator:
     ) -> ValidationResult:
         result = ValidationResult(
             object_name=f"{schema}.{table_name}",
-            category=ValidationCategory.ROW_COUNT,
+            category=ValidationCategory.AGGREGATE,
         )
+        tgt_schema = target_schema or schema
+        functions = ["MIN", "MAX", "SUM", "AVG"]
+        result.details["aggregate_functions"] = functions
+
+        if aggregate_columns is None:
+            aggregate_columns = await self._detect_numeric_columns(
+                source_connector, schema, table_name,
+            )
+
+        result.details["columns_checked"] = list(aggregate_columns)
+        column_results: list[dict[str, Any]] = []
 
         if not aggregate_columns:
-            pk_cols = await self._detect_pk_columns(source_connector, schema, table_name)
-            aggregate_columns = pk_cols if pk_cols else ["id"]
-
-        result.details["aggregate_functions"] = ["MIN", "MAX", "SUM", "AVG"]
-        result.details["columns_checked"] = list(aggregate_columns)
+            result.status = ValidationStatus.SKIPPED
+            result.details["column_results"] = column_results
+            result.details["skip_reason"] = "no_numeric_columns"
+            result.issues.append(ValidationIssue(
+                category=ValidationCategory.AGGREGATE,
+                severity="warning",
+                message=f"No numeric columns to compare on {schema}.{table_name}",
+            ))
+            return result
 
         for col in aggregate_columns:
+            col_entry: dict[str, Any] = {"column": col, "status": "passed"}
             try:
-                tgt_schema = target_schema or schema
-                src = await self._get_aggregates_source(source_connector, schema, table_name, col)
+                src = await self._get_aggregates_source(
+                    source_connector, schema, table_name, col,
+                )
                 tgt = await self._get_aggregates_target(
                     target_connector, tgt_schema, table_name, col,
                 )
 
                 if src is None or tgt is None:
-                    # Fix 4.1: must append ValidationIssue, not CompatibilityIssue.
+                    col_entry["status"] = "error"
+                    col_entry["reason"] = "aggregate_query_failed"
                     result.issues.append(ValidationIssue(
-                        category=ValidationCategory.ROW_COUNT,
-                        severity="warning",
-                        message=f"Aggregate query failed for column {col} on {schema}.{table_name}",
+                        category=ValidationCategory.AGGREGATE,
+                        severity="error",
+                        message=(
+                            f"Aggregate query failed for column {col} "
+                            f"on {schema}.{table_name}"
+                        ),
+                        details={"column": col},
                     ))
+                    column_results.append(col_entry)
                     continue
 
-                mismatches = []
+                col_entry["source"] = _normalize_aggregate_row(src)
+                col_entry["target"] = _normalize_aggregate_row(tgt)
+
+                mismatches: list[str] = []
                 for key in ("min", "max", "sum", "avg"):
-                    s = src.get(key)
-                    t = tgt.get(key)
+                    s = col_entry["source"].get(key)
+                    t = col_entry["target"].get(key)
                     if s is not None and t is not None and not _aggregate_values_match(key, s, t):
                         mismatches.append(
-                            f"{key}: {_format_aggregate_value(s)} vs {_format_aggregate_value(t)}"
+                            f"{key}: {_format_aggregate_value(s)} vs "
+                            f"{_format_aggregate_value(t)}"
                         )
 
                 if mismatches:
-                    result.status = ValidationStatus.FAILED
+                    col_entry["status"] = "failed"
+                    col_entry["mismatches"] = mismatches
                     result.issues.append(ValidationIssue(
-                        category=ValidationCategory.ROW_COUNT,
+                        category=ValidationCategory.AGGREGATE,
                         severity="error",
                         message=f"Aggregate mismatch for {col}: {'; '.join(mismatches)}",
-                        source_value=src,
-                        target_value=tgt,
+                        source_value=col_entry["source"],
+                        target_value=col_entry["target"],
                         details={"column": col, "mismatches": mismatches},
                     ))
-            except Exception as e:
+            except Exception as exc:
+                col_entry["status"] = "error"
+                col_entry["reason"] = str(exc)
                 result.issues.append(ValidationIssue(
-                    category=ValidationCategory.ROW_COUNT,
+                    category=ValidationCategory.AGGREGATE,
                     severity="error",
-                    message=f"Aggregate validation error for {col}: {e}",
+                    message=f"Aggregate validation error for {col}: {exc}",
+                    details={"column": col},
                 ))
 
-        if not result.issues:
-            result.status = ValidationStatus.PASSED
-        elif any(i.severity == "error" for i in result.issues):
+            column_results.append(col_entry)
+
+        result.details["column_results"] = column_results
+        result.details["columns_passed"] = sum(
+            1 for c in column_results if c.get("status") == "passed"
+        )
+        result.details["columns_failed"] = sum(
+            1 for c in column_results if c.get("status") == "failed"
+        )
+        result.details["columns_errored"] = sum(
+            1 for c in column_results if c.get("status") == "error"
+        )
+
+        if result.details["columns_failed"] or result.details["columns_errored"]:
             result.status = ValidationStatus.FAILED
+        elif result.issues:
+            result.status = ValidationStatus.WARNING
+        else:
+            result.status = ValidationStatus.PASSED
+
         return result
+
+    @staticmethod
+    async def _detect_numeric_columns(
+        connector: Any, schema: str, table: str,
+    ) -> list[str]:
+        try:
+            rows = await connector.execute("""
+                SELECT c.name AS column_name, t.name AS type_name
+                FROM sys.columns c
+                INNER JOIN sys.types t ON c.user_type_id = t.user_type_id
+                WHERE OBJECT_SCHEMA_NAME(c.object_id) = ?
+                  AND OBJECT_NAME(c.object_id) = ?
+                ORDER BY c.column_id
+            """, {"schema": schema, "table": table})
+            return [
+                r["column_name"]
+                for r in rows
+                if str(r.get("type_name", "")).lower() in _NUMERIC_SOURCE_TYPES
+            ]
+        except Exception:
+            return []
 
     @staticmethod
     async def _detect_pk_columns(connector: Any, schema: str, table: str) -> list[str]:
@@ -694,7 +798,7 @@ class AggregateValidator:
                 f"ROUND(AVG(CAST([{column}] AS FLOAT)), 6) AS avg "
                 f"FROM [{schema}].[{table}]"
             )
-            return rows[0] if rows else None
+            return _normalize_aggregate_row(rows[0]) if rows else None
         except Exception:
             return None
 
@@ -709,7 +813,7 @@ class AggregateValidator:
                 f'ROUND(AVG(CAST("{column}" AS DOUBLE PRECISION)), 6) AS avg '
                 f'FROM "{schema}"."{table}"'
             )
-            return rows[0] if rows else None
+            return _normalize_aggregate_row(rows[0]) if rows else None
         except Exception:
             return None
 
@@ -735,10 +839,13 @@ class ValidationEngine:
         target_connector: Any,
         tables: list[dict],
         run_aggregate_validation: bool = False,
+        run_checksum_validation: bool = False,
     ) -> ValidationReport:
         """Run full validation on all migrated tables."""
         report = ValidationReport()
-        entries_per_table = 4 if run_aggregate_validation else 3
+        entries_per_table = 2 + (1 if run_aggregate_validation else 0)
+        if run_checksum_validation:
+            entries_per_table += 1
         report.total_objects = len(tables) * entries_per_table
         logger.info("Starting validation", table_count=len(tables))
 
@@ -772,14 +879,15 @@ class ValidationEngine:
             )
             report.results.append(row_result)
 
-            cksum_result = await self._checksum_validator.validate(
-                source_connector=source_connector,
-                target_connector=target_connector,
-                table_name=table_name,
-                schema=schema,
-                target_schema=target_schema,
-            )
-            report.results.append(cksum_result)
+            if run_checksum_validation:
+                cksum_result = await self._checksum_validator.validate(
+                    source_connector=source_connector,
+                    target_connector=target_connector,
+                    table_name=table_name,
+                    schema=schema,
+                    target_schema=target_schema,
+                )
+                report.results.append(cksum_result)
 
             if run_aggregate_validation:
                 agg_result = await self._aggregate_validator.validate(

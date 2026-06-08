@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from apps.api.middleware.auth import UserRole, require_role
-from application.conversion_service import ConversionService, ConversionRequest
+from application.conversion_service import ConversionRequest
 from shared.logging.structured_logging import get_logger
 
 logger = get_logger(__name__)
@@ -58,6 +58,8 @@ class ConvertRequest(BaseModel):
     parameters: list[dict] = []
     # Optional schema mapping: {"dbo": "public", "hr": "staff"}
     schema_mapping: dict[str, str] | None = None
+    # map_to_public (default) or preserve_dbo — keep dbo schema on PostgreSQL
+    dbo_schema_strategy: str = "map_to_public"
 
 
 class PostgresSyntaxIssueResponse(BaseModel):
@@ -96,8 +98,7 @@ async def convert_sql(req: ConvertRequest, _: dict = require_role(UserRole.OPERA
     Delegates to ConversionService (application layer) to maintain clean architecture.
     Large conversions are offloaded to executor to prevent event loop blocking.
     """
-    from domains.transpilation.schema_mapper import SchemaMapper
-    from domains.transpilation.schema_mapping_config import SchemaMappingConfig
+    from application.conversion_factory import build_conversion_service
     from shared.kernel.ddl_identifier import validate_sql_identifier
 
     # Reject unknown object types explicitly rather than silently treating them
@@ -118,15 +119,21 @@ async def convert_sql(req: ConvertRequest, _: dict = require_role(UserRole.OPERA
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Setup schema mapping
-    schema_mapper = None
+    # Setup schema mapping — shared with procedural migration service
     if req.schema_mapping is not None:
-        schema_mapper = SchemaMapper(SchemaMappingConfig.from_dict(req.schema_mapping))
-    elif req.schema_name != "public":
-        # Apply dbo→public by default unless caller explicitly targets public
-        schema_mapper = SchemaMapper(SchemaMappingConfig.default())
+        service = build_conversion_service(
+            req.schema_name,
+            schema_mapping=req.schema_mapping,
+            dbo_schema_strategy=req.dbo_schema_strategy,
+        )
+    else:
+        target = "dbo" if req.dbo_schema_strategy == "preserve_dbo" else None
+        service = build_conversion_service(
+            req.schema_name,
+            target,
+            dbo_schema_strategy=req.dbo_schema_strategy,
+        )
 
-    # Validate trigger timing explicitly (UX-01: Fail on bad timing)
     if req.object_type == "trigger":
         timing, events = _parse_trigger_metadata(req.sql)
         if timing is None:
@@ -136,8 +143,6 @@ async def convert_sql(req: ConvertRequest, _: dict = require_role(UserRole.OPERA
                        "Please provide explicit trigger metadata."
             )
 
-    # Convert via application service (ARCH-01: Service layer)
-    service = ConversionService(schema_mapper=schema_mapper)
     conversion_req = ConversionRequest(
         sql=req.sql,
         object_type=req.object_type,

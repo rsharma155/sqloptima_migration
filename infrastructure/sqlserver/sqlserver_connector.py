@@ -84,6 +84,13 @@ class SqlServerConnectionConfig(ConnectionConfig):
         )
 
 
+def trust_server_certificate_from_mapping(entry: dict) -> bool:
+    """Return whether ODBC should trust the SQL Server TLS certificate."""
+    if entry.get("trust_server_certificate") is not None:
+        return bool(entry["trust_server_certificate"])
+    return bool(entry.get("ssl_enabled", False))
+
+
 def sqlserver_config_from_entry(entry: dict, *, password: str) -> SqlServerConnectionConfig:
     """Build a SQL Server config from a connection-store entry dict."""
     return SqlServerConnectionConfig(
@@ -93,7 +100,25 @@ def sqlserver_config_from_entry(entry: dict, *, password: str) -> SqlServerConne
         username=entry.get("username", ""),
         password=password,
         schema=entry.get("schema", "dbo"),
-        trust_server_certificate=bool(entry.get("trust_server_certificate", False)),
+        trust_server_certificate=trust_server_certificate_from_mapping(entry),
+    )
+
+
+def sqlserver_config_from_resolved(
+    cfg: dict,
+    *,
+    password: str,
+    schema: str | None = None,
+) -> SqlServerConnectionConfig:
+    """Build a SQL Server config from WorkflowBridgeService.resolve_connection()."""
+    return SqlServerConnectionConfig(
+        host=cfg["host"],
+        port=int(cfg.get("port", 1433)),
+        database=cfg["database"],
+        username=cfg.get("username", ""),
+        password=password,
+        schema=schema or cfg.get("schema", "dbo"),
+        trust_server_certificate=trust_server_certificate_from_mapping(cfg),
     )
 
 

@@ -11,29 +11,42 @@ jobs:
   pip-audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-      - name: Install project + pip-audit
+      - name: Install dependencies + pip-audit
         run: |
-          pip install -e ".[dev]"
+          pip install --upgrade pip
           pip install pip-audit
+          python <<'EOF'
+          import subprocess
+          import sys
+          import tomllib
+
+          with open("pyproject.toml", "rb") as f:
+              project = tomllib.load(f)
+          deps = (
+              project["project"]["dependencies"]
+              + project["project"]["optional-dependencies"]["dev"]
+          )
+          subprocess.check_call([sys.executable, "-m", "pip", "install", *deps])
+          EOF
       - name: Run pip-audit
         run: pip-audit --desc
 
   sbom:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - name: Generate Python SBOM
         run: |
           pip install -e .
           python scripts/generate_sbom.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sbom-python
           path: dist/sbom-python.json
@@ -44,8 +57,8 @@ jobs:
       run:
         working-directory: apps/ui
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: "22"
       - run: npm ci

@@ -39,6 +39,7 @@ class TsqlBodyConverter:
         result = _expand_multi_var_declare(result)  # must be before variable_references
         result = _remove_session_settings(result)
         result = _strip_n_prefix(result)
+        result = _convert_for_xml_path(result)  # before string concat (+ → ||)
         result = _convert_try_catch(result)
         result = _convert_print(result)
         result = _convert_raiserror(result)
@@ -52,6 +53,7 @@ class TsqlBodyConverter:
         result = _convert_rowcount(result, param_names)
         result = _convert_cursor_syntax(result)
         result = _convert_dynamic_sql(result)
+        result = _convert_goto_statements(result)
         result = _convert_openjson(result)
         result = _convert_merge(result)
         result = _convert_scope_identity(result)
@@ -65,12 +67,17 @@ class TsqlBodyConverter:
         result = _fix_remaining_top(result)          # TOP (@var) → LIMIT p_var at end
         result = _convert_string_concat(result)
         result = _convert_money_type_in_declare(result)
+        result = _fix_remaining_top(result)
+        result = _convert_cursor_fetch_loops(result)
+        result = _normalize_insert_into(result)
+        result = _convert_static_routine_exec(result)
+        result = _convert_quoted_column_aliases(result)
+        result = _strip_tsql_query_options(result)
         result = _convert_control_flow(result)
         result = _remove_go_and_batch_sep(result)
         # Fix 3.7-3.9: additional function/syntax conversions applied last
         result = _convert_isnumeric(result)
         result = _convert_format_function(result)
-        result = _convert_for_xml_path(result)
 
         return result.strip()
 
@@ -241,6 +248,13 @@ def _convert_try_catch(sql: str) -> str:
     )
     sql = re.sub(r'\bERROR_PROCEDURE\s*\(\)', "''", sql, flags=re.IGNORECASE)
     sql = re.sub(r'\bERROR_LINE\s*\(\)', '0', sql, flags=re.IGNORECASE)
+
+    sql = re.sub(
+        r'\bXACT_STATE\s*\(\s*\)',
+        "0 /* TODO: XACT_STATE — no PG equivalent for uncommittable transactions */",
+        sql,
+        flags=re.IGNORECASE,
+    )
 
     # Fix 3.5: @@TRANCOUNT — PL/pgSQL uses implicit transactions; emit TODO comment.
     sql = re.sub(
@@ -993,6 +1007,43 @@ def _merge_todo(stmt: str, indent: str) -> str:
     )
 
 
+def _convert_cursor_fetch_loops(sql: str) -> str:
+    """Convert DECLARE CURSOR + WHILE @@FETCH_STATUS loops to PL/pgSQL FOR ... LOOP."""
+    pattern = re.compile(
+        r"DECLARE\s+(?P<cursor>@?\w+)\s+CURSOR\s+FOR\s+"
+        r"(?P<query>SELECT[\s\S]+?)\s*;\s*"
+        r"OPEN\s+(?P=cursor)\s*;\s*"
+        r"FETCH\s+(?:NEXT\s+)?FROM\s+(?P=cursor)\s+INTO\s+(?P<var>@?\w+)\s*;\s*"
+        r"WHILE\s+(?:@@FETCH_STATUS\s*=\s*0|FOUND(?:\s*=\s*0)?)\s*"
+        r"BEGIN\s*"
+        r"(?P<body>[\s\S]*?)"
+        r"END\s*"
+        r"(?:\s*CLOSE\s+(?P=cursor)\s*;\s*)?"
+        r"(?:\s*DEALLOCATE\s+(?P=cursor)\s*;\s*)?",
+        re.IGNORECASE,
+    )
+
+    def _repl(m: re.Match) -> str:  # type: ignore[type-arg]
+        query = m.group("query").strip()
+        var = m.group("var")
+        var_plain = var.lstrip("@")
+        loop_var = var_plain if var_plain.startswith(("v_", "p_")) else f"v_{var_plain}"
+        cursor_pat = re.escape(m.group("cursor"))
+        body = m.group("body").strip()
+        body = re.sub(
+            rf"FETCH\s+(?:NEXT\s+)?FROM\s+{cursor_pat}\s+INTO\s+{re.escape(var)}\s*;?\s*",
+            "",
+            body,
+            flags=re.IGNORECASE,
+        )
+        indented = "\n".join(
+            f"    {line}" if line.strip() else line for line in body.split("\n")
+        )
+        return f"FOR {loop_var} IN {query} LOOP\n{indented}\nEND LOOP;"
+
+    return pattern.sub(_repl, sql)
+
+
 def _convert_cursor_syntax(sql: str) -> str:
     """Remove SQL Server cursor modifiers and convert @@FETCH_STATUS."""
     # CURSOR LOCAL FAST_FORWARD / CURSOR STATIC / CURSOR FORWARD_ONLY → CURSOR
@@ -1011,36 +1062,104 @@ def _convert_cursor_syntax(sql: str) -> str:
 
 
 def _convert_dynamic_sql(sql: str) -> str:
-    """Convert EXEC sp_executesql and EXEC @var to PL/pgSQL EXECUTE."""
-    # EXEC sp_executesql @var [, N'param_def', @p1 = val1] → EXECUTE var [USING val1]
+    """Convert EXEC/EXECUTE sp_executesql and EXEC @var to PL/pgSQL EXECUTE."""
     def _exec_sp_repl(m: re.Match) -> str:  # type: ignore[type-arg]
-        raw_var = m.group(1)                          # may start with @
-        var_name = raw_var.lstrip('@')                # strip @ for PG
+        raw_var = m.group(1)
+        var_name = raw_var.lstrip("@")
         params_raw = m.group(2) or ""
-        # Extract positional argument values after the param-definition string
-        # Format: N'@p1 TYPE, @p2 TYPE', @p1 = val1, @p2 = val2
-        vals = re.findall(r'@\w+\s*=\s*([^,;]+)', params_raw)
+        vals = re.findall(r"@\w+\s*=\s*([^,;]+)", params_raw)
+        if not vals:
+            vals = [
+                p.strip()
+                for p in re.split(r",", params_raw)
+                if p.strip() and not re.match(r"N['\"]", p.strip(), re.IGNORECASE)
+            ]
         if vals:
             using_clause = ", ".join(
-                f"v_{v.strip().lstrip('@')}" if v.strip().startswith('@') else v.strip()
+                f"v_{v.strip().lstrip('@')}" if v.strip().startswith("@") else v.strip()
                 for v in vals
             )
             return f"EXECUTE v_{var_name} USING {using_clause};"
         return f"EXECUTE v_{var_name};"
 
-    sql = re.sub(
-        r'\bEXEC\s+sp_executesql\s+(@?\w+)((?:\s*,\s*[^;]+)*)\s*;?',
-        _exec_sp_repl, sql, flags=re.IGNORECASE,
+    _sp_exec_re = re.compile(
+        r"\b(?:EXEC(?:UTE)?)\s+(?:(?:\[\w+\]\.)?(?:\[sp_executesql\]|sp_executesql))\s+"
+        r"(@?\w+)((?:\s*,\s*[^;]+)*)\s*;?",
+        re.IGNORECASE,
     )
-    # EXEC @var; (simple dynamic execute without sp_executesql)
+    sql = _sp_exec_re.sub(_exec_sp_repl, sql)
     sql = re.sub(
-        r'\bEXEC\s+@(\w+)\s*;',
+        r"\bEXEC\s+@(\w+)\s*;",
         lambda m: f"EXECUTE v_{m.group(1)};",
-        sql, flags=re.IGNORECASE,
+        sql,
+        flags=re.IGNORECASE,
     )
-    # EXEC ('string') → EXECUTE 'string'
-    sql = re.sub(r"\bEXEC\s*\(\s*('(?:[^']|'')*')\s*\)\s*;?", r"EXECUTE \1;", sql, flags=re.IGNORECASE)
-    return sql
+    sql = re.sub(
+        r"\bEXEC\s*\(\s*('(?:[^']|'')*')\s*\)\s*;?",
+        r"EXECUTE \1;",
+        sql,
+        flags=re.IGNORECASE,
+    )
+    from domains.transpilation.converters.dynamic_sql_converter import DynamicSqlConverter
+
+    return DynamicSqlConverter.apply_all(sql).sql
+
+
+def _convert_goto_statements(sql: str) -> str:
+    """Convert T-SQL GOTO/labels to PL/pgSQL-safe placeholders (no GOTO keyword left)."""
+    result = re.sub(
+        r"\bIF\s+(.+?)\s+GOTO\s+(\w+)\s+THEN\b",
+        r"IF \1 THEN NULL; /* jump to label \2 — restructure manually */ END IF",
+        sql,
+        flags=re.IGNORECASE,
+    )
+    result = re.sub(
+        r"\bIF\s+(.+?)\s+GOTO\s+(\w+)\b",
+        r"IF \1 THEN NULL; /* jump to label \2 — restructure manually */ END IF",
+        result,
+        flags=re.IGNORECASE,
+    )
+    result = re.sub(
+        r"\bGOTO\s+(\w+)\s*;?",
+        r"NULL; /* jump to label \1 — restructure manually */",
+        result,
+        flags=re.IGNORECASE,
+    )
+    result = re.sub(
+        r"(?m)^(\s*)([A-Za-z_]\w*)\s*:",
+        r"\1-- label \2",
+        result,
+    )
+    result = re.sub(r"/\*\s*label:(\w+)\s*\*/", r"-- label \1", result, flags=re.IGNORECASE)
+    result = re.sub(r"\bEND IF;\s+THEN\b", "END IF", result, flags=re.IGNORECASE)
+    return result
+
+
+def _normalize_insert_into(sql: str) -> str:
+    """T-SQL INSERT table (cols) without INTO → PostgreSQL INSERT INTO table."""
+    return re.sub(
+        r'\bINSERT\s+(?!INTO\b)(?=(?:[\w"]+\.)?[\w"]+)',
+        "INSERT INTO ",
+        sql,
+        flags=re.IGNORECASE,
+    )
+
+
+def _convert_static_routine_exec(sql: str) -> str:
+    """EXEC/EXECUTE schema.procedure → CALL schema.procedure() for static routine invocations."""
+    pattern = re.compile(
+        r"\b(?:EXECUTE|EXEC)\s+(?!sp_executesql\b|(?:v_|p_|\())"
+        r"(?:(?P<schema>\w+)\.)?(?P<proc>\w+)\s*;?",
+        re.IGNORECASE,
+    )
+
+    def _repl(m: re.Match[str]) -> str:
+        schema = m.group("schema")
+        proc = m.group("proc")
+        qual = f"{schema}.{proc}" if schema else proc
+        return f"CALL {qual}();"
+
+    return pattern.sub(_repl, sql)
 
 
 def _convert_scope_identity(sql: str) -> str:
@@ -1072,24 +1191,37 @@ def _add_recursive_to_cte(sql: str) -> str:
 
     def _check_and_add(m: re.Match) -> str:  # type: ignore[type-arg]
         cte_name = m.group(1)
+        col_list = m.group(2) or ""
         cte_body_start = m.start()
-        # Look ahead for "UNION ALL" followed by the CTE name (self-reference)
         rest = sql[cte_body_start:]
-        # A recursive CTE references its own name inside itself
         self_ref_pattern = re.compile(
             r'\bUNION\s+ALL\b.+?\b' + re.escape(cte_name) + r'\b',
             re.IGNORECASE | re.DOTALL,
         )
-        if self_ref_pattern.search(rest[:500]):  # search first 500 chars of the CTE block
-            return f"WITH RECURSIVE {cte_name} AS ("
+        if self_ref_pattern.search(rest[:2000]):
+            return f"WITH RECURSIVE {cte_name}{col_list} AS ("
         return m.group(0)
 
-    # Only touch CTEs that are not yet marked RECURSIVE
     result = re.sub(
-        r'\bWITH\s+(?!RECURSIVE\b)(\w+)\s+AS\s*\(',
+        r'\bWITH\s+(?!RECURSIVE\b)(\w+)(\([^)]*\))?\s+AS\s*\(',
         _check_and_add, sql, flags=re.IGNORECASE,
     )
     return result
+
+
+def _convert_quoted_column_aliases(sql: str) -> str:
+    """T-SQL AS 'ColumnAlias' → PostgreSQL AS "ColumnAlias"."""
+    return re.sub(
+        r"\bAS\s+'([^']+)'",
+        r'AS "\1"',
+        sql,
+        flags=re.IGNORECASE,
+    )
+
+
+def _strip_tsql_query_options(sql: str) -> str:
+    """Remove SQL Server OPTION(...) query hints (MAXRECURSION, RECOMPILE, etc.)."""
+    return re.sub(r"\bOPTION\s*\([^)]*\)", "", sql, flags=re.IGNORECASE)
 
 
 def _convert_select_var_assign(sql: str, params: list[ParamInfo]) -> str:
@@ -1211,11 +1343,14 @@ def _convert_string_concat(sql: str) -> str:
         lambda m: f"{m.group(1)} || {m.group(2)}",
         sql,
     )
-    # Pass 6: func-result) + word  e.g. quote_ident(x) + varname
-    #   Only when the word is itself followed by something string-like (||)
-    #   This is more aggressive — only apply when there's already a || nearby
-    #   to indicate a string-building context.
-    # (Skipped intentionally to avoid breaking arithmetic like COALESCE(x,0)+COALESCE(y,0))
+    # Pass 7: var + var in string-building chains (e.g. v_a + v_b || 'suffix')
+    sql = re.sub(
+        r"(\bv_\w+)\s*\+\s*(\bv_\w+)\s*\|\|",
+        r"\1 || \2 ||",
+        sql,
+    )
+    # Multiline PRINT → RAISE NOTICE: fix ';+ ' artifacts between string literals
+    sql = re.sub(r";\s*\+\s*'", " || '", sql)
     return sql
 
 
@@ -1664,22 +1799,22 @@ def _convert_for_xml_path(sql: str) -> str:
     def _repl_stuff(m: re.Match) -> str:  # type: ignore[type-arg]
         select_expr = m.group(1).strip()
         from_clause = m.group(2).strip()
-        sep_m = re.match(r"N?'([^']+)'\s*\+\s*(.+)", select_expr, re.IGNORECASE)
+        sep_m = re.match(r"N?'([^']+)'\s*(?:\+|\|\|)\s*(.+)", select_expr, re.IGNORECASE)
         if sep_m:
             sep = sep_m.group(1)
             col = sep_m.group(2).strip()
             return f"(SELECT STRING_AGG({col}, '{sep}') FROM {from_clause})"
-        return f"(SELECT STRING_AGG({select_expr}, '') FROM {from_clause}) /* converted from FOR XML PATH */"
+        return f"(SELECT STRING_AGG({select_expr}, '') FROM {from_clause})"
 
     result = _stuff_xml_re.sub(_repl_stuff, sql)
 
-    # Any remaining FOR XML ... → TODO comment
-    result = re.sub(
-        r'\bFOR\s+XML\b[^;]*',
-        "/* TODO: FOR XML PATH not converted — use STRING_AGG or xmlagg() */",
-        result,
-        flags=re.IGNORECASE,
-    )
+    if re.search(r"\bFOR\s+XML\b", result, re.IGNORECASE):
+        result = re.sub(
+            r"\bFOR\s+XML\b(?:\s+(?:PATH|AUTO|RAW|EXPLICIT))?(?:\s*\([^)]*\))?",
+            "/* MANUAL REVIEW: convert XML PATH using STRING_AGG, xmlagg, xmlelement */",
+            result,
+            flags=re.IGNORECASE,
+        )
 
     # OPENXML(...) → TODO comment
     result = re.sub(

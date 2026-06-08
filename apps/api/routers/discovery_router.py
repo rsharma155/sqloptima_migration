@@ -71,7 +71,7 @@ class MappingRequest(BaseModel):
     target_connection_id: UUID
     tables: list[str]
     schema_name: str = Field(default="dbo", alias="schema")
-    target_schema: str = "public"
+    target_schema: str | None = None
 
 
 class MappingResponse(BaseModel):
@@ -421,6 +421,11 @@ async def get_object_definition(req: ObjectDefinitionRequest, _: dict = require_
                 if not col_rows:
                     definition = "-- Table not found or no columns"
                 else:
+                    from infrastructure.postgres.postgres_table_ddl import (
+                        assemble_postgres_table_definition,
+                    )
+                    from shared.kernel.ddl_identifier import quote_pg_ident
+
                     col_defs = []
                     for c in col_rows:
                         t = c["data_type"]
@@ -431,31 +436,43 @@ async def get_object_definition(req: ObjectDefinitionRequest, _: dict = require_
                         nullable = "" if c["is_nullable"] == "YES" else " NOT NULL"
                         default = f" DEFAULT {c['column_default']}" if c["column_default"] else ""
                         col_defs.append(f"    {c['column_name']} {t}{default}{nullable}")
-                    definition = f'CREATE TABLE "{req.schema_name}"."{req.name}" (\n' + ",\n".join(col_defs) + "\n);\n"
-
-                    # Indexes
-                    idx_rows = await connector.execute(
-                        "SELECT indexname, indexdef FROM pg_indexes "
-                        "WHERE schemaname = $1 AND tablename = $2",
-                        req.schema_name,
-                        req.name,
-                    )
-                    for idx in idx_rows:
-                        definition += f"\n{idx['indexdef']};"
-
-                    # Constraints
-                    from shared.kernel.ddl_identifier import quote_pg_ident
 
                     qualified = (
                         f"{quote_pg_ident(req.schema_name)}.{quote_pg_ident(req.name)}"
                     )
                     con_rows = await connector.execute(
-                        f"SELECT conname, pg_get_constraintdef(oid) AS condef "
+                        f"SELECT conname, contype, pg_get_constraintdef(oid) AS condef "
                         f"FROM pg_constraint "
-                        f"WHERE conrelid = '{qualified}'::regclass",
+                        f"WHERE conrelid = '{qualified}'::regclass "
+                        f"ORDER BY CASE contype WHEN 'p' THEN 0 WHEN 'u' THEN 1 "
+                        f"WHEN 'c' THEN 2 ELSE 3 END, conname",
                     )
-                    for con in con_rows:
-                        definition += f"\nALTER TABLE \"{req.schema_name}\".\"{req.name}\" ADD CONSTRAINT \"{con['conname']}\" {con['condef']};"
+                    idx_rows = await connector.execute(
+                        """
+                        SELECT pg_get_indexdef(idx.indexrelid) AS indexdef
+                        FROM pg_class rel
+                        JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+                        JOIN pg_index idx ON idx.indrelid = rel.oid
+                        WHERE nsp.nspname = $1
+                          AND rel.relname = $2
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM pg_constraint con
+                              WHERE con.conindid = idx.indexrelid
+                                AND con.conrelid = rel.oid
+                          )
+                        ORDER BY idx.indexrelid
+                        """,
+                        req.schema_name,
+                        req.name,
+                    )
+                    definition = assemble_postgres_table_definition(
+                        req.schema_name,
+                        req.name,
+                        column_defs=col_defs,
+                        constraints=con_rows,
+                        secondary_indexes=[str(r["indexdef"]) for r in idx_rows],
+                    )
 
             return {"definition": definition, "object_type": obj_type, "schema": req.schema_name, "name": req.name}
         except HTTPException:
@@ -611,6 +628,7 @@ async def get_dependency_graph(
 
 @router.post("/mapping", response_model=MappingResponse)
 async def get_table_mapping(req: MappingRequest, _: dict = require_role(UserRole.OPERATOR)):
+    from domains.migration.target_schema_resolver import resolve_target_schema
     from domains.transpilation.type_mappings import get_type_mapping
     from infrastructure.sqlserver.sqlserver_connector import (
         SqlServerConnector,
@@ -622,6 +640,8 @@ async def get_table_mapping(req: MappingRequest, _: dict = require_role(UserRole
     tgt_entry = get_entry(str(req.target_connection_id))
     if not src_entry or not tgt_entry:
         raise HTTPException(status_code=404, detail="Source or target connection not found")
+
+    resolved_target_schema = resolve_target_schema(req.schema_name, req.target_schema)
 
     src_connector = SqlServerConnector(
         sqlserver_config_from_entry(src_entry, password=get_decrypted_password(src_entry))
@@ -637,7 +657,7 @@ async def get_table_mapping(req: MappingRequest, _: dict = require_role(UserRole
             if not table_obj:
                 mapping_tables.append(MappingTableInfo(
                     source_table=table_name, target_table=table_name.lower(),
-                    source_schema=req.schema_name, target_schema=req.target_schema,
+                    source_schema=req.schema_name, target_schema=resolved_target_schema,
                     columns=[], warnings=[f"Table {table_name} not found in source"],
                 ))
                 continue
@@ -663,7 +683,7 @@ async def get_table_mapping(req: MappingRequest, _: dict = require_role(UserRole
                 ))
             mapping_tables.append(MappingTableInfo(
                 source_table=table_name, target_table=table_name.lower(),
-                source_schema=req.schema_name, target_schema=req.target_schema,
+                source_schema=req.schema_name, target_schema=resolved_target_schema,
                 columns=mapping_columns,
                 row_count_estimate=getattr(table_obj, "row_count_estimate", 0),
                 warnings=[],

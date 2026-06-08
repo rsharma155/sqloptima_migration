@@ -58,7 +58,7 @@ func (e *Extractor) RunWithOptions(ctx context.Context, chunk core.ChunkPlan,
 	db.SetConnMaxLifetime(5 * time.Minute)
 	db.SetMaxOpenConns(1)
 
-	querySchema, lobIndexes := SplitSchemaForLOBStreaming(schema, chunk.PKColumn)
+	querySchema, lobIndexes := SplitSchemaForLOBStreaming(schema, chunk.PKColumn, opts)
 	lobReader := DefaultLobChunkReader()
 
 	query := BuildExtractQueryWithOptions(

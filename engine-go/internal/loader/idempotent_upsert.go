@@ -4,10 +4,10 @@
 package loader
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"hash/fnv"
+	"io"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/ravisharma/sql-optima/engine-go/internal/core"
@@ -61,18 +61,18 @@ func (l *Loader) RunToTargetTableUpsert(
 	copySQL = fmt.Sprintf("COPY %s (%s) FROM STDIN WITH (FORMAT binary)",
 		quoteIdentPG(staging), quotedCols)
 
-	enc := NewBinaryCopyEncoder(len(schema.Columns))
-	for cells := range in {
-		row, err := CellsToCopyRow(schema, cells)
-		if err != nil {
-			return 0, fmt.Errorf("encode row: %w", err)
-		}
-		if err := enc.WriteRow(row); err != nil {
-			return 0, fmt.Errorf("encode row: %w", err)
-		}
-	}
-	payload := enc.Finish()
-	if _, err = tx.Conn().PgConn().CopyFrom(ctx, bytes.NewReader(payload), copySQL); err != nil {
+	rows, err := streamBinaryCopyFromChannel(
+		ctx,
+		func(ctx context.Context, r io.Reader) error {
+			_, err := tx.Conn().PgConn().CopyFrom(ctx, r, copySQL)
+			return err
+		},
+		len(schema.Columns),
+		schema,
+		in,
+		nil,
+	)
+	if err != nil {
 		return 0, fmt.Errorf("COPY into staging: %w", err)
 	}
 
@@ -89,7 +89,7 @@ func (l *Loader) RunToTargetTableUpsert(
 	if err = tx.Commit(ctx); err != nil {
 		return 0, fmt.Errorf("commit upsert: %w", err)
 	}
-	return enc.RowsWritten(), nil
+	return rows, nil
 }
 
 func quoteColumnList(cols []string) string {

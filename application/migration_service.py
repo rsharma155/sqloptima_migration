@@ -17,7 +17,7 @@ from typing import Any
 from uuid import UUID
 
 from application.audit_service import AuditService
-from application.notification_service import NotificationService
+from application.notification_service import create_notification_service
 from infrastructure.metadata_db.models import MigrationJobRecord, MigrationTablePlanRecord
 from infrastructure.metadata_db.session import AsyncSessionFactory
 from shared.logging.structured_logging import get_logger
@@ -39,11 +39,13 @@ from domains.migration.migration_engine import (  # noqa: E402 — after logger 
 
 _TERMINAL_STATUSES = frozenset({
     MigrationStatus.COMPLETED,
+    MigrationStatus.PARTIAL,
     MigrationStatus.FAILED,
     MigrationStatus.STOPPED,
 })
-_TERMINAL_DB_STATUSES = frozenset({"completed", "failed", "stopped"})
+_TERMINAL_DB_STATUSES = frozenset({"completed", "partial", "failed", "stopped"})
 _COMPLETED_TABLE_STATUSES = frozenset({"completed", "done"})
+_FINISHED_TABLE_STATUSES = frozenset({"completed", "done", "failed", "skipped"})
 
 _registry = JobRegistry()
 
@@ -61,12 +63,39 @@ from sqlalchemy import delete as _sa_delete, select as _sa_select  # noqa: E402
 from sqlalchemy.orm import selectinload as _selectinload  # noqa: E402
 
 
-def _append_job_log(job: MigrationJob, message: str, *, level: str = "info") -> None:
-    job.logs.append({
-        "timestamp": datetime.now(UTC).isoformat(),
-        "level": level,
-        "message": message,
-    })
+async def _append_job_log_durable(
+    job_id: UUID | str,
+    message: str,
+    *,
+    level: str = "info",
+) -> None:
+    """Persist a log line to migration_job_logs (no in-memory accumulation)."""
+    from application.go_engine_migration.durable_migration_job_log_writer import (
+        DurableMigrationJobLogWriter,
+    )
+
+    await DurableMigrationJobLogWriter().append(str(job_id), message, level=level)
+
+
+async def _persist_job_status(
+    job_id: UUID,
+    status: MigrationStatus,
+    *,
+    error: str | None = None,
+    set_completed_at: bool = False,
+) -> None:
+    """Write job status to migration_jobs immediately (durable control-plane state)."""
+    async with AsyncSessionFactory() as session:
+        record = await session.get(MigrationJobRecord, str(job_id))
+        if record is None:
+            return
+        record.status = _status_str(status)
+        record.updated_at = datetime.now(UTC)
+        if error is not None:
+            record.error = error
+        if set_completed_at:
+            record.completed_at = datetime.now(UTC)
+        await session.commit()
 
 
 async def _record_migration_audit(
@@ -99,6 +128,45 @@ def _status_str(status: MigrationStatus | str) -> str:
     return str(status).lower()
 
 
+def _go_job_data_complete(record: MigrationJobRecord) -> bool:
+    """True when all table plans finished but job-level status may still be stale."""
+    if not record.table_plans:
+        return False
+    table_statuses = [(p.status or "").lower() for p in record.table_plans]
+    if not table_statuses or not all(s in _FINISHED_TABLE_STATUSES for s in table_statuses):
+        return False
+    total = int(record.tables_total or len(record.table_plans))
+    return total > 0 and len(table_statuses) >= total
+
+
+async def _reconcile_go_job_completion(session: Any, record: MigrationJobRecord) -> bool:
+    """Promote stuck running/queued Go jobs to completed when data plane finished."""
+    if getattr(record, "executor", "go") != "go":
+        return False
+    db_status = (record.status or "").lower()
+    if db_status in _TERMINAL_DB_STATUSES:
+        return False
+    if not _go_job_data_complete(record):
+        return False
+    table_statuses = [(p.status or "").lower() for p in record.table_plans]
+    if any(s == "failed" for s in table_statuses):
+        if any(s in _COMPLETED_TABLE_STATUSES for s in table_statuses):
+            record.status = MigrationStatus.PARTIAL.value
+        else:
+            record.status = MigrationStatus.FAILED.value
+    else:
+        record.status = MigrationStatus.COMPLETED.value
+    record.completed_at = record.completed_at or datetime.now(UTC)
+    record.updated_at = datetime.now(UTC)
+    await session.commit()
+    logger.info(
+        "go_job_status_reconciled",
+        job_id=record.migration_job_id,
+        previous_status=db_status,
+    )
+    return True
+
+
 def _derive_job_status(
     job: MigrationJob,
     record: MigrationJobRecord | None = None,
@@ -108,6 +176,11 @@ def _derive_job_status(
         try:
             db_status = MigrationStatus(record.status.lower())
             if db_status in _TERMINAL_STATUSES:
+                return db_status
+            # Go worker writes running/paused to metadata; in-memory cache may still say queued.
+            if db_status in (MigrationStatus.RUNNING, MigrationStatus.PAUSED, MigrationStatus.QUEUED):
+                if _go_job_data_complete(record):
+                    return MigrationStatus.COMPLETED
                 return db_status
         except ValueError:
             pass
@@ -120,10 +193,27 @@ def _derive_job_status(
         return job.status
 
     table_statuses = [(t.status or "").lower() for t in job.tables]
-    if any(s == "failed" for s in table_statuses):
+    failed_count = sum(1 for s in table_statuses if s == "failed")
+    completed_count = sum(1 for s in table_statuses if s in _COMPLETED_TABLE_STATUSES)
+    pending = any(
+        s in ("migrating", "running", "in_progress", "pending", "queued", "")
+        for s in table_statuses
+    )
+    if not pending and failed_count > 0:
+        if completed_count > 0:
+            return MigrationStatus.PARTIAL
         return MigrationStatus.FAILED
     if table_statuses and all(s in _COMPLETED_TABLE_STATUSES for s in table_statuses):
         return MigrationStatus.COMPLETED
+    if any(s in ("migrating", "running", "in_progress") for s in table_statuses):
+        return MigrationStatus.RUNNING
+
+    if record and record.status:
+        try:
+            return MigrationStatus(record.status.lower())
+        except ValueError:
+            pass
+
     return job.status
 
 
@@ -136,6 +226,11 @@ def _merge_record_into_job(job: MigrationJob, record: MigrationJobRecord) -> Non
     job.completed_at = getattr(record, "completed_at", None)
     job._record_rows_migrated = int(record.rows_migrated or 0)  # type: ignore[attr-defined]
     job._record_rows_total = int(record.rows_total or 0)  # type: ignore[attr-defined]
+    cfg = getattr(record, "config", None) or {}
+    if cfg.get("procedural_migration"):
+        job.procedural_migration = cfg["procedural_migration"]
+    if cfg.get("finalize_options"):
+        job.finalize_options = cfg["finalize_options"]
 
     plans_by_name = {t.table_name: t for t in record.table_plans}
     for plan in job.tables:
@@ -161,11 +256,11 @@ def _table_progress_percentage(plan: TableMigrationPlan) -> float:
     return 0.0
 
 
-async def save_jobs_async() -> None:
-    """Upsert all in-memory jobs to the metadata DB (debounced to 2 s)."""
+async def save_jobs_async(*, force: bool = False) -> None:
+    """Upsert all in-memory jobs to the metadata DB (debounced to 2 s unless *force*)."""
     global _jobs_last_save, _jobs_dirty
     now = datetime.now(UTC).timestamp()
-    if now - _jobs_last_save < _JOBS_SAVE_INTERVAL:
+    if not force and now - _jobs_last_save < _JOBS_SAVE_INTERVAL:
         _jobs_dirty = True
         return
     _jobs_dirty = False
@@ -181,30 +276,36 @@ async def save_jobs_async() -> None:
                 existing = await session.get(MigrationJobRecord, str(jid))
 
                 # Go worker owns status, row counters, and table plans after dispatch.
+                # Never write status from the in-memory cache — it races with the worker
+                # and can clobber a freshly written "completed" back to "running".
                 if executor == "go" and existing is not None:
-                    db_status = (existing.status or "").lower()
-                    if db_status in _TERMINAL_DB_STATUSES:
-                        status_value = existing.status
-                    job_rec = MigrationJobRecord(
-                        migration_job_id=str(jid),
-                        source_project_connection_id=str(job.source_connection_id),
-                        target_project_connection_id=str(job.target_connection_id),
-                        status=status_value,
-                        error=getattr(job, "error_message", None),
-                        project_id=getattr(job, "project_id", None) or existing.project_id,
-                        config=getattr(job, "dispatch_config", None) or existing.config,
-                        executor=executor,
-                        tables_total=existing.tables_total or len(job.tables),
-                        tables_done=existing.tables_done,
-                        rows_total=existing.rows_total,
-                        rows_migrated=existing.rows_migrated,
-                        started_at=existing.started_at or getattr(job, "started_at", None),
-                        completed_at=existing.completed_at,
-                        created_at=existing.created_at,
-                        updated_at=job.updated_at if hasattr(job, "updated_at") else datetime.now(UTC),
+                    existing.source_project_connection_id = str(job.source_connection_id)
+                    existing.target_project_connection_id = str(job.target_connection_id)
+                    if getattr(job, "error_message", None) is not None:
+                        existing.error = job.error_message
+                    if getattr(job, "project_id", None):
+                        existing.project_id = job.project_id
+                    merged_config = dict(existing.config or {})
+                    if getattr(job, "dispatch_config", None):
+                        merged_config.update(job.dispatch_config)
+                    if getattr(job, "finalize_options", None):
+                        merged_config["finalize_options"] = job.finalize_options
+                    if getattr(job, "procedural_migration", None):
+                        merged_config["procedural_migration"] = job.procedural_migration
+                    if merged_config:
+                        existing.config = merged_config
+                    existing.updated_at = (
+                        job.updated_at if hasattr(job, "updated_at") else datetime.now(UTC)
                     )
-                    await session.merge(job_rec)
                     continue
+
+                job_config: dict[str, Any] = {}
+                if getattr(job, "dispatch_config", None):
+                    job_config.update(job.dispatch_config)
+                if getattr(job, "finalize_options", None):
+                    job_config["finalize_options"] = job.finalize_options
+                if getattr(job, "procedural_migration", None):
+                    job_config["procedural_migration"] = job.procedural_migration
 
                 job_rec = MigrationJobRecord(
                     migration_job_id=str(jid),
@@ -213,7 +314,7 @@ async def save_jobs_async() -> None:
                     status=status_value,
                     error=getattr(job, "error_message", None),
                     project_id=getattr(job, "project_id", None),
-                    config=getattr(job, "dispatch_config", None),
+                    config=job_config or None,
                     executor=executor,
                     created_at=job.created_at if hasattr(job, "created_at") else datetime.now(UTC),
                     updated_at=job.updated_at if hasattr(job, "updated_at") else datetime.now(UTC),
@@ -295,6 +396,11 @@ async def load_jobs() -> None:
                 )
                 job.executor = getattr(record, "executor", "go")
                 job.dispatch_config = getattr(record, "config", None)
+                cfg = getattr(record, "config", None) or {}
+                if cfg.get("procedural_migration"):
+                    job.procedural_migration = cfg["procedural_migration"]
+                if cfg.get("finalize_options"):
+                    job.finalize_options = cfg["finalize_options"]
                 _registry.put(job)
             except Exception as exc:
                 logger.warning("Skipping corrupt job record", job_id=record.migration_job_id, error=str(exc))
@@ -334,16 +440,10 @@ async def make_connector(entry: dict) -> tuple[Any, Any]:
         return SqlServerConnector(config), config
     else:
         from infrastructure.postgres.postgres_connector import (
-            PostgresConnectionConfig, PostgresConnector,
+            PostgresConnector,
+            postgres_config_from_entry,
         )
-        config = PostgresConnectionConfig(
-            host=entry["host"],
-            port=int(entry.get("port", 5432)),
-            database=entry["database"],
-            username=entry.get("username", ""),
-            password=password,
-            schema=entry.get("schema", "public"),
-        )
+        config = postgres_config_from_entry(entry, password=password)
         return PostgresConnector(config), config
 
 
@@ -369,11 +469,11 @@ async def refresh_job_from_metadata(job_id: UUID) -> MigrationJob | None:
                 .options(_selectinload(MigrationJobRecord.table_plans))
             )
             record = result.scalar_one_or_none()
+            if record is None:
+                return job
+            await _reconcile_go_job_completion(session, record)
     except Exception as exc:
         logger.warning("Failed to refresh job from metadata", job_id=str(job_id), error=str(exc))
-        return job
-
-    if record is None:
         return job
 
     async with _registry.lock:
@@ -584,7 +684,7 @@ async def start_migration(
     chunk_size: int,
     parallel_workers: int,
     *,
-    target_schema: str = "public",
+    target_schema: str | None = None,
     masking_policy: str = "none",
     column_transforms: dict[str, str] | None = None,
     column_sensitivity: dict[str, str] | None = None,
@@ -592,8 +692,47 @@ async def start_migration(
     snapshot_ref: str | None = None,
     idempotent: bool = False,
     validate_after: bool = True,
+    table_policies: dict[str, str] | None = None,
+    finalize_after: bool = True,
+    finalize_options: dict[str, Any] | None = None,
+    column_type_overrides: dict[str, str] | None = None,
+    procedures: list[str] | None = None,
+    functions: list[str] | None = None,
+    migrate_procedural_after_tables: bool = True,
 ) -> MigrationJob:
     from apps.api.connection_store import get_entry
+    from application.migration_settings_config import get_max_tables_per_job, resolved_source_throttle
+    from application.go_engine_migration.target_table_preflight import (
+        TargetTablePreflightError,
+        inspect_target_tables,
+        validate_table_policies,
+    )
+    from domains.migration.target_schema_resolver import resolve_target_schema
+
+    resolved_target_schema = resolve_target_schema(schema, target_schema)
+
+    max_tables = get_max_tables_per_job()
+    if len(tables) > max_tables:
+        raise ValueError(
+            f"Cannot migrate more than {max_tables} tables in one job ({len(tables)} requested)"
+        )
+
+    from application.procedural_migration_service import build_initial_procedural_state
+
+    procedural_state = build_initial_procedural_state(
+        source_schema=schema,
+        target_schema=resolved_target_schema,
+        procedures=procedures,
+        functions=functions,
+        auto_migrate_after_tables=migrate_procedural_after_tables,
+    )
+
+    if not tables and not procedural_state.has_selection():
+        raise ValueError(
+            "Select at least one table or stored procedure/function to migrate"
+        )
+
+    procedural_only = not tables and procedural_state.has_selection()
 
     src_entry = get_entry(str(source_connection_id))
     masking_by_table = await _resolve_masking_for_tables(
@@ -609,7 +748,7 @@ async def start_migration(
         from domains.migration.snapshot_gate import SnapshotGate
 
         tgt_entry = get_entry(str(target_connection_id))
-        if tgt_entry:
+        if tgt_entry and tables:
             tgt_connector, _ = await make_connector(tgt_entry)
             await tgt_connector.connect()
             try:
@@ -618,7 +757,7 @@ async def start_migration(
                     tgt_connector,
                     database=tgt_entry.get("database", "postgres"),
                     tables=tables,
-                    schema=target_schema,
+                    schema=resolved_target_schema,
                     require_snapshot=require_target_snapshot,
                     existing_ref=snapshot_ref,
                 )
@@ -628,9 +767,43 @@ async def start_migration(
             finally:
                 await tgt_connector.disconnect()
 
+    tgt_entry = get_entry(str(target_connection_id))
+    if tgt_entry and tables:
+        tgt_connector, _ = await make_connector(tgt_entry)
+        await tgt_connector.connect()
+        try:
+            preflight = await inspect_target_tables(
+                tgt_connector,
+                target_schema=resolved_target_schema,
+                table_names=tables,
+                source_schema=schema,
+            )
+            validate_table_policies(preflight, table_policies)
+        except TargetTablePreflightError:
+            raise
+        finally:
+            await tgt_connector.disconnect()
+
     from domains.migration.go_engine.go_executor_kind import GoExecutorKind
 
     project_id = src_entry.get("project_id") if src_entry else None
+
+    resolved_override_storage: dict[str, dict[str, Any]] = {}
+    if column_type_overrides:
+        from dataclasses import asdict
+
+        from application.migration_readiness_service import assess_source_schema
+        from apps.api.connection_store import get_decrypted_password
+        from domains.migration.column_type_override import resolve_overrides_for_tables
+
+        assessment = await assess_source_schema(
+            src_entry,
+            database=src_entry.get("database", ""),
+            schema=schema,
+            password=get_decrypted_password(src_entry),
+        )
+        resolved = resolve_overrides_for_tables(assessment, tables, column_type_overrides)
+        resolved_override_storage = {k: asdict(v) for k, v in resolved.items()}
 
     job = MigrationJob(
         source_connection_id=source_connection_id,
@@ -641,7 +814,7 @@ async def start_migration(
             TableMigrationPlan(
                 table_name=t,
                 schema_name=schema,
-                target_schema=target_schema,
+                target_schema=resolved_target_schema,
                 columns=["*"],
                 row_count_estimate=0,
                 strategy=strategy,
@@ -655,18 +828,31 @@ async def start_migration(
         ],
         idempotent_writes=idempotent,
         validate_after=validate_after,
+        finalize_after=finalize_after,
+        finalize_options=finalize_options,
+        column_type_overrides=resolved_override_storage,
+        procedural_migration=procedural_state.to_dict() if procedural_state else None,
     )
     job.snapshot_ref = snapshot_ref
     job.executor = GoExecutorKind.GO.value
+    job.target_table_policies = table_policies or {}
+    job.source_throttle = resolved_source_throttle()
     # Register + flip to RUNNING + record the task atomically so a concurrent
     # stop/list cannot observe a half-initialised job (Issue #1).
     async with _registry.lock:
         _registry.put(job)
         job.status = MigrationStatus.PENDING
-    _append_job_log(
-        job,
-        f"Migration job created — {len(tables)} table(s) from {schema} → {target_schema}",
+    created_msg = (
+        f"Procedural migration job created — "
+        f"{len(procedural_state.selected_procedures)} procedure(s), "
+        f"{len(procedural_state.selected_functions)} function(s) "
+        f"from {schema} → {resolved_target_schema}"
+        if procedural_only
+        else f"Migration job created — {len(tables)} table(s) from {schema} → {resolved_target_schema}"
     )
+    # Persist job row before logs — migration_job_logs FK requires migration_jobs.
+    await save_jobs_async(force=True)
+    await _append_job_log_durable(job.job_id, created_msg, level="info")
     await save_jobs_async()
     await _record_migration_audit(
         AuditAction.MIGRATION_STARTED,
@@ -679,10 +865,66 @@ async def start_migration(
         },
         project_id=project_id,
     )
-    notifier = NotificationService()
-    await notifier.job_started(str(job.job_id), tables)
-    asyncio.create_task(_dispatch_go_migration_job(job.job_id))
+    notifier = create_notification_service()
+    await notifier.job_started(str(job.job_id), tables or list(procedural_state.selected_procedures))
+    if procedural_only:
+        asyncio.create_task(_dispatch_procedural_only_migration_job(job.job_id))
+    else:
+        asyncio.create_task(_dispatch_go_migration_job(job.job_id))
     return job
+
+
+async def _dispatch_procedural_only_migration_job(job_id: UUID) -> None:
+    """Run stored procedure / function migration when no tables are selected."""
+    from application.go_engine_migration.go_migration_job_watcher import _notify_terminal
+    from application.procedural_migration_service import migrate_procedural_objects_for_job
+    from domains.migration.procedural_migration_models import ProceduralMigrationPhaseStatus
+
+    job = _registry.get(job_id)
+    if not job:
+        return
+
+    async with _registry.lock:
+        job.status = MigrationStatus.RUNNING
+    await _persist_job_status(job_id, MigrationStatus.RUNNING)
+    await save_jobs_async()
+    await _append_job_log_durable(
+        job_id,
+        "Procedural-only migration — no tables selected; migrating routines directly",
+        level="info",
+    )
+
+    try:
+        result = await migrate_procedural_objects_for_job(job_id)
+        if result.status in {
+            ProceduralMigrationPhaseStatus.COMPLETED,
+            ProceduralMigrationPhaseStatus.PARTIAL,
+        }:
+            job.status = MigrationStatus.COMPLETED
+            await _persist_job_status(job_id, MigrationStatus.COMPLETED, set_completed_at=True)
+        else:
+            job.status = MigrationStatus.FAILED
+            job.error_message = result.last_error or "Procedural migration failed"
+            await _persist_job_status(
+                job_id,
+                MigrationStatus.FAILED,
+                error=job.error_message,
+                set_completed_at=True,
+            )
+    except Exception as exc:
+        logger.error("procedural_only_migration_failed", job_id=str(job_id), error=str(exc))
+        job.status = MigrationStatus.FAILED
+        job.error_message = str(exc)[:500]
+        await _persist_job_status(
+            job_id,
+            MigrationStatus.FAILED,
+            error=job.error_message,
+            set_completed_at=True,
+        )
+        await _append_job_log_durable(job_id, job.error_message, level="error")
+
+    await save_jobs_async()
+    await _notify_terminal(job_id, job)
 
 
 async def _dispatch_go_migration_job(job_id: UUID) -> None:
@@ -694,54 +936,123 @@ async def _dispatch_go_migration_job(job_id: UUID) -> None:
 
     job = _registry.get(job_id)
     validate_after = getattr(job, "validate_after", True) if job else True
+    finalize_after = getattr(job, "finalize_after", True) if job else True
 
     await dispatch_migration_job_to_go_engine(job_id)
     await save_jobs_async()
-    asyncio.create_task(watch_go_migration_job(job_id, validate_after=validate_after))
+    asyncio.create_task(
+        watch_go_migration_job(
+            job_id,
+            validate_after=validate_after,
+            finalize_after=finalize_after,
+        )
+    )
 
 
 async def pause_job(job_id: UUID) -> MigrationJob:
-    async with _registry.lock:
-        job = _registry.get(job_id)
-        if not job:
-            raise KeyError(job_id)
-        if job.status not in (MigrationStatus.RUNNING, MigrationStatus.QUEUED):
-            raise ValueError(f"Job is not running (status={job.status})")
-        job.status = MigrationStatus.PAUSED
-        job.updated_at = datetime.now(UTC)
+    job = await refresh_job_from_metadata(job_id)
+    if not job:
+        raise KeyError(job_id)
+    if job.status not in (MigrationStatus.RUNNING, MigrationStatus.QUEUED, MigrationStatus.RESUMED):
+        raise ValueError(f"Job is not running (status={job.status.value})")
+
     async with AsyncSessionFactory() as session:
         from infrastructure.metadata_db.repositories.command_repository import CommandRepository
         await CommandRepository(session).issue(str(job_id), "PAUSE")
-    await save_jobs_async()
+
+    await _persist_job_status(job_id, MigrationStatus.PAUSED)
+    await _append_job_log_durable(job_id, "Migration pause requested — waiting for worker to acknowledge", level="info")
+    await _record_migration_audit(
+        AuditAction.MIGRATION_PAUSED,
+        str(job_id),
+        project_id=getattr(job, "project_id", None),
+    )
+
+    async with _registry.lock:
+        job = _registry.get(job_id)
+        if job:
+            job.status = MigrationStatus.PAUSED
+            job.updated_at = datetime.now(UTC)
     return job
 
 
 async def resume_job(job_id: UUID) -> MigrationJob:
-    async with _registry.lock:
-        job = _registry.get(job_id)
-        if not job:
-            raise KeyError(job_id)
-        if job.status != MigrationStatus.PAUSED:
-            raise ValueError(f"Job is not paused (status={job.status})")
-        job.status = MigrationStatus.RUNNING
-        job.updated_at = datetime.now(UTC)
+    job = await refresh_job_from_metadata(job_id)
+    if not job:
+        raise KeyError(job_id)
+    if job.status != MigrationStatus.PAUSED:
+        raise ValueError(f"Job is not paused (status={job.status.value})")
+
     async with AsyncSessionFactory() as session:
         from infrastructure.metadata_db.repositories.command_repository import CommandRepository
         await CommandRepository(session).issue(str(job_id), "RESUME")
-    await save_jobs_async()
+
+    await _persist_job_status(job_id, MigrationStatus.RUNNING)
+    await _append_job_log_durable(job_id, "Migration resume requested — worker will continue data movement", level="info")
+    await _record_migration_audit(
+        AuditAction.MIGRATION_RESUMED,
+        str(job_id),
+        project_id=getattr(job, "project_id", None),
+    )
+
+    async with _registry.lock:
+        job = _registry.get(job_id)
+        if job:
+            job.status = MigrationStatus.RUNNING
+            job.updated_at = datetime.now(UTC)
     return job
 
 
 async def stop_job(job_id: UUID) -> MigrationJob:
-    async with _registry.lock:
-        job = _registry.get(job_id)
-        if not job:
+    job = await refresh_job_from_metadata(job_id)
+    project_id: str | None = None
+    if job is None:
+        async with AsyncSessionFactory() as session:
+            record = await session.get(MigrationJobRecord, str(job_id))
+        if record is None:
             raise KeyError(job_id)
-        job.stop_requested = True
-        job.status = MigrationStatus.STOPPED
-        job.updated_at = datetime.now(UTC)
+        project_id = getattr(record, "project_id", None)
+        try:
+            db_status = MigrationStatus(record.status.lower())
+        except ValueError:
+            db_status = MigrationStatus.PENDING
+        if db_status in _TERMINAL_STATUSES:
+            return MigrationJob(
+                job_id=job_id,
+                source_connection_id=UUID(record.source_project_connection_id or "00000000-0000-0000-0000-000000000000"),
+                target_connection_id=UUID(record.target_project_connection_id or "00000000-0000-0000-0000-000000000000"),
+                status=db_status,
+                project_id=project_id,
+            )
+    else:
+        project_id = getattr(job, "project_id", None)
+        if job.status in _TERMINAL_STATUSES:
+            return job
+
     async with AsyncSessionFactory() as session:
         from infrastructure.metadata_db.repositories.command_repository import CommandRepository
         await CommandRepository(session).issue(str(job_id), "STOP")
-    await save_jobs_async()
-    return job
+
+    await _persist_job_status(job_id, MigrationStatus.STOPPED, set_completed_at=True)
+    await _append_job_log_durable(job_id, "Migration stop requested — worker will halt after current chunk", level="warning")
+    await _record_migration_audit(
+        AuditAction.MIGRATION_STOPPED,
+        str(job_id),
+        project_id=project_id,
+    )
+
+    async with _registry.lock:
+        job = _registry.get(job_id)
+        if job:
+            job.stop_requested = True
+            job.status = MigrationStatus.STOPPED
+            job.updated_at = datetime.now(UTC)
+            return job
+
+    return MigrationJob(
+        job_id=job_id,
+        source_connection_id=UUID(int=0),
+        target_connection_id=UUID(int=0),
+        status=MigrationStatus.STOPPED,
+        project_id=project_id,
+    )

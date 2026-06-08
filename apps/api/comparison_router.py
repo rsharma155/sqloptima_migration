@@ -196,6 +196,22 @@ async def compare_databases(req: CompareRequest):
     serialized_source_tree = _serialize_tree(result.source_tree)
     serialized_target_tree = _serialize_tree(result.target_tree)
 
+    def _count_indexes(discovery_result) -> int:
+        total = 0
+        for tables in discovery_result.tables.values():
+            for table in tables:
+                indexes = table.properties.get("indexes", [])
+                total += sum(
+                    1 for idx in indexes
+                    if not (getattr(idx, "properties", {}) or {}).get("is_primary_key", False)
+                )
+        return total
+
+    schema_kwargs = {
+        "source_schema": req.source_schema,
+        "target_schema": req.target_schema,
+    }
+
     summary = {
         "total_source_objects": result.total_source_objects,
         "total_target_objects": result.total_target_objects,
@@ -207,6 +223,24 @@ async def compare_databases(req: CompareRequest):
         "target_database": result.target_database if result.target_database != "unknown" else target_config.database,
         "source_schema": req.source_schema,
         "target_schema": req.target_schema,
+        "object_counts": {
+            "tables": {
+                "source": sum(len(v) for v in source_result.tables.values()),
+                "target": sum(len(v) for v in target_result.tables.values()),
+            },
+            "procedures": {
+                "source": sum(len(v) for v in source_result.procedures.values()),
+                "target": sum(len(v) for v in target_result.procedures.values()),
+            },
+            "functions": {
+                "source": sum(len(v) for v in source_result.functions.values()),
+                "target": sum(len(v) for v in target_result.functions.values()),
+            },
+            "indexes": {
+                "source": _count_indexes(source_result),
+                "target": _count_indexes(target_result),
+            },
+        },
     }
 
     response = ComparisonResponse(
@@ -220,9 +254,11 @@ async def compare_databases(req: CompareRequest):
 
     stored = ComparisonResultResponse(comparison_id=comparison_id, response=response)
 
-    for match in (engine.compare_tables(source_result.tables, target_result.tables)
-                  + engine.compare_procedures(source_result.procedures, target_result.procedures)
-                  + engine.compare_functions(source_result.functions, target_result.functions)):
+    for match in (
+        engine.compare_tables(source_result.tables, target_result.tables, **schema_kwargs)
+        + engine.compare_procedures(source_result.procedures, target_result.procedures, **schema_kwargs)
+        + engine.compare_functions(source_result.functions, target_result.functions, **schema_kwargs)
+    ):
         obj = match.source_object or match.target_object
         if obj:
             path = obj.fully_qualified_name

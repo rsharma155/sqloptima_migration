@@ -192,7 +192,29 @@ class TestComparisonEngineWithIndexesAndConstraints:
         col = Column(
             column_name="id",
             ordinal_position=1,
-            data_type=DataType(type_name="int"),
+            data_type=DataType(type_name="INT"),
+            is_nullable=False,
+        )
+        t = Table(
+            database_name="TestDB",
+            schema_name="dbo",
+            object_name=name,
+            columns=[col],
+        )
+        t.properties["indexes"] = indexes or []
+        t.properties["constraints"] = constraints or []
+        return t
+
+    def _make_pg_table_with_idx_constraint(
+        self,
+        name: str,
+        indexes: list[DatabaseObject] | None = None,
+        constraints: list[DatabaseObject] | None = None,
+    ) -> Table:
+        col = Column(
+            column_name="id",
+            ordinal_position=1,
+            data_type=DataType(type_name="INTEGER"),
             is_nullable=False,
         )
         t = Table(
@@ -267,7 +289,11 @@ class TestComparisonEngineWithIndexesAndConstraints:
         )
 
         src = self._make_table_with_idx_constraint("Users", indexes=[idx], constraints=[cst])
-        tgt = self._make_table_with_idx_constraint("users", indexes=[_make_index("IX_Email")], constraints=[_make_constraint("UQ_Email")])
+        tgt = self._make_pg_table_with_idx_constraint(
+            "users",
+            indexes=[_make_index("IX_Email")],
+            constraints=[_make_constraint("UQ_Email")],
+        )
 
         matches = engine.compare_tables(
             {"TestDB.dbo": [src]},

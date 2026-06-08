@@ -158,15 +158,27 @@ class TsqlToPlpgsqlConverter:
     def convert(self, sql: str) -> str:
         """Convert a T-SQL stored procedure / function to PL/pgSQL."""
         comment_preamble, sql_without_preamble = extract_source_preamble(sql)
-        unblock = TsqlParseUnblocker.apply(sql_without_preamble, aggressive=False)
+        needs_aggressive = bool(
+            re.search(r"\bGOTO\b", sql_without_preamble, re.IGNORECASE)
+            or re.search(r"\bsp_executesql\b", sql_without_preamble, re.IGNORECASE)
+        )
+        unblock = TsqlParseUnblocker.apply(
+            sql_without_preamble,
+            aggressive=needs_aggressive,
+        )
         sproc_sql = self._extract_sproc_statement(unblock.sql)
         info = TsqlHeaderParser.parse(sproc_sql)
 
         # Collect CREATE TYPE definitions from preamble (for TVP support comments)
         type_defs = self._extract_type_definitions(sql)
 
-        # Transform body
-        converted_body = TsqlBodyConverter.convert(info.body, info.parameters)
+        # Pattern preprocess (OUTPUT → RETURNING, NOLOCK, etc.) then body transforms
+        from domains.transpilation.tsql_pattern_converter import TsqlPatternConverter
+
+        pattern_pre = TsqlPatternConverter().preprocess(info.body)
+        converted_body = TsqlBodyConverter.convert(pattern_pre.sql, info.parameters)
+        pattern_post = TsqlPatternConverter().postprocess(converted_body)
+        converted_body = pattern_post.sql
 
         # Determine output type
         has_output_params = any(p.is_output for p in info.parameters)

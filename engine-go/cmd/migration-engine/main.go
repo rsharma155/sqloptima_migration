@@ -54,7 +54,7 @@ func main() {
 	defer log.Sync() //nolint:errcheck
 
 	log.Info("migration engine starting",
-		zap.String("version", "0.1.0"),
+		zap.String("version", "0.2.0"),
 		zap.String("go_module", "github.com/ravisharma/sql-optima/engine-go"),
 	)
 	log.Info("configuration loaded",

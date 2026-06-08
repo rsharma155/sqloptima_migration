@@ -13,6 +13,7 @@ import (
 
 	"github.com/ravisharma/sql-optima/engine-go/internal/core"
 	"github.com/ravisharma/sql-optima/engine-go/internal/extractor"
+	"github.com/ravisharma/sql-optima/engine-go/internal/loader"
 	"github.com/ravisharma/sql-optima/engine-go/internal/planner"
 )
 
@@ -59,6 +60,7 @@ func (m *MigrationTableDataMover) planChunkSize(table GoTableDispatchPayload, ta
 
 func (m *MigrationTableDataMover) executeChunk(
 	ctx context.Context,
+	jobID uuid.UUID,
 	pipeline *MigrationChunkPipeline,
 	chunk core.ChunkPlan,
 	table GoTableDispatchPayload,
@@ -67,10 +69,16 @@ func (m *MigrationTableDataMover) executeChunk(
 	opts tableMoveOptions,
 ) (chunkRunOutcome, error) {
 	start := time.Now()
+	var onProgress loader.RowProgressFunc
+	if opts.enableIntraChunkProgress && m.meta != nil {
+		onProgress = newThrottledChunkProgress(
+			m.meta, jobID, table.TableName, opts.jobBase, opts.tableRowsBase,
+		).callback()
+	}
 	rows, err := runChunkWithRetry(ctx, chunk, func() (int64, error) {
 		return pipeline.Run(
 			ctx, chunk, table.TargetSchema, table.TableName,
-			schema, m.idempotent, opts.conflictColumns, opts.extractOpts, transforms,
+			schema, m.idempotent, opts.conflictColumns, opts.extractOpts, transforms, onProgress,
 		)
 	})
 	return chunkRunOutcome{rows: rows, durMs: time.Since(start).Milliseconds()}, err

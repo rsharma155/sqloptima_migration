@@ -13,6 +13,12 @@ from infrastructure.metadata_db.repositories.user_repository import UserReposito
 from infrastructure.metadata_db.repositories.replication_stream_repository import (
     ReplicationStreamRepository,
 )
+from infrastructure.metadata_db.repositories.notification_settings_repository import (
+    NotificationSettingsRepository,
+)
+from infrastructure.metadata_db.repositories.migration_settings_repository import (
+    MigrationSettingsRepository,
+)
 from infrastructure.metadata_db.repositories.validation_repository import ValidationRepository
 
 __all__ = [
@@ -20,6 +26,8 @@ __all__ = [
     "CommandRepository",
     "ConnectionRepository",
     "JobRepository",
+    "MigrationSettingsRepository",
+    "NotificationSettingsRepository",
     "ProjectRepository",
     "ReplicationStreamRepository",
     "UserRepository",

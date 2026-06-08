@@ -21,6 +21,7 @@ type GoJobDispatchConfig struct {
 	Idempotent       bool                      `json:"idempotent"`
 	ConflictColumns  []string                  `json:"conflict_columns"`
 	UseNoLock        bool                      `json:"use_nolock"`
+	SourceThrottle   SourceThrottleConfig      `json:"source_throttle"`
 }
 
 type GoConnectionDispatchRef struct {
@@ -38,10 +39,15 @@ type GoTableDispatchPayload struct {
 	Strategy          string            `json:"strategy"`
 	ColumnTransforms  map[string]string `json:"column_transforms"`
 	ColumnSensitivity map[string]string `json:"column_sensitivity"`
-	ColumnTypes       map[string]string `json:"column_types"`
-	OrderColumn       string            `json:"order_column"`
+	ColumnTypes        map[string]string `json:"column_types"`
+	ColumnExtractCasts map[string]string `json:"column_extract_casts"`
+	OrderColumn        string            `json:"order_column"`
 	WhereClause       string            `json:"where_clause"`
 	SourceMaxDOP      int               `json:"source_maxdop"`
+	SkipDataLoad      bool              `json:"skip_data_load"`
+	RowCountEstimate  int64             `json:"row_count_estimate"`
+	TableSizeMB       float64           `json:"table_size_mb"`
+	ChunkDelaySec     float64           `json:"chunk_delay_sec"`
 }
 
 // ParseGoJobDispatchConfig validates and parses raw JSON from migration_jobs.config.

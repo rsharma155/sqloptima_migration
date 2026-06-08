@@ -367,8 +367,57 @@ class TestAgentJobs:
 
 
 # ---------------------------------------------------------------------------
-# SqlServerMetadataDiscovery — Agent Jobs query exists (unit smoke test)
+# Routine assessment (stored procedures / functions)
 # ---------------------------------------------------------------------------
+
+
+class TestRoutineAssessment:
+    def _make_routine(
+        self,
+        name: str = "usp_example",
+        *,
+        schema: str = "dbo",
+        object_type: str = "procedure",
+        definition: str = "CREATE PROCEDURE dbo.usp_example AS SELECT 1",
+    ):
+        from shared.kernel.database_object import DatabaseObject, DatabaseObjectType
+
+        otype = (
+            DatabaseObjectType.FUNCTION
+            if object_type == "function"
+            else DatabaseObjectType.PROCEDURE
+        )
+        return DatabaseObject(
+            object_type=otype,
+            database_name="TestDB",
+            schema_name=schema,
+            object_name=name,
+            source_definition=definition,
+        )
+
+    def test_simple_procedure_is_safe(self):
+        engine = AssessmentEngine()
+        result = engine.assess_routine(self._make_routine())
+        assert result.migration_tier == MigrationTier.SAFE
+        assert result.object_type == "procedure"
+
+    def test_sp_executesql_is_blocker(self):
+        engine = AssessmentEngine()
+        sql = "CREATE PROCEDURE dbo.p AS BEGIN EXEC sp_executesql N'SELECT 1' END"
+        result = engine.assess_routine(self._make_routine("p", definition=sql))
+        assert result.migration_tier == MigrationTier.BLOCKER
+        assert result.detected_patterns
+
+    def test_database_assessment_includes_routines(self):
+        engine = AssessmentEngine()
+        tables = [
+            _make_table("t1", columns=[_make_col("id", "int", is_identity=True)]),
+        ]
+        routines = [self._make_routine()]
+        result = engine.assess_database("DB", tables, routines=routines)
+        assert result.total_routines == 1
+        assert result.routine_safe_count == 1
+        assert result.overall_tier == MigrationTier.SAFE
 
 
 class TestAgentJobsDiscoveryMethod:

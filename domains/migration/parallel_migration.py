@@ -115,10 +115,11 @@ class PartitionStrategy:
     ) -> list[PartitionRange]:
         validate_sql_identifier(schema, "schema")
         validate_sql_identifier(table, "table")
-        # Fix 8.3: bracket-quote schema and table.
-        count_query = f"SELECT COUNT(*) AS cnt FROM [{schema}].[{table}]"
-        result = await connector.execute(count_query)
-        total = result[0]["cnt"] if result else 0
+        from infrastructure.sqlserver.row_count_estimate import (
+            fetch_sqlserver_table_row_estimate,
+        )
+
+        total = await fetch_sqlserver_table_row_estimate(connector, schema, table)
         if total == 0:
             return []
 

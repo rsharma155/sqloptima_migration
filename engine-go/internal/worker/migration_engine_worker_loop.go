@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	engineVersion        = "0.1.0"
+	engineVersion        = "0.2.0"
 	defaultPollInterval  = 2 * time.Second
 	defaultHeartbeatSecs = 15
 )
@@ -67,9 +67,25 @@ func (l *MigrationEngineWorkerLoop) Run(ctx context.Context) error {
 			if err != nil || job == nil {
 				continue
 			}
+			jobCtx, endJobHeartbeats := context.WithCancel(ctx)
+			go l.runBusyHeartbeats(jobCtx)
 			_ = l.meta.UpsertWorkerHeartbeat(ctx, l.workerID, engineVersion, "busy")
 			_ = l.handler.Run(ctx, job)
+			endJobHeartbeats()
 			_ = l.meta.UpsertWorkerHeartbeat(ctx, l.workerID, engineVersion, "idle")
+		}
+	}
+}
+
+func (l *MigrationEngineWorkerLoop) runBusyHeartbeats(ctx context.Context) {
+	ticker := time.NewTicker(l.heartbeatEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_ = l.meta.UpsertWorkerHeartbeat(context.Background(), l.workerID, engineVersion, "busy")
 		}
 	}
 }

@@ -32,7 +32,8 @@ class DynamicSqlConverter:
     """
 
     _SP_EXECUTESQL_PATTERN = re.compile(
-        r'(?:^|\s)EXEC\s+sp_executesql\s+(@\w+)(?:\s*,\s*N?[\'"]([^\'"]*?)[\'"])?(?:\s*,\s*(.+?))?(?=\s*;)',
+        r"(?:^|\s)(?:EXEC(?:UTE)?)\s+(?:(?:\[\w+\]\.)?(?:\[sp_executesql\]|sp_executesql))\s+"
+        r"(@\w+)(?:\s*,\s*N?['\"]([^'\"]*?)['\"])?(?:\s*,\s*(.+?))?(?=\s*;)",
         re.IGNORECASE | re.DOTALL | re.MULTILINE,
     )
 
@@ -78,14 +79,21 @@ class DynamicSqlConverter:
             converted_sql_var = DynamicSqlConverter._convert_var_prefix(sql_var)
 
             if param_values:
-                # Parse parameter values (comma-separated @vars)
-                # Handle newlines and whitespace in parameter list
                 param_text = param_values.strip()
-                param_list = [p.strip() for p in re.split(r',', param_text) if p.strip()]
-                converted_params = ', '.join(
-                    DynamicSqlConverter._convert_var_prefix(p) for p in param_list if p.strip()
-                )
-                return f'EXECUTE {converted_sql_var} USING {converted_params};'
+                named = re.findall(r"@\w+\s*=\s*([^,;]+)", param_text)
+                if named:
+                    converted_params = ", ".join(
+                        DynamicSqlConverter._convert_var_prefix(v.strip())
+                        if v.strip().startswith("@")
+                        else v.strip()
+                        for v in named
+                    )
+                else:
+                    param_list = [p.strip() for p in re.split(r",", param_text) if p.strip()]
+                    converted_params = ", ".join(
+                        DynamicSqlConverter._convert_var_prefix(p) for p in param_list if p.strip()
+                    )
+                return f"EXECUTE {converted_sql_var} USING {converted_params};"
             else:
                 return f'EXECUTE {converted_sql_var};'
 

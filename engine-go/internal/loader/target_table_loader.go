@@ -4,9 +4,9 @@
 package loader
 
 import (
-	"bytes"
 	"context"
 	"fmt"
+	"io"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/ravisharma/sql-optima/engine-go/internal/core"
@@ -19,6 +19,7 @@ func (l *Loader) RunToTargetTable(
 	targetSchema, targetTable string,
 	schema extractor.ExtractionSchema,
 	in <-chan []core.CellValue,
+	onProgress RowProgressFunc,
 ) (int64, error) {
 	conn, err := pgx.Connect(ctx, l.pgURL)
 	if err != nil {
@@ -27,22 +28,15 @@ func (l *Loader) RunToTargetTable(
 	defer conn.Close(ctx)
 
 	copySQL := BuildCopyStatement(targetSchema, targetTable, schema.ColumnNames())
-	enc := NewBinaryCopyEncoder(len(schema.Columns))
-
-	for cells := range in {
-		row, err := CellsToCopyRow(schema, cells)
-		if err != nil {
-			return 0, fmt.Errorf("encode row: %w", err)
-		}
-		if err := enc.WriteRow(row); err != nil {
-			return 0, fmt.Errorf("encode row: %w", err)
-		}
-	}
-
-	payload := enc.Finish()
-	_, err = conn.PgConn().CopyFrom(ctx, bytes.NewReader(payload), copySQL)
-	if err != nil {
-		return 0, fmt.Errorf("COPY into %s.%s: %w", targetSchema, targetTable, err)
-	}
-	return enc.RowsWritten(), nil
+	return streamBinaryCopyFromChannel(
+		ctx,
+		func(ctx context.Context, r io.Reader) error {
+			_, err := conn.PgConn().CopyFrom(ctx, r, copySQL)
+			return err
+		},
+		len(schema.Columns),
+		schema,
+		in,
+		onProgress,
+	)
 }

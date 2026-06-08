@@ -13,6 +13,16 @@ from typing import Any
 from shared.kernel.database_object import Column
 
 
+_LIST_COLUMNS_SQL = """
+SELECT c.name AS column_name
+FROM sys.columns c
+INNER JOIN sys.tables t ON t.object_id = c.object_id
+INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
+WHERE s.name = ? AND t.name = ?
+ORDER BY c.column_id
+"""
+
+
 def format_sqlserver_column_type(col: Column) -> str:
     """Format a catalog column type for Go ``MapSQLServerType`` (includes (max) suffix)."""
     dt = col.data_type
@@ -58,11 +68,34 @@ async def resolve_source_table_columns(
     schema: str,
     table: str,
     columns: list[str],
+    *,
+    database: str | None = None,
 ) -> list[str]:
-    """Expand ``["*"]`` to concrete SQL Server column names."""
+    """Expand ``["*"]`` to concrete SQL Server column names via catalog metadata.
+
+    Never uses ``SELECT *`` — pyodbc cannot read ``sql_variant``, ``hierarchyid``,
+    ``geography``, or ``geometry`` without an explicit cast.
+    """
     if columns and columns != ["*"]:
         return columns
-    sample = await connector.execute(f"SELECT TOP 1 * FROM [{schema}].[{table}]")
-    if sample:
-        return list(sample[0].keys())
-    raise ValueError(f"Could not resolve columns for {schema}.{table} — table may be empty")
+
+    if database:
+        from domains.migration.column_type_override import discover_table_column_types
+
+        catalog_cols = await discover_table_column_types(
+            connector, database, schema, table,
+        )
+        if catalog_cols:
+            return [name for name, _ in catalog_cols]
+
+    rows = await connector.execute(
+        _LIST_COLUMNS_SQL,
+        {"schema": schema, "table": table},
+    )
+    if rows:
+        return [str(r["column_name"]) for r in rows]
+
+    raise ValueError(
+        f"Could not resolve columns for {schema}.{table} — "
+        "table not found in catalog or has no columns"
+    )

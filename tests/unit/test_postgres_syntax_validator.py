@@ -82,3 +82,21 @@ $$;
         result = validator.validate(sql)
         assert result.valid is True
         assert result.errors == []
+
+    def test_valid_language_sql_function_with_recursive_cte(self, validator: PostgresSyntaxValidator) -> None:
+        sql = """
+CREATE OR REPLACE FUNCTION public.uspGetBillOfMaterials(p_StartProductID INT)
+RETURNS SETOF RECORD
+LANGUAGE sql
+AS $$
+    WITH RECURSIVE BOM_cte(ProductAssemblyID, ComponentID) AS (
+      SELECT 1, 2
+      UNION ALL
+      SELECT 1, 2 FROM BOM_cte
+    )
+    SELECT * FROM BOM_cte ORDER BY 1
+$$;
+"""
+        result = validator.validate(sql)
+        assert result.valid is True
+        assert result.errors == []

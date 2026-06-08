@@ -62,12 +62,24 @@ export function DialogHeader({
   );
 }
 
-export function DialogTitle({ children }: { children: ReactNode }) {
-  return <h2 className="text-lg font-semibold">{children}</h2>;
+export function DialogTitle({
+  children,
+  className = "",
+}: {
+  children: ReactNode;
+  className?: string;
+}) {
+  return <h2 className={`text-lg font-semibold ${className}`.trim()}>{children}</h2>;
 }
 
-export function DialogDescription({ children }: { children: ReactNode }) {
-  return <p className="text-sm text-muted-foreground">{children}</p>;
+export function DialogDescription({
+  children,
+  className = "",
+}: {
+  children: ReactNode;
+  className?: string;
+}) {
+  return <p className={`text-sm text-muted-foreground ${className}`.trim()}>{children}</p>;
 }
 
 export function DialogFooter({

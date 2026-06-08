@@ -9,11 +9,16 @@ SPDX-License-Identifier: MIT
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from application.audit_service import AuditService
+from application.migration_settings_config import migration_settings_status
 from apps.api.middleware.auth import UserRole, require_role
+from apps.api.migration_settings_store import (
+    save_settings_async as save_migration_settings_async,
+    set_settings as set_migration_settings,
+)
 from shared.security.audit_log import AuditAction
 from shared.tenancy.project_scope import resolve_project_filter
 from infrastructure.metadata_db.session import AsyncSessionFactory
@@ -48,6 +53,15 @@ class OdbcCheckResponse(BaseModel):
     available: bool
     drivers: list[str]
     message: str
+
+
+class MigrationSettingsUpdate(BaseModel):
+    source_throttle_enabled: bool = True
+    small_table_delay_sec: float = Field(default=1.0, ge=0.0, le=300.0)
+    large_table_delay_sec: float = Field(default=4.0, ge=0.0, le=600.0)
+    large_table_row_threshold: int = Field(default=100_000, ge=1, le=1_000_000_000)
+    large_table_size_mb_threshold: float = Field(default=50.0, ge=0.1, le=1_000_000.0)
+    max_tables_per_job: int = Field(default=25, ge=1, le=500)
 
 
 # ---------------------------------------------------------------------------
@@ -264,3 +278,34 @@ async def go_engine_health(
     from application.go_engine_migration.go_worker_health_checker import GoWorkerHealthChecker
 
     return await GoWorkerHealthChecker().worker_status(within_seconds=within_seconds)
+
+
+@router.get("/migration-settings")
+async def get_migration_settings_config(_: dict = require_role(UserRole.VIEWER)) -> dict:
+    """Platform migration throttle and per-job table limits (readable by all roles)."""
+    return migration_settings_status()
+
+
+@router.put("/migration-settings")
+async def update_migration_settings_config(
+    req: MigrationSettingsUpdate,
+    _: dict = require_role(UserRole.ADMIN),
+) -> dict:
+    """Update platform migration settings (admin only)."""
+    if req.small_table_delay_sec > req.large_table_delay_sec:
+        raise HTTPException(
+            status_code=400,
+            detail="Small-table delay must not exceed large-table delay",
+        )
+    set_migration_settings(
+        {
+            "source_throttle_enabled": req.source_throttle_enabled,
+            "small_table_delay_sec": req.small_table_delay_sec,
+            "large_table_delay_sec": req.large_table_delay_sec,
+            "large_table_row_threshold": req.large_table_row_threshold,
+            "large_table_size_mb_threshold": req.large_table_size_mb_threshold,
+            "max_tables_per_job": req.max_tables_per_job,
+        }
+    )
+    await save_migration_settings_async()
+    return migration_settings_status()

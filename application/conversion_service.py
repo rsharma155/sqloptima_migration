@@ -31,6 +31,8 @@ class ConversionRequest:
     object_type: str = "auto"   # 'auto' | 'procedure' | 'function' | 'trigger' | 'raw'
     schema: str = "dbo"
     name: str = ""
+    # dbo → public (default) or keep dbo on PostgreSQL for schema-qualified references
+    dbo_schema_strategy: str = "map_to_public"
 
 
 class ConversionService:
@@ -150,7 +152,6 @@ class ConversionService:
             not result.success
             or not result.postgres_syntax_valid
             or bool(result.errors)
-            or result.body_transform_fallback
             or (result.repair_exhausted and not result.postgres_syntax_valid)
         )
         return result

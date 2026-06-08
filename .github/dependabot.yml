@@ -1,18 +1,34 @@
+# Dependabot version-update PRs are disabled — bump dependencies manually in curated PRs.
+#
+# Each ecosystem below is registered with open-pull-requests-limit: 0 so Dependabot
+# will not open version-update pull requests or auto-commit dependency bumps.
+#
+# To re-enable, raise open-pull-requests-limit (e.g. 10) on the ecosystems you want.
+#
+# Dependabot *security* update PRs are controlled separately:
+#   GitHub repo → Settings → Code security and analysis → Dependabot security updates
 version: 2
 updates:
   - package-ecosystem: pip
     directory: "/"
     schedule:
-      interval: weekly
-    open-pull-requests-limit: 10
+      interval: monthly
+    open-pull-requests-limit: 0
 
   - package-ecosystem: npm
     directory: "/apps/ui"
     schedule:
-      interval: weekly
-    open-pull-requests-limit: 10
+      interval: monthly
+    open-pull-requests-limit: 0
 
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: monthly
+    open-pull-requests-limit: 0
+
+  - package-ecosystem: gomod
+    directory: "/engine-go"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 0

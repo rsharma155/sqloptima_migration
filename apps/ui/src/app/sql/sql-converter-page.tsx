@@ -37,7 +37,12 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import dynamic from "next/dynamic";
 import { toast } from "sonner";
 import { Skeleton } from "@/components/ui/skeleton";
-import { convertSql, type AppliedRepair, type PostgresSyntaxIssue } from "@/lib/api";
+import {
+  convertSql,
+  type AppliedRepair,
+  type DboSchemaStrategy,
+  type PostgresSyntaxIssue,
+} from "@/lib/api";
 
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
   ssr: false,
@@ -171,6 +176,7 @@ export default function SqlPage() {
   const [hasConverted, setHasConverted] = useState(false);
   const [validationResult, setValidationResult] = useState<{ valid: boolean; errors: string[] } | null>(null);
   const [objectType, setObjectType] = useState("auto");
+  const [dboSchemaStrategy, setDboSchemaStrategy] = useState<DboSchemaStrategy>("map_to_public");
   const validDismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Monaco source editor ref for jump-to-line on issue click
   type MonacoEditorType = NonNullable<ComponentProps<typeof MonacoEditor>["onMount"]> extends (e: infer E, ...rest: unknown[]) => unknown ? E : never;
@@ -206,6 +212,7 @@ export default function SqlPage() {
         object_type: objectType,
         object_name: "usp_converted",
         schema: "dbo",
+        dbo_schema_strategy: dboSchemaStrategy,
       });
       setTarget(result.converted_sql);
       setWarnings(result.warnings);
@@ -232,7 +239,7 @@ export default function SqlPage() {
     } finally {
       setConverting(false);
     }
-  }, [source, objectType]);
+  }, [source, objectType, dboSchemaStrategy]);
 
   const handleValidate = useCallback(() => {
     if (!source.trim()) {
@@ -353,7 +360,7 @@ export default function SqlPage() {
                 if (file) {
                   const text = await file.text();
                   setSource(text);
-                  toast.success(`Loaded "${file.name}"`, { duration: 1000 });
+                  toast.success(`Loaded "${file.name}"`);
                 }
               };
               input.click();
@@ -378,6 +385,28 @@ export default function SqlPage() {
             {converting ? "Converting..." : "Convert"}
           </Button>
         </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-medium text-muted-foreground">dbo schema:</span>
+        <Button
+          variant={dboSchemaStrategy === "map_to_public" ? "default" : "outline"}
+          size="sm"
+          className="h-7 text-xs"
+          onClick={() => setDboSchemaStrategy("map_to_public")}
+          title="Map SQL Server dbo to PostgreSQL public (default)"
+        >
+          dbo → public
+        </Button>
+        <Button
+          variant={dboSchemaStrategy === "preserve_dbo" ? "default" : "outline"}
+          size="sm"
+          className="h-7 text-xs"
+          onClick={() => setDboSchemaStrategy("preserve_dbo")}
+          title="Keep dbo schema on PostgreSQL so schema-qualified references resolve"
+        >
+          Keep dbo
+        </Button>
       </div>
 
       <div className="flex flex-wrap items-center gap-2">

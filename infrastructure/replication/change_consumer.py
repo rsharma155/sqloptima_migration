@@ -41,6 +41,8 @@ class ReplicationChangeConsumer:
     async def handle(self, event: ChangeEvent) -> None:
         """Apply one change event to the target database."""
         event.table_schema = self._target_schema
+        # Migrated PostgreSQL tables use lowercase unquoted identifiers.
+        event.table_name = event.table_name.lower()
         pk = self._table_pk_map.get(event.table_name.lower())
         applied = await self._applier.apply(event, pk_columns=pk)
         if applied:

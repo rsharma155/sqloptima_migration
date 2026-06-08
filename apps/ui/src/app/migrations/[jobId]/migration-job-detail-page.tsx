@@ -25,6 +25,7 @@ import {
   AlertTriangle,
   ScrollText,
   CheckCircle2,
+  Database,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -40,6 +41,7 @@ import { toast } from "sonner";
 import Link from "next/link";
 import { PageHeader } from "@/components/shared/page-header";
 import { PhaseTimeline } from "./phase-timeline";
+import { ProceduralMigrationSection } from "@/components/migrations/procedural-migration-section";
 import { cn } from "@/lib/utils";
 import {
   getMigration,
@@ -160,9 +162,11 @@ function logLevelClass(level: string): string {
 function MigrationLogsSection({
   logs,
   live = false,
+  waitingMessage,
 }: {
   logs: MigrationLogEntry[];
   live?: boolean;
+  waitingMessage?: string | null;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -172,7 +176,6 @@ function MigrationLogsSection({
     el.scrollTop = el.scrollHeight;
   }, [logs.length, logs[logs.length - 1]?.message]);
 
-  if (logs.length === 0) return null;
   return (
     <Card>
       <CardHeader className="pb-2">
@@ -187,26 +190,32 @@ function MigrationLogsSection({
         </CardTitle>
       </CardHeader>
       <CardContent>
-        <div
-          ref={scrollRef}
-          className="rounded-md border border-border bg-muted/20 max-h-72 overflow-y-auto font-mono text-xs divide-y divide-border"
-        >
-          {logs.map((entry, i) => (
-            <div key={`${entry.timestamp}-${i}`} className="px-3 py-2 flex gap-3">
-              <span className="text-muted-foreground/70 shrink-0 tabular-nums">
-                {new Date(entry.timestamp).toLocaleTimeString("en-US", {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                  second: "2-digit",
-                })}
-              </span>
-              <span className={cn("uppercase w-14 shrink-0", logLevelClass(entry.level))}>
-                {entry.level}
-              </span>
-              <span className="text-foreground break-all">{entry.message}</span>
-            </div>
-          ))}
-        </div>
+        {logs.length === 0 ? (
+          <div className="rounded-md border border-dashed border-border bg-muted/20 px-4 py-6 text-center text-sm text-muted-foreground">
+            {waitingMessage ?? "No log entries yet. Activity will appear here as the job progresses."}
+          </div>
+        ) : (
+          <div
+            ref={scrollRef}
+            className="rounded-md border border-border bg-muted/20 max-h-72 overflow-y-auto font-mono text-xs divide-y divide-border"
+          >
+            {logs.map((entry, i) => (
+              <div key={`${entry.timestamp}-${i}`} className="px-3 py-2 flex gap-3">
+                <span className="text-muted-foreground/70 shrink-0 tabular-nums">
+                  {new Date(entry.timestamp).toLocaleTimeString("en-US", {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                    second: "2-digit",
+                  })}
+                </span>
+                <span className={cn("uppercase w-14 shrink-0", logLevelClass(entry.level))}>
+                  {entry.level}
+                </span>
+                <span className="text-foreground break-all">{entry.message}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </CardContent>
     </Card>
   );
@@ -276,7 +285,7 @@ function TableProgressSection({
                 const pct = tableProgressPct(info);
                 const st = (info.status ?? "pending").toUpperCase();
                 const isRunning = ["RUNNING", "IN_PROGRESS", "MIGRATING", "QUEUED"].includes(st);
-                const showProgress = total > 0 || pct > 0;
+                const showProgress = total > 0 || pct > 0 || rows > 0 || isRunning;
                 return (
                   <tr
                     key={table}
@@ -330,7 +339,7 @@ function TableProgressSection({
             const pct = tableProgressPct(info);
             const st = (info.status ?? "pending").toUpperCase();
             const isRunning = ["RUNNING", "IN_PROGRESS", "MIGRATING", "QUEUED"].includes(st);
-            const showProgress = total > 0 || pct > 0;
+            const showProgress = total > 0 || pct > 0 || rows > 0 || isRunning;
             return (
               <div key={table} className="px-4 py-3">
                 <div className="flex items-center justify-between mb-2">
@@ -442,15 +451,13 @@ export default function MigrationDetailPage() {
     refetchIntervalInBackground: true,
   });
 
-  const { data: progress, isFetching: progressFetching } = useQuery<ProgressResponse>({
+  const { data: progress, isFetching: progressFetching, isError: progressError, error: progressErr } = useQuery<ProgressResponse>({
     queryKey: ["migration-progress", jobId],
     queryFn: () => getMigrationProgress(jobId!),
     enabled: !!jobId,
     refetchInterval: (query) => {
-      const jobStatus = job?.status ?? "";
       const progressStatus = (query.state.data as ProgressResponse | undefined)?.status ?? "";
-      const status = progressStatus || jobStatus;
-      return isLiveMigrationDetail(status) ? LIVE_POLL_MS : false;
+      return isLiveMigrationDetail(progressStatus) ? LIVE_POLL_MS : false;
     },
     refetchIntervalInBackground: true,
   });
@@ -463,7 +470,7 @@ export default function MigrationDetailPage() {
   const live = isLiveMigrationDetail(effectiveStatus);
   const terminal = isTerminalMigration(effectiveStatus);
 
-  const { data: logsData, isFetching: logsFetching } = useQuery({
+  const { data: logsData, isFetching: logsFetching, isError: logsError, error: logsErr } = useQuery({
     queryKey: ["migration-logs", jobId],
     queryFn: () => getMigrationLogs(jobId!),
     enabled: !!jobId,
@@ -520,6 +527,34 @@ export default function MigrationDetailPage() {
   const mergedTableProgress = { ...tableProgressFromJob, ...tableProgressFromApi };
   const tableProgress = Object.entries(mergedTableProgress);
 
+  const preparingMigration =
+    live &&
+    (progress?.total_rows_estimate ?? 0) === 0 &&
+    (progress?.total_rows_migrated ?? 0) === 0 &&
+    ["PENDING", "QUEUED"].includes(upper);
+
+  const waitingForFirstChunk =
+    live &&
+    (progress?.total_rows_estimate ?? 0) > 0 &&
+    (progress?.total_rows_migrated ?? 0) === 0 &&
+    !terminal &&
+    (
+      ["RUNNING", "IN_PROGRESS", "QUEUED", "RESUMED", "PENDING"].includes(upper) ||
+      tableProgress.some(([, info]) =>
+        ["MIGRATING", "RUNNING", "IN_PROGRESS", "PENDING"].includes(
+          (info.status ?? "").toUpperCase(),
+        ),
+      )
+    );
+
+  const logWaitingMessage = preparingMigration
+    ? "Preparing migration — counting source rows, resolving columns, and provisioning target tables…"
+    : waitingForFirstChunk
+      ? "Worker is planning chunks and loading the first batch. Row counts update after each chunk completes."
+      : live
+        ? "Waiting for migration activity…"
+        : null;
+
   if (jobPending) return <PageSkeleton />;
 
   return (
@@ -537,6 +572,14 @@ export default function MigrationDetailPage() {
             <ArrowLeft className="h-4 w-4 mr-1" /> All Jobs
           </Link>
         </Button>
+        {jobId && upper === "COMPLETED" && (
+          <Button size="sm" asChild>
+            <Link href={`/migrations/${jobId}/post-migration`}>
+              <Database className="h-4 w-4 mr-1" />
+              Post-migration
+            </Link>
+          </Button>
+        )}
         {live && (
           <Badge className="bg-emerald-500/15 text-emerald-400 border-emerald-500/30 gap-1.5">
             <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
@@ -561,7 +604,83 @@ export default function MigrationDetailPage() {
 
       {/* Phase timeline */}
       {job && progress && (
-        <PhaseTimeline status={effectiveStatus} pct={progress.overall_percentage} />
+        <PhaseTimeline
+          status={effectiveStatus}
+          pct={progress.overall_percentage}
+          jobId={jobId}
+        />
+      )}
+
+      {/* Post-migration finalize — primary next step after data load */}
+      {jobId && upper === "COMPLETED" && (
+        <Card className="border-primary/30 bg-primary/5">
+          <CardContent className="pt-4 flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm font-medium flex items-center gap-2">
+                <Database className="h-4 w-4 text-primary" />
+                Post-migration finalize
+              </p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Apply identity columns, secondary indexes, foreign keys, check constraints, and defaults
+              </p>
+            </div>
+            <Button size="sm" asChild>
+              <Link href={`/migrations/${jobId}/post-migration`}>Open finalize dashboard →</Link>
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
+      {jobId && upper !== "COMPLETED" && !live && (
+        <Card className="border-dashed opacity-80">
+          <CardContent className="pt-4 flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium flex items-center gap-2">
+                <Database className="h-4 w-4 text-muted-foreground" />
+                Post-migration finalize
+              </p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Available after the job completes — identity, indexes, and constraints are applied then
+              </p>
+            </div>
+            <Button size="sm" variant="outline" disabled>
+              Pending completion
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* First-chunk / preparing — prominent banner (high contrast in light + dark themes) */}
+      {(preparingMigration || waitingForFirstChunk) && (
+        <Card className="border-sky-500/60 bg-sky-500/10 shadow-sm">
+          <CardContent className="pt-4 flex items-start gap-3">
+            <Loader2 className="h-5 w-5 text-sky-600 dark:text-sky-400 shrink-0 mt-0.5 animate-spin" />
+            <div className="space-y-1.5 min-w-0">
+              {preparingMigration ? (
+                <>
+                  <p className="text-sm font-semibold text-foreground">Preparing migration</p>
+                  <p className="text-xs text-muted-foreground leading-relaxed">
+                    The control plane is counting rows on SQL Server, resolving column types,
+                    and provisioning the PostgreSQL target table. This can take a minute on large tables.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p className="text-sm font-semibold text-foreground">Loading first chunk</p>
+                  <p className="text-xs text-muted-foreground leading-relaxed">
+                    {formatRows(progress?.total_rows_estimate ?? 0)} rows to migrate.
+                    Progress stays at 0% until the first chunk finishes — check the migration log below for live updates.
+                  </p>
+                  {progress && progress.elapsed_seconds > 0 && (
+                    <p className="text-xs font-mono text-foreground/80">
+                      Elapsed: {Math.round(progress.elapsed_seconds)}s
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {/* Status + controls */}
@@ -589,7 +708,8 @@ export default function MigrationDetailPage() {
                 <Play className="h-3.5 w-3.5 mr-1" /> Resume
               </Button>
             )}
-            {(isRunning || isPaused) && controlState === "idle" && (
+            {(isRunning || isPaused || upper === "PENDING" || upper === "QUEUED") &&
+              controlState === "idle" && (
               <Button
                 size="sm"
                 variant="destructive"
@@ -605,6 +725,35 @@ export default function MigrationDetailPage() {
             <p className="text-xs text-muted-foreground font-mono">
               {job.source_schema} → {job.target_schema}
             </p>
+          )}
+
+          {isPaused && (
+            <div className="rounded-md border border-blue-500/30 bg-blue-500/10 px-4 py-3 text-sm flex items-start gap-2">
+              <Pause className="h-4 w-4 text-blue-400 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <p className="font-semibold text-blue-300">Migration paused</p>
+                <p className="text-xs text-blue-200/90">
+                  Click Resume to continue from the last checkpoint. Completed chunks are
+                  not re-run — only pending chunks will be loaded.
+                </p>
+                {progress && progress.total_rows_migrated > 0 && (
+                  <p className="text-xs font-mono text-blue-200/80">
+                    {formatRows(progress.total_rows_migrated)} row(s) migrated so far
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+
+          {(progressError || logsError) && (
+            <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm flex items-start gap-2">
+              <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+              <p className="text-amber-300 text-xs">
+                {progressError && `Progress: ${progressErr instanceof Error ? progressErr.message : "failed to load"}`}
+                {progressError && logsError ? " · " : ""}
+                {logsError && `Logs: ${logsErr instanceof Error ? logsErr.message : "failed to load"}`}
+              </p>
+            </div>
           )}
 
           {/* Failure reason */}
@@ -651,6 +800,20 @@ export default function MigrationDetailPage() {
             </div>
           )}
 
+          {/* Partial completion summary */}
+          {upper === "PARTIAL" && (
+            <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm flex items-start gap-2">
+              <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+              <div className="space-y-2 flex-1">
+                <p className="font-semibold text-amber-400">Migration completed with table failures</p>
+                {job?.error_message && (
+                  <p className="text-amber-300/90 font-mono text-xs break-all whitespace-pre-wrap">{job.error_message}</p>
+                )}
+                {job?.tables && <FailedTablesSection tables={job.tables} />}
+              </div>
+            </div>
+          )}
+
           {/* Completed summary */}
           {upper === "COMPLETED" && (
             <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm flex items-start gap-2">
@@ -681,7 +844,10 @@ export default function MigrationDetailPage() {
                 <span className="text-muted-foreground">Overall progress</span>
                 <span className="font-medium font-mono">
                   {formatRows(progress.total_rows_migrated)} /{" "}
-                  {formatRows(progress.total_rows_estimate)} rows
+                  {progress.total_rows_estimate > 0
+                    ? formatRows(progress.total_rows_estimate)
+                    : "…"}
+                  {" "}rows
                 </span>
               </div>
               <Progress
@@ -691,7 +857,9 @@ export default function MigrationDetailPage() {
               />
               <div className="flex flex-wrap gap-4 text-xs text-muted-foreground">
                 <span className="tabular-nums">
-                  {progress.overall_percentage.toFixed(1)}% complete
+                  {progress.total_rows_estimate > 0
+                    ? `${progress.overall_percentage.toFixed(1)}% complete`
+                    : "Estimating row counts…"}
                 </span>
                 {!terminal && progress.throughput_rows_per_sec > 0 && (
                   <span className="font-mono">
@@ -720,9 +888,21 @@ export default function MigrationDetailPage() {
         <TableProgressSection entries={tableProgress} />
       )}
 
-      {/* Migration event log */}
-      {migrationLogs.length > 0 && (
-        <MigrationLogsSection logs={migrationLogs} live={live} />
+      {job && (
+        <ProceduralMigrationSection
+          jobId={jobId!}
+          migrationStatus={effectiveStatus}
+          initialData={job.procedural_migration ?? null}
+        />
+      )}
+
+      {/* Migration event log — always visible for live/terminal jobs */}
+      {(live || terminal || migrationLogs.length > 0) && (
+        <MigrationLogsSection
+          logs={migrationLogs}
+          live={live}
+          waitingMessage={logWaitingMessage}
+        />
       )}
 
       {/* Validation shortcut */}
@@ -735,7 +915,7 @@ export default function MigrationDetailPage() {
                 Validate this migration
               </p>
               <p className="text-xs text-muted-foreground mt-0.5">
-                4 validation levels: L1 row counts · L2 column aggregates · L3 chunk hashes · L4 statistical sampling
+                3 validation levels: L1 row counts · L2 column aggregates · L3 chunk hashes · top-10 row samples for spot checks
               </p>
             </div>
             <Button size="sm" asChild>

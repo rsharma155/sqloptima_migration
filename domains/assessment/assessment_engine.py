@@ -91,6 +91,7 @@ class TableAssessment:
     lob_columns: list[str] = field(default_factory=list)
     ci_collation_columns: list[str] = field(default_factory=list)
     blocker_types: list[str] = field(default_factory=list)
+    unsupported_type_columns: list[dict[str, str]] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     prerequisites: list[str] = field(default_factory=list)
@@ -102,16 +103,44 @@ class TableAssessment:
 
 
 @dataclass
+class RoutineAssessment:
+    """Assessment outcome for a stored procedure or function."""
+
+    routine_name: str
+    schema_name: str
+    object_type: str  # "procedure" | "function"
+    migration_tier: MigrationTier = MigrationTier.SAFE
+    complexity_score: int = 0
+    estimated_minutes: float = 0.0
+    conversion_difficulty: str = "simple"
+    detected_patterns: list[str] = field(default_factory=list)
+    blockers: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    prerequisites: list[str] = field(default_factory=list)
+    table_dependencies: list[dict[str, str]] = field(default_factory=list)
+    missing_target_tables: list[str] = field(default_factory=list)
+
+    @property
+    def qualified_name(self) -> str:
+        return f"{self.schema_name}.{self.routine_name}"
+
+
+@dataclass
 class DatabaseAssessment:
     """Aggregate assessment for an entire database / schema set."""
 
     database_name: str
     tables: list[TableAssessment] = field(default_factory=list)
+    routines: list[RoutineAssessment] = field(default_factory=list)
     overall_tier: MigrationTier = MigrationTier.SAFE
     total_tables: int = 0
+    total_routines: int = 0
     safe_count: int = 0
     warning_count: int = 0
     blocker_count: int = 0
+    routine_safe_count: int = 0
+    routine_warning_count: int = 0
+    routine_blocker_count: int = 0
     estimated_total_minutes: float = 0.0
     global_prerequisites: list[str] = field(default_factory=list)
     # Supplemental metadata set by discovery queries outside this engine
@@ -124,6 +153,28 @@ class DatabaseAssessment:
 # ---------------------------------------------------------------------------
 # Assessment engine
 # ---------------------------------------------------------------------------
+
+
+# Routine conversion effort estimates (minutes per object)
+_ROUTINE_MINUTES: dict[str, float] = {
+    "simple": 2.0,
+    "moderate": 5.0,
+    "complex": 15.0,
+    "extreme": 30.0,
+}
+
+_ROUTINE_SCORE: dict[str, int] = {
+    "simple": 10,
+    "moderate": 35,
+    "complex": 55,
+    "extreme": 85,
+}
+
+_UNSUPPORTED_ROUTINE_MARKERS: tuple[tuple[str, str], ...] = (
+    ("EXTERNAL NAME", "CLR routine — not supported on PostgreSQL without rewrite"),
+    ("CREATE ASSEMBLY", "CLR assembly reference — not supported on PostgreSQL"),
+    ("SERVICE_BROKER", "Service Broker usage — no PostgreSQL equivalent"),
+)
 
 
 class AssessmentEngine:
@@ -152,6 +203,7 @@ class AssessmentEngine:
         lob_cols: list[str] = []
         ci_cols: list[str] = []
         blocker_types: list[str] = []
+        unsupported_type_columns: list[dict[str, str]] = []
         blockers: list[str] = []
         warnings: list[str] = []
         prereqs: list[str] = []
@@ -163,9 +215,12 @@ class AssessmentEngine:
             # ---- Blocker types ----
             if type_lower in _BLOCKER_TYPES:
                 blocker_types.append(col.column_name)
+                unsupported_type_columns.append(
+                    {"column_name": col.column_name, "source_type": type_lower}
+                )
                 blockers.append(
                     f"Column '{col.column_name}' uses unsupported type '{type_lower}' "
-                    f"— requires manual conversion (hierarchyid→ltree, geography/geometry→PostGIS)"
+                    f"— choose a PostgreSQL target type in the migration wizard to proceed"
                 )
                 score += 40
 
@@ -304,6 +359,7 @@ class AssessmentEngine:
             lob_columns=lob_cols,
             ci_collation_columns=ci_cols,
             blocker_types=blocker_types,
+            unsupported_type_columns=unsupported_type_columns,
             blockers=blockers,
             warnings=warnings,
             prerequisites=prereqs,
@@ -369,10 +425,111 @@ class AssessmentEngine:
                     assessment.migration_tier = MigrationTier.WARNING
         return assessment
 
+    def assess_routine(
+        self,
+        obj: Any,
+    ) -> RoutineAssessment:
+        """Rate a discovered procedure or function for T-SQL → PL/pgSQL readiness."""
+        from domains.transpilation.procedural_converter import (
+            ConversionDifficulty,
+            TSqlPatternMatcher,
+        )
+        from shared.kernel.database_object import DatabaseObjectType
+
+        schema = getattr(obj, "schema_name", "") or "dbo"
+        name = getattr(obj, "object_name", "") or ""
+        obj_type = getattr(obj, "object_type", None)
+        if obj_type == DatabaseObjectType.FUNCTION:
+            object_type = "function"
+        else:
+            object_type = "procedure"
+
+        source = (getattr(obj, "source_definition", None) or "").strip()
+        blockers: list[str] = []
+        warnings: list[str] = []
+        prereqs: list[str] = []
+
+        if not source:
+            blockers.append("Could not read routine definition from SQL Server catalog")
+            return RoutineAssessment(
+                routine_name=name,
+                schema_name=schema,
+                object_type=object_type,
+                migration_tier=MigrationTier.BLOCKER,
+                complexity_score=100,
+                estimated_minutes=0.0,
+                conversion_difficulty="extreme",
+                blockers=blockers,
+            )
+
+        upper = source.upper()
+        for marker, message in _UNSUPPORTED_ROUTINE_MARKERS:
+            if marker in upper:
+                blockers.append(message)
+
+        difficulty = TSqlPatternMatcher.detect_difficulty(source)
+        patterns = TSqlPatternMatcher.detect_patterns(source)
+        diff_key = difficulty.value if hasattr(difficulty, "value") else str(difficulty)
+        score = _ROUTINE_SCORE.get(diff_key, 35)
+        estimated_minutes = _ROUTINE_MINUTES.get(diff_key, 5.0)
+
+        if patterns:
+            warnings.append(
+                f"T-SQL patterns detected: {', '.join(patterns)} — "
+                "review converted PL/pgSQL on the assessment step"
+            )
+
+        if difficulty == ConversionDifficulty.EXTREME:
+            blockers.append(
+                "Extreme conversion difficulty (e.g. sp_executesql, dynamic SQL) — "
+                "expect manual rewrite or partial automation"
+            )
+        elif difficulty == ConversionDifficulty.COMPLEX:
+            warnings.append(
+                "Complex T-SQL constructs — schedule time for conversion review and testing"
+            )
+        elif difficulty == ConversionDifficulty.MODERATE:
+            warnings.append(
+                "Moderate T-SQL patterns — verify converted routine on the assessment step"
+            )
+
+        if object_type == "function":
+            warnings.append(
+                "User-defined function — confirm return type and volatility match PostgreSQL semantics"
+            )
+
+        score = min(score + len(blockers) * 15, 100)
+        if blockers or score >= self._BLOCKER_THRESHOLD:
+            tier = MigrationTier.BLOCKER
+        elif warnings or score >= self._WARNING_THRESHOLD:
+            tier = MigrationTier.WARNING
+        else:
+            tier = MigrationTier.SAFE
+
+        if tier != MigrationTier.SAFE:
+            prereqs.append(
+                "Run conversion preview on the assessment step before starting migration"
+            )
+
+        return RoutineAssessment(
+            routine_name=name,
+            schema_name=schema,
+            object_type=object_type,
+            migration_tier=tier,
+            complexity_score=score,
+            estimated_minutes=estimated_minutes,
+            conversion_difficulty=diff_key,
+            detected_patterns=patterns,
+            blockers=blockers,
+            warnings=warnings,
+            prerequisites=prereqs,
+        )
+
     def assess_database(
         self,
         database_name: str,
         tables: list[Table],
+        routines: list[Any] | None = None,
         cdc_enabled_db: bool = False,
         linked_server_refs: list[dict[str, Any]] | None = None,
         global_temp_table_refs: list[dict[str, Any]] | None = None,
@@ -382,6 +539,7 @@ class AssessmentEngine:
         linked_server_refs = linked_server_refs or []
         global_temp_table_refs = global_temp_table_refs or []
         agent_jobs = agent_jobs or []
+        routines = routines or []
         assessments: list[TableAssessment] = []
         for table in tables:
             ta = self.assess_table(table, cdc_enabled_db=cdc_enabled_db)
@@ -393,18 +551,40 @@ class AssessmentEngine:
                 score=ta.complexity_score,
             )
 
+        routine_assessments: list[RoutineAssessment] = []
+        for routine in routines:
+            ra = self.assess_routine(routine)
+            routine_assessments.append(ra)
+            logger.debug(
+                "routine_assessed",
+                routine=ra.qualified_name,
+                object_type=ra.object_type,
+                tier=ra.migration_tier,
+                score=ra.complexity_score,
+            )
+
         safe = sum(1 for a in assessments if a.migration_tier == MigrationTier.SAFE)
         warning = sum(1 for a in assessments if a.migration_tier == MigrationTier.WARNING)
         blocker = sum(1 for a in assessments if a.migration_tier == MigrationTier.BLOCKER)
+        routine_safe = sum(
+            1 for a in routine_assessments if a.migration_tier == MigrationTier.SAFE
+        )
+        routine_warning = sum(
+            1 for a in routine_assessments if a.migration_tier == MigrationTier.WARNING
+        )
+        routine_blocker = sum(
+            1 for a in routine_assessments if a.migration_tier == MigrationTier.BLOCKER
+        )
 
-        if blocker > 0:
+        if blocker > 0 or routine_blocker > 0:
             overall = MigrationTier.BLOCKER
-        elif warning > 0:
+        elif warning > 0 or routine_warning > 0:
             overall = MigrationTier.WARNING
         else:
             overall = MigrationTier.SAFE
 
         total_minutes = sum(a.estimated_minutes for a in assessments)
+        total_minutes += sum(a.estimated_minutes for a in routine_assessments)
 
         global_prereqs: list[str] = []
         if not cdc_enabled_db:
@@ -438,11 +618,16 @@ class AssessmentEngine:
         db_assessment = DatabaseAssessment(
             database_name=database_name,
             tables=assessments,
+            routines=routine_assessments,
             overall_tier=overall,
             total_tables=len(assessments),
+            total_routines=len(routine_assessments),
             safe_count=safe,
             warning_count=warning,
             blocker_count=blocker,
+            routine_safe_count=routine_safe,
+            routine_warning_count=routine_warning,
+            routine_blocker_count=routine_blocker,
             estimated_total_minutes=round(total_minutes, 2),
             global_prerequisites=global_prereqs,
             cdc_enabled_db=cdc_enabled_db,
@@ -454,10 +639,14 @@ class AssessmentEngine:
         logger.info(
             "database_assessed",
             database=database_name,
-            total=len(assessments),
+            total_tables=len(assessments),
+            total_routines=len(routine_assessments),
             safe=safe,
             warning=warning,
             blocker=blocker,
+            routine_safe=routine_safe,
+            routine_warning=routine_warning,
+            routine_blocker=routine_blocker,
             overall_tier=overall,
         )
         return db_assessment

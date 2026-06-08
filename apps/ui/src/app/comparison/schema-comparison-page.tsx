@@ -4,7 +4,7 @@
  * Module: page.tsx
  * Purpose: Schema comparison — split-pane view with source on left and
  *          target on right, colour-coded by comparison status.
- *          Clicking an object shows its DDL definition from both sides.
+ *          Mismatched items expose inline diff details on the source side.
  * Author: Ravi Sharma
  * Copyright (c) 2026 Ravi Sharma
  * SPDX-License-Identifier: MIT
@@ -22,11 +22,14 @@ import {
   ArrowRight,
   Table2,
   Columns3,
+  ListOrdered,
+  FileCode2,
+  FunctionSquare,
+  FolderTree,
   GitCompare,
   ChevronDown,
   ChevronRight,
   Info,
-  Code2,
   X,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -40,12 +43,17 @@ import {
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { useConnections, type Connection } from "@/lib/ConnectionContext";
-import { compareDatabases, listSchemas, testConnection, getObjectDefinition, ApiError } from "@/lib/api";
+import { compareDatabases, listSchemas, testConnection, ApiError } from "@/lib/api";
 import {
   probeConnection,
   formatUnreachableMessage,
   type ConnectionHealth,
 } from "@/lib/connection-health";
+
+interface ObjectCountPair {
+  source: number;
+  target: number;
+}
 
 interface CompareSummary {
   total_source_objects: number;
@@ -58,6 +66,12 @@ interface CompareSummary {
   target_database: string;
   source_schema?: string;
   target_schema?: string;
+  object_counts?: {
+    tables?: ObjectCountPair;
+    procedures?: ObjectCountPair;
+    functions?: ObjectCountPair;
+    indexes?: ObjectCountPair;
+  };
 }
 
 interface CompareTreeItem {
@@ -77,19 +91,15 @@ interface CompareResult {
   duration_ms: number;
 }
 
-interface SelectedDef {
-  name: string;
-  objectType: string;
-  schemaName: string;
-  sourceDef: string | null;
-  targetDef: string | null;
-  loading: boolean;
-}
-
 function fmtMs(ms: number): string {
   if (ms < 1) return "< 1ms";
   if (ms < 1000) return `${Math.round(ms)}ms`;
   return `${(ms / 1000).toFixed(2)}s`;
+}
+
+/** Backend MatchStatus is lowercase; UI compares uppercase labels. */
+function normalizeStatus(status: string): string {
+  return status.toUpperCase();
 }
 
 // ---------------------------------------------------------------------------
@@ -97,7 +107,7 @@ function fmtMs(ms: number): string {
 // ---------------------------------------------------------------------------
 
 function statusIcon(status: string) {
-  switch (status) {
+  switch (normalizeStatus(status)) {
     case "EXACT": return <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500 shrink-0" />;
     case "SOURCE_ONLY": return <XCircle className="h-3.5 w-3.5 text-red-500 shrink-0" />;
     case "TARGET_ONLY": return <AlertTriangle className="h-3.5 w-3.5 text-amber-500 shrink-0" />;
@@ -107,18 +117,19 @@ function statusIcon(status: string) {
 }
 
 function statusBadge(status: string) {
+  const normalized = normalizeStatus(status);
   const map: Record<string, { variant: "secondary" | "destructive" | "outline"; className: string }> = {
     EXACT:       { variant: "secondary", className: "bg-emerald-500/10 text-emerald-500 border-emerald-500/20 text-[10px]" },
     SOURCE_ONLY: { variant: "destructive", className: "text-[10px]" },
     TARGET_ONLY: { variant: "outline", className: "text-amber-500 border-amber-500/20 text-[10px]" },
     PARTIAL:     { variant: "outline", className: "text-orange-500 border-orange-500/20 text-[10px]" },
   };
-  const v = map[status] || { variant: "outline" as const, className: "text-[10px]" };
-  return <Badge variant={v.variant} className={v.className}>{status.replace("_", " ")}</Badge>;
+  const v = map[normalized] || { variant: "outline" as const, className: "text-[10px]" };
+  return <Badge variant={v.variant} className={v.className}>{normalized.replace("_", " ")}</Badge>;
 }
 
 function rowBg(status: string) {
-  switch (status) {
+  switch (normalizeStatus(status)) {
     case "EXACT": return "";
     case "SOURCE_ONLY": return "bg-red-500/5";
     case "TARGET_ONLY": return "bg-amber-500/5";
@@ -128,27 +139,28 @@ function rowBg(status: string) {
 }
 
 function nodeTypeIcon(nodeType: string) {
-  if (nodeType === "TABLE" || nodeType === "table") return <Table2 className="h-3.5 w-3.5 text-muted-foreground shrink-0" />;
-  if (nodeType === "COLUMN" || nodeType === "column") return <Columns3 className="h-3.5 w-3.5 text-muted-foreground shrink-0" />;
-  return null;
-}
-
-function isClickableObject(nodeType: string) {
   const t = nodeType.toLowerCase();
-  return ["table", "view", "procedure", "function"].includes(t);
+  if (t === "table") return <Table2 className="h-3.5 w-3.5 text-muted-foreground shrink-0" />;
+  if (t === "column") return <Columns3 className="h-3.5 w-3.5 text-muted-foreground shrink-0" />;
+  if (t === "index") return <ListOrdered className="h-3.5 w-3.5 text-muted-foreground shrink-0" />;
+  if (t === "procedure") return <FileCode2 className="h-3.5 w-3.5 text-muted-foreground shrink-0" />;
+  if (t === "function") return <FunctionSquare className="h-3.5 w-3.5 text-muted-foreground shrink-0" />;
+  if (t === "category") return <FolderTree className="h-3.5 w-3.5 text-muted-foreground shrink-0" />;
+  return null;
 }
 
 function mismatchReason(item: CompareTreeItem): string {
   const props = item.properties || {};
-  if (item.status === "SOURCE_ONLY") return "Present in source but missing from target.";
-  if (item.status === "TARGET_ONLY") return "Present in target but not found in source.";
-  if (item.status === "PARTIAL") {
+  const status = normalizeStatus(item.status);
+  if (status === "SOURCE_ONLY") return "Present in source but missing from target.";
+  if (status === "TARGET_ONLY") return "Present in target but not found in source.";
+  if (status === "PARTIAL") {
     const srcType = props.source_type ?? props.type;
     const tgtType = props.target_type;
     if (srcType && tgtType && srcType !== tgtType) {
       return `Type mismatch — source: ${srcType}, target: ${tgtType}`;
     }
-    const childDiffs = item.children.filter((c) => c.status !== "EXACT");
+    const childDiffs = item.children.filter((c) => normalizeStatus(c.status) !== "EXACT");
     if (childDiffs.length > 0) {
       return `${childDiffs.length} child object(s) differ: ${childDiffs.map((c) => c.name).slice(0, 3).join(", ")}${childDiffs.length > 3 ? "…" : ""}`;
     }
@@ -163,7 +175,7 @@ function mismatchReason(item: CompareTreeItem): string {
 
 function DetailsPanel({ item }: { item: CompareTreeItem }) {
   const reason = mismatchReason(item);
-  const childDiffs = item.children.filter((c) => c.status !== "EXACT");
+  const childDiffs = item.children.filter((c) => normalizeStatus(c.status) !== "EXACT");
   const props = item.properties || {};
   const rawDiffs = Array.isArray(props.differences) ? props.differences as Array<{
     property?: string;
@@ -229,7 +241,7 @@ function DetailsPanel({ item }: { item: CompareTreeItem }) {
 
 function SideTreeNode({
   item, depth, side, expandedNodes, toggleNode, detailsOpen, toggleDetails,
-  sourceSchema, targetSchema, sourceDatabase, targetDatabase, onItemClick,
+  sourceSchema, targetSchema, sourceDatabase, targetDatabase,
 }: {
   item: CompareTreeItem;
   depth: number;
@@ -242,15 +254,14 @@ function SideTreeNode({
   targetSchema: string;
   sourceDatabase: string;
   targetDatabase: string;
-  onItemClick?: (item: CompareTreeItem) => void;
 }) {
   const nodeKey = `${depth}-${item.name}`;
   const detailsKey = `details-${depth}-${item.name}`;
   const hasChildren = item.children && item.children.length > 0;
   const isExpanded = expandedNodes.has(nodeKey);
   const isDetailsOpen = detailsOpen === detailsKey;
-  const hasMismatch = item.status !== "EXACT";
-  const canViewDef = isClickableObject(item.node_type);
+  const itemStatus = normalizeStatus(item.status);
+  const hasMismatch = itemStatus !== "EXACT";
 
   const displayName = (() => {
     const nodeType = item.node_type.toLowerCase();
@@ -277,12 +288,20 @@ function SideTreeNode({
         return `${item.name} (${String(sideType)})`;
       }
     }
+    if (nodeType === "index") {
+      const sideCols = side === "source"
+        ? (props.source_columns ?? props.key_columns)
+        : (props.target_columns ?? props.key_columns);
+      if (Array.isArray(sideCols) && sideCols.length > 0) {
+        return `${item.name} (${sideCols.join(", ")})`;
+      }
+    }
     return item.name;
   })();
 
   const isGhost =
-    (side === "source" && item.status === "TARGET_ONLY") ||
-    (side === "target" && item.status === "SOURCE_ONLY");
+    (side === "source" && itemStatus === "TARGET_ONLY") ||
+    (side === "target" && itemStatus === "SOURCE_ONLY");
 
   if (isGhost) {
     return (
@@ -294,7 +313,6 @@ function SideTreeNode({
     );
   }
 
-  // Schema nodes: pass schema name down to children (unused for Def — schemas come from selectors)
   return (
     <div className={rowBg(item.status)}>
       <div
@@ -312,24 +330,13 @@ function SideTreeNode({
         {statusIcon(item.status)}
         {nodeTypeIcon(item.node_type)}
         <span className="flex-1 truncate">{displayName}</span>
-        {item.status !== "EXACT" && statusBadge(item.status)}
+        {itemStatus !== "EXACT" && statusBadge(item.status)}
         {side === "source" && hasMismatch && (
           <button
             onClick={(e) => { e.stopPropagation(); toggleDetails(isDetailsOpen ? null : detailsKey); }}
             className="ml-1 text-[10px] text-blue-400 hover:text-blue-300 underline underline-offset-2 shrink-0"
           >
             {isDetailsOpen ? "Hide" : "Details"}
-          </button>
-        )}
-        {canViewDef && onItemClick && (
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onItemClick(item);
-            }}
-            className="ml-1 text-[10px] text-purple-400 hover:text-purple-300 underline underline-offset-2 shrink-0"
-          >
-            Def
           </button>
         )}
       </div>
@@ -349,63 +356,8 @@ function SideTreeNode({
             targetSchema={targetSchema}
             sourceDatabase={sourceDatabase}
             targetDatabase={targetDatabase}
-            onItemClick={onItemClick}
           />
         ))}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Definition comparison panel
-// ---------------------------------------------------------------------------
-
-function DefinitionPanel({ def, onClose }: { def: SelectedDef; onClose: () => void }) {
-  return (
-    <div className="border border-border rounded-lg overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-2.5 bg-muted/40 border-b border-border">
-        <div className="flex items-center gap-2">
-          <Code2 className="h-4 w-4 text-muted-foreground" />
-          <span className="text-sm font-semibold">
-            Object Definition — <span className="font-mono">{def.schemaName}.{def.name}</span>
-          </span>
-          <Badge variant="outline" className="text-[10px] capitalize">{def.objectType.toLowerCase()}</Badge>
-        </div>
-        <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
-          <X className="h-4 w-4" />
-        </button>
-      </div>
-
-      {def.loading ? (
-        <div className="flex items-center justify-center py-10">
-          <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-        </div>
-      ) : (
-        <div className="grid grid-cols-2 gap-0">
-          {/* Source definition */}
-          <div className="border-r border-border">
-            <div className="px-4 py-2 bg-muted/20 border-b border-border">
-              <span className="text-xs font-semibold flex items-center gap-1">
-                <Server className="h-3 w-3" /> Source (SQL Server)
-              </span>
-            </div>
-            <pre className="text-xs font-mono overflow-auto max-h-[320px] p-4 bg-muted/10 whitespace-pre-wrap break-words">
-              {def.sourceDef ?? "-- Not available"}
-            </pre>
-          </div>
-          {/* Target definition */}
-          <div>
-            <div className="px-4 py-2 bg-muted/20 border-b border-border">
-              <span className="text-xs font-semibold flex items-center gap-1">
-                <Database className="h-3 w-3" /> Target (PostgreSQL)
-              </span>
-            </div>
-            <pre className="text-xs font-mono overflow-auto max-h-[320px] p-4 bg-muted/10 whitespace-pre-wrap break-words">
-              {def.targetDef ?? "-- Not available (object may not exist in target)"}
-            </pre>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -428,7 +380,6 @@ export default function ComparisonPage() {
   const [result, setResult] = useState<CompareResult | null>(null);
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
   const [detailsOpen, setDetailsOpen] = useState<string | null>(null);
-  const [selectedDef, setSelectedDef] = useState<SelectedDef | null>(null);
   const [sourceHealth, setSourceHealth] = useState<ConnectionHealth>({ status: "unknown", message: "" });
   const [targetHealth, setTargetHealth] = useState<ConnectionHealth>({ status: "unknown", message: "" });
   const [sourceConnError, setSourceConnError] = useState<string | null>(null);
@@ -546,33 +497,6 @@ export default function ComparisonPage() {
     });
   };
 
-  // Fetch object definitions from both sides when user clicks "Def"
-  const handleItemClick = useCallback(async (item: CompareTreeItem) => {
-    if (!sourceConn || !targetConn) return;
-    setSelectedDef({
-      name: item.name,
-      objectType: item.node_type,
-      schemaName: `${sourceSchema} → ${targetSchema}`,
-      sourceDef: null,
-      targetDef: null,
-      loading: true,
-    });
-
-    const [srcResult, tgtResult] = await Promise.allSettled([
-      getObjectDefinition(sourceConn.id, sourceSchema, item.name, item.node_type),
-      getObjectDefinition(targetConn.id, targetSchema, item.name, item.node_type),
-    ]);
-
-    setSelectedDef({
-      name: item.name,
-      objectType: item.node_type,
-      schemaName: `${sourceSchema} → ${targetSchema}`,
-      sourceDef: srcResult.status === "fulfilled" ? srcResult.value.definition : `-- Not found: ${(srcResult.reason as Error)?.message ?? "error"}`,
-      targetDef: tgtResult.status === "fulfilled" ? tgtResult.value.definition : null,
-      loading: false,
-    });
-  }, [sourceConn, targetConn, sourceSchema, targetSchema]);
-
   const handleCompare = useCallback(async () => {
     if (!sourceConn || !targetConn) {
       toast.info("Configure source and target connections in Settings first");
@@ -589,7 +513,6 @@ export default function ComparisonPage() {
     setComparing(true);
     setResult(null);
     setDetailsOpen(null);
-    setSelectedDef(null);
     setCompareError(null);
     try {
       const res = (await compareDatabases({
@@ -600,11 +523,12 @@ export default function ComparisonPage() {
       })) as unknown as CompareResult;
       setResult({
         ...res,
-        source_tree: res.source_tree ?? res.tree,
-        target_tree: res.target_tree ?? res.tree,
+        source_tree: (res.source_tree ?? res.tree) as CompareTreeItem[],
+        target_tree: (res.target_tree ?? []) as CompareTreeItem[],
       });
       const keys = new Set<string>();
-      (res.source_tree ?? res.tree).forEach((t) => keys.add(`0-${t.name}`));
+      (res.source_tree ?? []).forEach((t) => keys.add(`0-${t.name}`));
+      (res.target_tree ?? []).forEach((t) => keys.add(`0-${t.name}`));
       setExpandedNodes(keys);
 
       if (
@@ -681,7 +605,7 @@ export default function ComparisonPage() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Schema Comparison</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Source (SQL Server) databases on the left · Target (PostgreSQL) on the right
+            Compare tables, columns, indexes, stored procedures, and functions between SQL Server and PostgreSQL
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -910,24 +834,48 @@ export default function ComparisonPage() {
 
       {/* Summary stats */}
       {result && (
-        <div className="grid gap-4 md:grid-cols-4">
-          <Card>
-            <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Matched</CardTitle></CardHeader>
-            <CardContent><div className="text-2xl font-bold text-emerald-500">{result.summary.matched}</div></CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Source Only</CardTitle></CardHeader>
-            <CardContent><div className="text-2xl font-bold text-destructive">{result.summary.source_only}</div></CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Target Only</CardTitle></CardHeader>
-            <CardContent><div className="text-2xl font-bold text-amber-500">{result.summary.target_only}</div></CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Partial Match</CardTitle></CardHeader>
-            <CardContent><div className="text-2xl font-bold text-orange-500">{result.summary.partial_match}</div></CardContent>
-          </Card>
-        </div>
+        <>
+          <div className="grid gap-4 md:grid-cols-4">
+            <Card>
+              <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Matched</CardTitle></CardHeader>
+              <CardContent><div className="text-2xl font-bold text-emerald-500">{result.summary.matched}</div></CardContent>
+            </Card>
+            <Card>
+              <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Source Only</CardTitle></CardHeader>
+              <CardContent><div className="text-2xl font-bold text-destructive">{result.summary.source_only}</div></CardContent>
+            </Card>
+            <Card>
+              <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Target Only</CardTitle></CardHeader>
+              <CardContent><div className="text-2xl font-bold text-amber-500">{result.summary.target_only}</div></CardContent>
+            </Card>
+            <Card>
+              <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Partial Match</CardTitle></CardHeader>
+              <CardContent><div className="text-2xl font-bold text-orange-500">{result.summary.partial_match}</div></CardContent>
+            </Card>
+          </div>
+          {result.summary.object_counts && (
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-xs">
+              {([
+                ["tables", "Tables", Table2],
+                ["procedures", "Stored Procedures", FileCode2],
+                ["functions", "Functions", FunctionSquare],
+                ["indexes", "Indexes", ListOrdered],
+              ] as const).map(([key, label, Icon]) => {
+                const counts = result.summary.object_counts?.[key];
+                if (!counts) return null;
+                return (
+                  <div key={key} className="rounded-md border border-border px-3 py-2 flex items-center gap-2">
+                    <Icon className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                    <span className="font-medium">{label}</span>
+                    <span className="ml-auto text-muted-foreground font-mono">
+                      {counts.source} → {counts.target}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
       )}
 
       {/* Legend */}
@@ -938,7 +886,7 @@ export default function ComparisonPage() {
           <span className="flex items-center gap-1"><AlertTriangle className="h-3.5 w-3.5 text-amber-500" /> Target only</span>
           <span className="flex items-center gap-1"><AlertTriangle className="h-3.5 w-3.5 text-orange-500" /> Partial match</span>
           <span className="flex items-center gap-1 ml-auto text-blue-400">
-            <Info className="h-3.5 w-3.5" /> <strong>Details</strong> = show diff · <strong>Def</strong> = show DDL from both sides
+            <Info className="h-3.5 w-3.5" /> <strong>Details</strong> = show diff on mismatched source objects
           </span>
         </div>
       )}
@@ -959,7 +907,7 @@ export default function ComparisonPage() {
               <Badge variant="outline" className="ml-auto text-[10px]">{result.summary.total_source_objects} objects</Badge>
             </div>
             <div className="overflow-y-auto max-h-[560px]">
-              {result.tree.map((item, i) => (
+              {(result.source_tree.length > 0 ? result.source_tree : result.tree).map((item, i) => (
                 <SideTreeNode
                   key={i}
                   item={item}
@@ -973,7 +921,6 @@ export default function ComparisonPage() {
                   targetSchema={targetSchema}
                   sourceDatabase={sourceDatabase}
                   targetDatabase={targetDatabase}
-                  onItemClick={handleItemClick}
                 />
               ))}
             </div>
@@ -992,31 +939,31 @@ export default function ComparisonPage() {
               <Badge variant="outline" className="ml-auto text-[10px]">{result.summary.total_target_objects} objects</Badge>
             </div>
             <div className="overflow-y-auto max-h-[560px]">
-              {result.tree.map((item, i) => (
-                <SideTreeNode
-                  key={i}
-                  item={item}
-                  depth={0}
-                  side="target"
-                  expandedNodes={expandedNodes}
-                  toggleNode={toggleNode}
-                  detailsOpen={detailsOpen}
-                  toggleDetails={setDetailsOpen}
-                  sourceSchema={sourceSchema}
-                  targetSchema={targetSchema}
-                  sourceDatabase={sourceDatabase}
-                  targetDatabase={targetDatabase}
-                  onItemClick={handleItemClick}
-                />
-              ))}
+              {result.target_tree.length > 0 ? (
+                result.target_tree.map((item, i) => (
+                  <SideTreeNode
+                    key={i}
+                    item={item}
+                    depth={0}
+                    side="target"
+                    expandedNodes={expandedNodes}
+                    toggleNode={toggleNode}
+                    detailsOpen={detailsOpen}
+                    toggleDetails={setDetailsOpen}
+                    sourceSchema={sourceSchema}
+                    targetSchema={targetSchema}
+                    sourceDatabase={sourceDatabase}
+                    targetDatabase={targetDatabase}
+                  />
+                ))
+              ) : (
+                <p className="px-4 py-6 text-sm text-muted-foreground text-center">
+                  No objects found in target schema &quot;{result.summary.target_schema || targetSchema}&quot; on PostgreSQL.
+                </p>
+              )}
             </div>
           </div>
         </div>
-      )}
-
-      {/* Object definition panel */}
-      {selectedDef && result && (
-        <DefinitionPanel def={selectedDef} onClose={() => setSelectedDef(null)} />
       )}
 
       {/* Duration */}

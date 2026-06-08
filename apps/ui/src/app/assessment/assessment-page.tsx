@@ -3,8 +3,8 @@
 /**
  * Module: app/assessment/page.tsx
  * Purpose: Database migration readiness assessment page — shows SAFE/WARNING/BLOCKER
- *          tier per table, complexity scores, estimated migration time, LOB columns,
- *          CI collation issues, and global prerequisites.
+ *          tier per table and stored procedure/function, complexity scores, estimated
+ *          migration time, LOB columns, CI collation issues, and global prerequisites.
  * Author: Ravi Sharma
  * Copyright (c) 2026 Ravi Sharma
  * SPDX-License-Identifier: MIT
@@ -40,6 +40,7 @@ import {
   listSchemas,
   type DatabaseAssessment,
   type TableAssessment,
+  type RoutineAssessment,
   type ConnectionResponse,
 } from "@/lib/api";
 import { CONNECTIONS_UPDATED_EVENT } from "@/lib/connection-store";
@@ -48,86 +49,108 @@ import { CONNECTIONS_UPDATED_EVENT } from "@/lib/connection-store";
 // Tier stats bar
 // ---------------------------------------------------------------------------
 
+function assessmentObjectTotals(assessment: DatabaseAssessment) {
+  const tableSafe = assessment.safe_count ?? 0;
+  const tableWarning = assessment.warning_count ?? 0;
+  const tableBlocker = assessment.blocker_count ?? 0;
+  const routineSafe = assessment.routine_safe_count ?? 0;
+  const routineWarning = assessment.routine_warning_count ?? 0;
+  const routineBlocker = assessment.routine_blocker_count ?? 0;
+  return {
+    totalObjects: (assessment.total_tables ?? 0) + (assessment.total_routines ?? 0),
+    safe: tableSafe + routineSafe,
+    warning: tableWarning + routineWarning,
+    blocker: tableBlocker + routineBlocker,
+  };
+}
+
 function TierHealthBar({ assessment }: { assessment: DatabaseAssessment }) {
-  const total = assessment.total_tables || 1;
-  const safeW = (assessment.safe_count / total) * 100;
-  const warnW = (assessment.warning_count / total) * 100;
-  const blockW = (assessment.blocker_count / total) * 100;
+  const totals = assessmentObjectTotals(assessment);
+  const total = totals.totalObjects || 1;
+  const safeW = (totals.safe / total) * 100;
+  const warnW = (totals.warning / total) * 100;
+  const blockW = (totals.blocker / total) * 100;
   return (
     <div className="space-y-2">
       <div className="h-3 w-full rounded-full overflow-hidden flex">
         <div
           style={{ width: `${safeW}%` }}
           className="bg-emerald-500 transition-all duration-700"
-          title={`Safe: ${assessment.safe_count}`}
+          title={`Safe: ${totals.safe}`}
         />
         <div
           style={{ width: `${warnW}%` }}
           className="bg-amber-500 transition-all duration-700"
-          title={`Warning: ${assessment.warning_count}`}
+          title={`Warning: ${totals.warning}`}
         />
         <div
           style={{ width: `${blockW}%` }}
           className="bg-destructive transition-all duration-700"
-          title={`Blocker: ${assessment.blocker_count}`}
+          title={`Blocker: ${totals.blocker}`}
         />
       </div>
-      <div className="flex gap-4 text-xs text-muted-foreground">
+      <div className="flex flex-wrap gap-4 text-xs text-muted-foreground">
         <span className="flex items-center gap-1">
           <span className="h-2 w-2 rounded-full bg-emerald-500 inline-block" />
-          {assessment.safe_count} safe
+          {totals.safe} safe
         </span>
         <span className="flex items-center gap-1">
           <span className="h-2 w-2 rounded-full bg-amber-500 inline-block" />
-          {assessment.warning_count} warning
+          {totals.warning} warning
         </span>
         <span className="flex items-center gap-1">
           <span className="h-2 w-2 rounded-full bg-destructive inline-block" />
-          {assessment.blocker_count} blocker
+          {totals.blocker} blocker
         </span>
-        <span className="ml-auto">{assessment.total_tables} tables total</span>
+        <span className="ml-auto">
+          {assessment.total_tables} tables · {assessment.total_routines ?? 0} routines
+        </span>
       </div>
     </div>
   );
 }
 
 function TierStats({ assessment }: { assessment: DatabaseAssessment }) {
-  const total = assessment.total_tables || 1;
+  const totals = assessmentObjectTotals(assessment);
+  const total = totals.totalObjects || 1;
   return (
     <div className="space-y-4">
       <TierHealthBar assessment={assessment} />
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
         <Card>
           <CardContent className="pt-4">
-            <div className="text-3xl font-bold">{assessment.total_tables}</div>
-            <div className="text-sm text-muted-foreground mt-1">Total Tables</div>
+            <div className="text-3xl font-bold">{totals.totalObjects}</div>
+            <div className="text-sm text-muted-foreground mt-1">Total Objects</div>
+            <p className="text-[10px] text-muted-foreground mt-1">
+              {assessment.total_tables} tables · {assessment.total_routines ?? 0} routines
+            </p>
           </CardContent>
         </Card>
         <Card className="border-emerald-500/30">
           <CardContent className="pt-4">
-            <div className="text-3xl font-bold text-emerald-400">{assessment.safe_count}</div>
+            <div className="text-3xl font-bold text-emerald-400">{totals.safe}</div>
             <div className="text-sm text-muted-foreground mt-1 flex items-center gap-1">
               <ShieldCheck className="h-3.5 w-3.5" /> Safe
             </div>
-            <Progress value={(assessment.safe_count / total) * 100} className="h-1.5 mt-2 bg-muted [&>*]:bg-emerald-500" />
+            <Progress value={(totals.safe / total) * 100} className="h-1.5 mt-2 bg-muted [&>*]:bg-emerald-500" />
           </CardContent>
         </Card>
         <Card className="border-amber-500/30">
           <CardContent className="pt-4">
-            <div className="text-3xl font-bold text-amber-400">{assessment.warning_count}</div>
+            <div className="text-3xl font-bold text-amber-400">{totals.warning}</div>
             <div className="text-sm text-muted-foreground mt-1 flex items-center gap-1">
               <AlertTriangle className="h-3.5 w-3.5" /> Warning
             </div>
-            <Progress value={(assessment.warning_count / total) * 100} className="h-1.5 mt-2 bg-muted [&>*]:bg-amber-500" />
+            <Progress value={(totals.warning / total) * 100} className="h-1.5 mt-2 bg-muted [&>*]:bg-amber-500" />
           </CardContent>
         </Card>
         <Card className="border-red-500/30">
           <CardContent className="pt-4">
-            <div className="text-3xl font-bold text-red-400">{assessment.blocker_count}</div>
+            <div className="text-3xl font-bold text-red-400">{totals.blocker}</div>
             <div className="text-sm text-muted-foreground mt-1 flex items-center gap-1">
               <XCircle className="h-3.5 w-3.5" /> Blocker
             </div>
-            <Progress value={(assessment.blocker_count / total) * 100} className="h-1.5 mt-2 bg-muted [&>*]:bg-red-500" />
+            <Progress value={(totals.blocker / total) * 100} className="h-1.5 mt-2 bg-muted [&>*]:bg-red-500" />
           </CardContent>
         </Card>
       </div>
@@ -373,6 +396,157 @@ function TableRow({ table }: { table: TableAssessment }) {
   );
 }
 
+function routineTypeLabel(objectType: string): string {
+  return objectType === "function" ? "Function" : "Procedure";
+}
+
+function RoutineRow({ routine }: { routine: RoutineAssessment }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasDetails =
+    routine.blockers.length > 0 ||
+    routine.warnings.length > 0 ||
+    routine.prerequisites.length > 0 ||
+    routine.detected_patterns.length > 0 ||
+    (routine.table_dependencies?.length ?? 0) > 0;
+
+  return (
+    <>
+      <tr className="border-b border-border hover:bg-muted/30 transition-colors">
+        <td className="px-3 py-2 text-sm font-mono text-muted-foreground">
+          {routine.schema_name}
+        </td>
+        <td className="px-3 py-2 text-sm font-medium">{routine.routine_name}</td>
+        <td className="px-3 py-2">
+          <Badge variant="outline" className="text-[10px] font-normal">
+            {routineTypeLabel(routine.object_type)}
+          </Badge>
+        </td>
+        <td className="px-3 py-2">
+          <TierBadge tier={routine.migration_tier} />
+        </td>
+        <td className="px-3 py-2 text-sm">
+          <div className="flex items-center gap-2">
+            <Progress
+              value={routine.complexity_score}
+              className="h-1.5 w-16 bg-muted [&>*]:bg-primary"
+            />
+            <span className="text-muted-foreground">{routine.complexity_score}</span>
+          </div>
+        </td>
+        <td className="px-3 py-2 text-sm text-muted-foreground capitalize">
+          {routine.conversion_difficulty}
+        </td>
+        <td className="px-3 py-2 text-sm text-muted-foreground">
+          <span className="flex items-center gap-1">
+            <Clock className="h-3 w-3" />
+            {routine.estimated_minutes < 1
+              ? `${Math.round(routine.estimated_minutes * 60)}s`
+              : `${routine.estimated_minutes.toFixed(1)}m`}
+          </span>
+        </td>
+        <td className="px-3 py-2">
+          {hasDetails && (
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-6 w-6"
+              onClick={() => setExpanded(!expanded)}
+            >
+              {expanded ? (
+                <ChevronUp className="h-3.5 w-3.5" />
+              ) : (
+                <ChevronDown className="h-3.5 w-3.5" />
+              )}
+            </Button>
+          )}
+        </td>
+      </tr>
+      <tr className="border-b border-border bg-muted/10">
+        <td colSpan={8} className="p-0">
+          <div
+            className="overflow-hidden transition-all duration-200 ease-in-out"
+            style={{ maxHeight: expanded ? "800px" : "0px", opacity: expanded ? 1 : 0 }}
+          >
+            <div className="px-4 py-3">
+              <div className="grid gap-3 text-xs">
+                {routine.detected_patterns.length > 0 && (
+                  <p className="text-muted-foreground">
+                    T-SQL patterns:{" "}
+                    <span className="font-mono text-foreground">
+                      {routine.detected_patterns.join(", ")}
+                    </span>
+                  </p>
+                )}
+                {routine.blockers.length > 0 && (
+                  <div>
+                    <p className="font-semibold text-red-400 mb-1">Blockers</p>
+                    <ul className="space-y-1.5 text-muted-foreground">
+                      {routine.blockers.map((b, i) => (
+                        <li key={i} className="flex items-start gap-1.5">
+                          <XCircle className="h-3 w-3 mt-0.5 text-red-400 shrink-0" />
+                          <span>{b}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {routine.warnings.length > 0 && (
+                  <div>
+                    <p className="font-semibold text-amber-400 mb-1">Warnings</p>
+                    <ul className="space-y-1.5 text-muted-foreground">
+                      {routine.warnings.map((w, i) => (
+                        <li key={i} className="flex items-start gap-1.5">
+                          <AlertTriangle className="h-3 w-3 mt-0.5 text-amber-400 shrink-0" />
+                          <span>{w}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {(routine.table_dependencies?.length ?? 0) > 0 && (
+                  <div>
+                    <p className="font-semibold text-muted-foreground mb-1">Table dependencies</p>
+                    <ul className="space-y-0.5 text-muted-foreground font-mono">
+                      {routine.table_dependencies!.map((dep) => (
+                        <li key={`${dep.source_schema}.${dep.object_name}`}>
+                          {dep.source_schema}.{dep.object_name} → {dep.target_schema}.
+                          {dep.target_object}
+                          {dep.status === "missing" && (
+                            <span className="text-red-400"> (missing on target)</span>
+                          )}
+                          {dep.status === "included_in_job" && (
+                            <span className="text-emerald-400"> (included in job)</span>
+                          )}
+                          {dep.status === "on_target" && (
+                            <span className="text-emerald-400"> (on target)</span>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {routine.prerequisites.length > 0 && (
+                  <div>
+                    <p className="font-semibold text-blue-400 mb-1">Prerequisites</p>
+                    <ul className="space-y-0.5 text-muted-foreground">
+                      {routine.prerequisites.map((p, i) => (
+                        <li key={i} className="flex items-start gap-1.5">
+                          <Info className="h-3 w-3 mt-0.5 text-blue-400 shrink-0" />
+                          {p}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </td>
+      </tr>
+    </>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Inner page (needs useSearchParams → Suspense boundary)
 // ---------------------------------------------------------------------------
@@ -390,6 +564,7 @@ function AssessmentContent() {
   const [assessment, setAssessment] = useState<DatabaseAssessment | null>(null);
   const [filter, setFilter] = useState("");
   const [tierFilter, setTierFilter] = useState<string>("ALL");
+  const [objectView, setObjectView] = useState<"tables" | "routines">("tables");
 
   useEffect(() => {
     const loadConnections = () => {
@@ -429,8 +604,14 @@ function AssessmentContent() {
         schema: schema || "dbo",
       });
       setAssessment(result);
+      if (result.total_tables === 0 && (result.total_routines ?? 0) > 0) {
+        setObjectView("routines");
+      } else {
+        setObjectView("tables");
+      }
+      const routineCount = result.total_routines ?? result.routines?.length ?? 0;
       toast.success(
-        `Assessment complete — ${result.total_tables} tables, overall: ${result.overall_tier}`,
+        `Assessment complete — ${result.total_tables} tables, ${routineCount} routines, overall: ${result.overall_tier}`,
       );
     } catch (e: unknown) {
       toast.error(e instanceof Error ? e.message : "Assessment failed");
@@ -439,13 +620,24 @@ function AssessmentContent() {
     }
   };
 
-  const filtered = assessment?.tables.filter((t) => {
+  const filteredTables = assessment?.tables.filter((t) => {
     const matchesTier = tierFilter === "ALL" || t.migration_tier === tierFilter;
     const search = filter.toLowerCase();
     const matchesText =
       !search ||
       t.table_name.toLowerCase().includes(search) ||
       t.schema_name.toLowerCase().includes(search);
+    return matchesTier && matchesText;
+  }) ?? [];
+
+  const filteredRoutines = assessment?.routines?.filter((r) => {
+    const matchesTier = tierFilter === "ALL" || r.migration_tier === tierFilter;
+    const search = filter.toLowerCase();
+    const matchesText =
+      !search ||
+      r.routine_name.toLowerCase().includes(search) ||
+      r.schema_name.toLowerCase().includes(search) ||
+      r.object_type.toLowerCase().includes(search);
     return matchesTier && matchesText;
   }) ?? [];
 
@@ -459,7 +651,7 @@ function AssessmentContent() {
     <div className="p-6 space-y-6">
       <PageHeader
         title="Migration Assessment"
-        description="Rate each table SAFE / WARNING / BLOCKER and estimate migration effort"
+        description="Rate tables and stored procedures/functions SAFE / WARNING / BLOCKER and estimate migration effort"
       />
 
       {/* Tier explanation */}
@@ -469,7 +661,7 @@ function AssessmentContent() {
             <ShieldCheck className="h-4 w-4" /> SAFE
           </p>
           <p className="text-xs text-muted-foreground">
-            Table can be migrated directly. All column types map cleanly to PostgreSQL equivalents with no manual intervention required.
+            Object can be migrated directly. Tables map cleanly to PostgreSQL; routines convert with simple T-SQL patterns.
           </p>
         </div>
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 space-y-1">
@@ -477,7 +669,7 @@ function AssessmentContent() {
             <AlertTriangle className="h-4 w-4" /> WARNING
           </p>
           <p className="text-xs text-muted-foreground">
-            Table can be migrated but needs review. Expand the row to see specific warnings — e.g. collation differences, implicit type conversions, or LOB columns that may need streaming.
+            Migration can proceed with review. Tables may need collation or LOB handling; routines may use patterns that need conversion review.
           </p>
         </div>
         <div className="rounded-lg border border-red-500/30 bg-red-500/5 px-4 py-3 space-y-1">
@@ -485,7 +677,7 @@ function AssessmentContent() {
             <XCircle className="h-4 w-4" /> BLOCKER
           </p>
           <p className="text-xs text-muted-foreground">
-            Table cannot be migrated automatically. Expand the row to see what's blocking — e.g. unsupported data types, missing CDC configuration, or schema prerequisites that must be resolved first.
+            Cannot migrate automatically. Tables may have unsupported types; routines may use sp_executesql, CLR, or other extreme T-SQL constructs.
           </p>
         </div>
       </div>
@@ -630,16 +822,38 @@ function AssessmentContent() {
             </Card>
           )}
 
-          {/* Table list */}
+          {/* Object list */}
           <Card>
-            <CardHeader className="pb-2">
+            <CardHeader className="pb-2 space-y-3">
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  variant={objectView === "tables" ? "default" : "outline"}
+                  className="text-xs"
+                  onClick={() => setObjectView("tables")}
+                >
+                  Tables ({assessment.total_tables})
+                </Button>
+                <Button
+                  size="sm"
+                  variant={objectView === "routines" ? "default" : "outline"}
+                  className="text-xs"
+                  onClick={() => setObjectView("routines")}
+                >
+                  Procedures &amp; Functions ({assessment.total_routines ?? assessment.routines?.length ?? 0})
+                </Button>
+              </div>
               <div className="flex flex-col md:flex-row gap-3">
                 <div className="relative flex-1">
                   <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
                   <Input
                     value={filter}
                     onChange={(e) => setFilter(e.target.value)}
-                    placeholder="Filter tables…"
+                    placeholder={
+                      objectView === "tables"
+                        ? "Filter tables…"
+                        : "Filter procedures & functions…"
+                    }
                     className="pl-8"
                   />
                 </div>
@@ -660,32 +874,67 @@ function AssessmentContent() {
             </CardHeader>
             <CardContent className="p-0">
               <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-border bg-muted/30">
-                      <th className="px-3 py-2 text-left text-xs font-semibold text-muted-foreground">Schema</th>
-                      <th className="px-3 py-2 text-left text-xs font-semibold text-muted-foreground">Table</th>
-                      <th className="px-3 py-2 text-left text-xs font-semibold text-muted-foreground">Tier</th>
-                      <th className="px-3 py-2 text-left text-xs font-semibold text-muted-foreground">Score</th>
-                      <th className="px-3 py-2 text-left text-xs font-semibold text-muted-foreground">Rows</th>
-                      <th className="px-3 py-2 text-left text-xs font-semibold text-muted-foreground">Est. Time</th>
-                      <th className="px-3 py-2" />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filtered.length === 0 ? (
-                      <tr>
-                        <td colSpan={7} className="px-3 py-8 text-center text-muted-foreground text-sm">
-                          No tables match your filter
-                        </td>
+                {objectView === "tables" ? (
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-border bg-muted/30">
+                        <th className="px-3 py-2 text-left text-xs font-semibold text-muted-foreground">Schema</th>
+                        <th className="px-3 py-2 text-left text-xs font-semibold text-muted-foreground">Table</th>
+                        <th className="px-3 py-2 text-left text-xs font-semibold text-muted-foreground">Tier</th>
+                        <th className="px-3 py-2 text-left text-xs font-semibold text-muted-foreground">Score</th>
+                        <th className="px-3 py-2 text-left text-xs font-semibold text-muted-foreground">Rows</th>
+                        <th className="px-3 py-2 text-left text-xs font-semibold text-muted-foreground">Est. Time</th>
+                        <th className="px-3 py-2" />
                       </tr>
-                    ) : (
-                      filtered.map((t) => (
-                        <TableRow key={`${t.schema_name}.${t.table_name}`} table={t} />
-                      ))
-                    )}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {filteredTables.length === 0 ? (
+                        <tr>
+                          <td colSpan={7} className="px-3 py-8 text-center text-muted-foreground text-sm">
+                            No tables match your filter
+                          </td>
+                        </tr>
+                      ) : (
+                        filteredTables.map((t) => (
+                          <TableRow key={`${t.schema_name}.${t.table_name}`} table={t} />
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                ) : (
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-border bg-muted/30">
+                        <th className="px-3 py-2 text-left text-xs font-semibold text-muted-foreground">Schema</th>
+                        <th className="px-3 py-2 text-left text-xs font-semibold text-muted-foreground">Name</th>
+                        <th className="px-3 py-2 text-left text-xs font-semibold text-muted-foreground">Type</th>
+                        <th className="px-3 py-2 text-left text-xs font-semibold text-muted-foreground">Tier</th>
+                        <th className="px-3 py-2 text-left text-xs font-semibold text-muted-foreground">Score</th>
+                        <th className="px-3 py-2 text-left text-xs font-semibold text-muted-foreground">Difficulty</th>
+                        <th className="px-3 py-2 text-left text-xs font-semibold text-muted-foreground">Est. Time</th>
+                        <th className="px-3 py-2" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredRoutines.length === 0 ? (
+                        <tr>
+                          <td colSpan={8} className="px-3 py-8 text-center text-muted-foreground text-sm">
+                            {(assessment.routines?.length ?? 0) === 0
+                              ? "No stored procedures or functions found in this schema"
+                              : "No routines match your filter"}
+                          </td>
+                        </tr>
+                      ) : (
+                        filteredRoutines.map((r) => (
+                          <RoutineRow
+                            key={`${r.schema_name}.${r.object_type}.${r.routine_name}`}
+                            routine={r}
+                          />
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                )}
               </div>
             </CardContent>
           </Card>
@@ -696,7 +945,7 @@ function AssessmentContent() {
         <EmptyState
           icon={ShieldCheck}
           title="No assessment yet"
-          description="Select a SQL Server source connection and click Run Assessment to analyse migration readiness."
+          description="Select a SQL Server source connection and click Run Assessment to analyse table and routine migration readiness."
         />
       )}
     </div>

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from uuid import UUID
 
+from collections import defaultdict
+
 from application.go_engine_migration.durable_migration_job_log_writer import (
     DurableMigrationJobLogWriter,
 )
@@ -17,6 +19,7 @@ from application.go_engine_migration.target_table_provisioner import provision_t
 from application.migration_service import make_connector
 from apps.api.connection_store import get_entry
 from domains.migration.migration_engine import MigrationJob
+from domains.migration.target_schema_resolver import resolve_target_schema
 from shared.logging.structured_logging import get_logger
 
 logger = get_logger(__name__)
@@ -34,30 +37,36 @@ async def provision_tables_for_job(job: MigrationJob) -> list[str]:
     if not tgt_entry:
         raise ValueError("Target connection not found")
 
-    source_schema = job.tables[0].schema_name or "dbo"
-    target_schema = job.tables[0].target_schema or "public"
-    table_names = [p.table_name for p in job.tables]
+    provision_groups: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for plan in job.tables:
+        src = plan.schema_name or "dbo"
+        tgt = resolve_target_schema(src, plan.target_schema)
+        provision_groups[(src, tgt)].append(plan.table_name)
 
     src_connector, _ = await make_connector(src_entry)
     tgt_connector, _ = await make_connector(tgt_entry)
     await src_connector.connect()
     await tgt_connector.connect()
     try:
-        created = await provision_target_tables(
-            src_connector,
-            tgt_connector,
-            database=src_entry.get("database", ""),
-            source_schema=source_schema,
-            target_schema=target_schema,
-            table_names=table_names,
-        )
+        created: list[str] = []
+        for (source_schema, target_schema), table_names in provision_groups.items():
+            batch = await provision_target_tables(
+                src_connector,
+                tgt_connector,
+                database=src_entry.get("database", ""),
+                source_schema=source_schema,
+                target_schema=target_schema,
+                table_names=table_names,
+            )
+            created.extend(batch)
     finally:
         await src_connector.disconnect()
         await tgt_connector.disconnect()
 
     if created:
+        schemas_used = sorted({tgt for _, tgt in provision_groups})
         msg = (
-            f"Provisioned {len(created)} target table(s) in {target_schema}: "
+            f"Provisioned {len(created)} target table(s) in {', '.join(schemas_used)}: "
             f"{', '.join(created)}"
         )
         writer = DurableMigrationJobLogWriter()

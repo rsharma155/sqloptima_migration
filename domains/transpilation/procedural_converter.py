@@ -358,9 +358,80 @@ class ProceduralConverter:
         return "", warnings, parse_errors
 
     @staticmethod
-    def _body_transform_fallback(preprocessed: str, obj: ProceduralObject) -> str:
+    def _needs_body_transform_fallback(
+        preprocessed: str,
+        transpiled: str,
+        source_body: str | None = None,
+    ) -> bool:
+        """True when SQLGlot output is untrustworthy for complex T-SQL constructs."""
+        if not transpiled.strip():
+            return True
+
+        src = (source_body or preprocessed).upper()
+        tr = transpiled
+        pre = preprocessed.upper()
+
+        # Cursor fetch loops
+        if "CURSOR" in src and ("@@FETCH_STATUS" in src or "FETCH NEXT" in src):
+            if re.search(r"\bOPEN\s+AS\b", tr, re.IGNORECASE):
+                return True
+            if "CURSOR FOR" in tr.upper() and " LOOP" not in tr.upper():
+                return True
+
+        # TRY/CATCH and SQL Server error metadata — SQLGlot truncates or mangles the body
+        if "BEGIN TRY" in src or "BEGIN CATCH" in src:
+            return True
+        if any(token in src for token in ("ERROR_NUMBER()", "ERROR_MESSAGE()", "XACT_STATE()")):
+            return True
+
+        # Recursive CTEs and SQL Server query hints — prefer body-transform path
+        if "UNION ALL" in src and re.search(r"\bWITH\b", source_body or preprocessed, re.IGNORECASE):
+            return True
+        if re.search(r"\bOPTION\s*\(", source_body or preprocessed, re.IGNORECASE):
+            return True
+
+        if re.search(r"\bOUTPUT\b", source_body or preprocessed, re.IGNORECASE):
+            return True
+
+        # RETURNING in preprocessed body before SQLGlot (OUTPUT already rewritten)
+        if re.search(r"\bRETURNING\b", pre, re.IGNORECASE):
+            return True
+
+        if re.search(r"\bsp_executesql\b", source_body or preprocessed, re.IGNORECASE):
+            return True
+        if re.search(r"\bGOTO\b", source_body or preprocessed, re.IGNORECASE):
+            return True
+
+        # SQLGlot $variable artifacts (e.g. $StartProductID)
+        if re.search(r"\$\w+", tr):
+            return True
+
+        # Severe truncation vs source body
+        if len(tr.strip()) < max(80, len(preprocessed.strip()) // 4):
+            return True
+
+        return False
+
+    @staticmethod
+    def _body_transform_fallback(source_body: str, obj: ProceduralObject) -> str:
         from domains.transpilation.converters.plpgsql._body_transforms import TsqlBodyConverter
         from domains.transpilation.converters.plpgsql._models import ParamInfo
+        from domains.transpilation.converters.plpgsql._output_builder import TsqlToPlpgsqlConverter
+
+        if obj.object_type in (ObjectType.PROCEDURE, ObjectType.FUNCTION):
+            full_ddl = obj.body_sql.strip()
+            if full_ddl.upper().startswith("CREATE"):
+                return TsqlToPlpgsqlConverter().convert(full_ddl)
+
+            ddl_kw = "PROCEDURE" if obj.object_type == ObjectType.PROCEDURE else "FUNCTION"
+            # Strip accidental AS/BEGIN prefix when strip_ddl_wrapper missed outer wrapper
+            inner = source_body.strip()
+            inner = re.sub(r"^AS\s+BEGIN\s+", "", inner, flags=re.IGNORECASE)
+            ddl = (
+                f"CREATE {ddl_kw} {obj.schema_name}.{obj.object_name}\n"
+                f"AS\nBEGIN\n{inner}\nEND"
+            )
+            return TsqlToPlpgsqlConverter().convert(ddl)
 
         param_infos = [
             ParamInfo(
@@ -372,7 +443,7 @@ class ProceduralConverter:
             )
             for p in obj.parameters
         ]
-        return TsqlBodyConverter.convert(preprocessed, param_infos)
+        return TsqlBodyConverter.convert(source_body, param_infos)
 
     @staticmethod
     def detect_object_type(sql: str) -> str:
@@ -433,7 +504,7 @@ class ProceduralConverter:
                 for err in parse_errors[:3]:
                     result.warnings.append(f"T-SQL parse note: {err}")
             if not converted.strip():
-                converted = self._body_transform_fallback(preprocessed, obj)
+                converted = self._body_transform_fallback(sql_body, obj)
                 result.body_transform_fallback = True
                 result.warnings.append(
                     "Used PL/pgSQL body-transform fallback (SQLGlot transpile unavailable)"
@@ -485,7 +556,12 @@ class ProceduralConverter:
                 obj_type = ObjectType.FUNCTION.value
 
         if obj_type in (ObjectType.PROCEDURE.value, ObjectType.FUNCTION.value):
-            return self._auto_convert_sproc(sql)
+            hint = (
+                ObjectType.FUNCTION
+                if obj_type == ObjectType.FUNCTION.value
+                else ObjectType.PROCEDURE
+            )
+            return self._convert_sproc_unified(sql, object_type_hint=hint)
 
         if obj_type == ObjectType.TRIGGER.value:
             import re
@@ -506,16 +582,38 @@ class ProceduralConverter:
 
         return self.convert_adhoc(sql)
 
-    def _auto_convert_sproc(self, sql: str) -> ConversionResult:
-        """Use the comprehensive TsqlToPlpgsqlConverter for PROCEDURE/FUNCTION objects."""
+    def _convert_sproc_unified(
+        self,
+        sql: str,
+        *,
+        object_type_hint: ObjectType | None = None,
+    ) -> ConversionResult:
+        """Single pipeline for all PROCEDURE/FUNCTION conversions.
+
+        Phase 0: dynamic SQL pre-pass (inline EXEC/sp_executesql)
+        Phase 1: PivotConverter when applicable
+        Phase 2: TsqlToPlpgsqlConverter (always)
+        Phase 3: schema mapping (when configured)
+        """
+        from domains.transpilation.converters.pivot_converter import PivotConverter
         from domains.transpilation.converters.tsql_to_plpgsql import (
             TsqlHeaderParser,
             TsqlToPlpgsqlConverter,
         )
+        from domains.transpilation.dynamic_sql.prepass import apply_dynamic_sql_prepass
 
-        # Parse header for metadata (used to build ProceduralObject for result)
         unblocked, unblock_warnings, unblock_steps = self._unblock_source(sql, aggressive=False)
-        info = TsqlHeaderParser.parse(unblocked)
+        prepass = apply_dynamic_sql_prepass(unblocked)
+        working_sql = prepass.sql
+
+        info = TsqlHeaderParser.parse(working_sql)
+        detected_type = object_type_hint
+        if detected_type is None:
+            detected_type = (
+                ObjectType.FUNCTION
+                if re.search(r"\bCREATE\s+FUNCTION\b", working_sql, re.IGNORECASE)
+                else ObjectType.PROCEDURE
+            )
         params = [
             ParameterInfo(
                 name=f"p_{p.name}",
@@ -526,26 +624,40 @@ class ProceduralConverter:
             for p in info.parameters
         ]
         obj = ProceduralObject(
-            object_type=ObjectType.PROCEDURE,
+            object_type=detected_type,
             schema_name=info.schema,
             object_name=info.name,
             parameters=params,
-            body_sql=unblocked,
-            difficulty=TSqlPatternMatcher.detect_difficulty(unblocked),
-            detected_patterns=TSqlPatternMatcher.detect_patterns(unblocked),
+            body_sql=working_sql,
+            difficulty=TSqlPatternMatcher.detect_difficulty(working_sql),
+            detected_patterns=TSqlPatternMatcher.detect_patterns(working_sql),
         )
         result = ConversionResult(source=obj)
         result.warnings.extend(unblock_warnings)
         self._record_unblockers(result, unblock_steps)
+        if prepass.applied:
+            result.warnings.extend(prepass.warnings)
+
+        if PivotConverter.can_handle(working_sql):
+            pivot_result = PivotConverter.convert(working_sql)
+            result.warnings.extend(pivot_result.warnings)
+            if pivot_result.success and pivot_result.converted_sql:
+                result.converted_sql = pivot_result.converted_sql
+                result.success = True
+                if self._schema_mapper is not None:
+                    result.converted_sql = self._schema_mapper.apply(result.converted_sql)
+                return result
+
         try:
             try:
-                result.converted_sql = TsqlToPlpgsqlConverter().convert(unblocked)
+                result.converted_sql = TsqlToPlpgsqlConverter().convert(working_sql)
             except Exception:
                 aggressive_sql, aggressive_warnings, aggressive_steps = self._unblock_source(
-                    unblocked, aggressive=True
+                    working_sql, aggressive=True
                 )
                 result.warnings.extend(aggressive_warnings)
                 self._record_unblockers(result, aggressive_steps)
+                aggressive_sql = apply_dynamic_sql_prepass(aggressive_sql).sql
                 result.converted_sql = TsqlToPlpgsqlConverter().convert(aggressive_sql)
                 result.warnings.append(
                     "Retried conversion with aggressive T-SQL parse unblockers after initial failure"
@@ -559,7 +671,32 @@ class ProceduralConverter:
         except Exception as exc:
             result.errors.append(str(exc))
             result.success = False
+            return result
+
+        if self._schema_mapper is not None and result.converted_sql:
+            result.converted_sql = self._schema_mapper.apply(result.converted_sql)
         return result
+
+    def _auto_convert_sproc(self, sql: str) -> ConversionResult:
+        """Backward-compatible alias for the unified sproc pipeline."""
+        return self._convert_sproc_unified(sql)
+
+    @staticmethod
+    def _ensure_sproc_ddl(
+        body: str,
+        *,
+        schema: str,
+        name: str,
+        object_type: ObjectType,
+    ) -> str:
+        stripped = body.strip()
+        if stripped.upper().startswith("CREATE"):
+            return stripped
+        keyword = "PROCEDURE" if object_type == ObjectType.PROCEDURE else "FUNCTION"
+        return (
+            f"CREATE {keyword} {schema}.{name}\n"
+            f"AS\nBEGIN\n{stripped}\nEND"
+        )
 
     def convert_procedure(
         self,
@@ -568,17 +705,14 @@ class ProceduralConverter:
         parameters: list[ParameterInfo],
         body: str,
     ) -> ConversionResult:
-        """Convert a T-SQL stored procedure to PL/pgSQL function."""
-        obj = ProceduralObject(
+        """Convert a T-SQL stored procedure to PL/pgSQL."""
+        sql = self._ensure_sproc_ddl(
+            body,
+            schema=schema,
+            name=name,
             object_type=ObjectType.PROCEDURE,
-            schema_name=schema,
-            object_name=name,
-            parameters=parameters,
-            body_sql=body,
-            difficulty=TSqlPatternMatcher.detect_difficulty(body),
-            detected_patterns=TSqlPatternMatcher.detect_patterns(body),
         )
-        return self._convert(obj)
+        return self._convert_sproc_unified(sql, object_type_hint=ObjectType.PROCEDURE)
 
     def convert_function(
         self,
@@ -590,18 +724,13 @@ class ProceduralConverter:
         returns_table: bool = False,
     ) -> ConversionResult:
         """Convert a T-SQL function to PL/pgSQL function."""
-        obj = ProceduralObject(
+        sql = self._ensure_sproc_ddl(
+            body,
+            schema=schema,
+            name=name,
             object_type=ObjectType.FUNCTION,
-            schema_name=schema,
-            object_name=name,
-            parameters=parameters,
-            body_sql=body,
-            return_type=return_type,
-            returns_table=returns_table,
-            difficulty=TSqlPatternMatcher.detect_difficulty(body),
-            detected_patterns=TSqlPatternMatcher.detect_patterns(body),
         )
-        return self._convert(obj)
+        return self._convert_sproc_unified(sql, object_type_hint=ObjectType.FUNCTION)
 
     def convert_trigger(
         self,
@@ -668,8 +797,9 @@ class ProceduralConverter:
             flags=_re.IGNORECASE,
         )
 
-        # @@FETCH_STATUS
-        result = _re.sub(r'@@FETCH_STATUS(?![a-zA-Z_])', 'FOUND', result, flags=_re.IGNORECASE)
+        # @@FETCH_STATUS — do not rewrite here. Replacing @@FETCH_STATUS → FOUND turns
+        # `WHILE @@FETCH_STATUS = 0` into invalid `WHILE FOUND = 0` and breaks cursor
+        # loop conversion in TsqlBodyConverter.
 
         # @@ERROR
         result = _re.sub(r'@@ERROR(?![a-zA-Z_])', 'SQLSTATE', result, flags=_re.IGNORECASE)
@@ -812,44 +942,55 @@ class ProceduralConverter:
                 for err in parse_errors[:3]:
                     result.warnings.append(f"T-SQL parse note: {err}")
 
-            if not converted.strip():
-                converted = self._body_transform_fallback(preprocessed, obj)
+            body_already_wrapped = False
+            if self._needs_body_transform_fallback(preprocessed, converted, inner_body):
+                converted = self._body_transform_fallback(inner_body, obj)
+                result.body_transform_fallback = True
+                result.warnings.append(
+                    "Used PL/pgSQL body-transform fallback (SQLGlot cannot reliably transpile this T-SQL construct)"
+                )
+                body_already_wrapped = True
+            elif not converted.strip():
+                converted = self._body_transform_fallback(inner_body, obj)
                 result.body_transform_fallback = True
                 result.warnings.append(
                     "Used PL/pgSQL body-transform fallback (SQLGlot transpile unavailable)"
                 )
+                body_already_wrapped = converted.strip().upper().startswith("CREATE")
 
-            # Post-transpilation pattern conversions (FOR XML, MERGE, MAXRECURSION)
-            # Only annotates constructs SQLGlot could NOT handle on its own.
-            post_result = TsqlPatternConverter().postprocess(converted)
-            converted = post_result.sql
-            result.warnings.extend(post_result.warnings)
-
-            # Apply post-transpilation fixes: convert T-SQL function calls
-            converted = TsqlExpressionConverter.convert_expression(converted)
-
-            # Apply Phase 1-2 enhancements on the inner body (before PL/pgSQL wrapping)
-            # so the AST operates on plain SQL, not on dollar-quoted PL/pgSQL blocks.
             ast_fixes = 0
-            if self._enhanced_converter:
-                ast_result = ASTEnhancer.enhance(converted, apply_phase1=True, apply_phase2=True)
-                converted = ast_result.sql
-                result.warnings.extend(ast_result.warnings)
-                ast_fixes = ast_result.fixes_applied
+            if not body_already_wrapped:
+                # Post-transpilation pattern conversions (FOR XML, MERGE, MAXRECURSION)
+                post_result = TsqlPatternConverter().postprocess(converted)
+                converted = post_result.sql
+                result.warnings.extend(post_result.warnings)
 
-            # Apply PL/pgSQL wrapper
-            converted = self._apply_plpgsql_wrapper(obj, converted)
+                converted = TsqlExpressionConverter.convert_expression(converted)
 
-            # Apply Phase 3-4 enhancements on the wrapped PL/pgSQL (regex-based)
-            if self._enhanced_converter:
-                enhancement_result = self._enhanced_converter.apply_phase3_and_4(converted)
-                converted = enhancement_result.sql
-                result.warnings.extend(enhancement_result.warnings)
+                if self._enhanced_converter:
+                    ast_result = ASTEnhancer.enhance(converted, apply_phase1=True, apply_phase2=True)
+                    converted = ast_result.sql
+                    result.warnings.extend(ast_result.warnings)
+                    ast_fixes = ast_result.fixes_applied
 
-                if ast_fixes + enhancement_result.fixes_applied > 0:
-                    result.warnings.append(
-                        f"Applied {ast_fixes + enhancement_result.fixes_applied} total enhancement fixes"
-                    )
+                converted = self._apply_plpgsql_wrapper(obj, converted)
+
+                if self._enhanced_converter:
+                    enhancement_result = self._enhanced_converter.apply_phase3_and_4(converted)
+                    converted = enhancement_result.sql
+                    result.warnings.extend(enhancement_result.warnings)
+                    if ast_fixes + enhancement_result.fixes_applied > 0:
+                        result.warnings.append(
+                            f"Applied {ast_fixes + enhancement_result.fixes_applied} total enhancement fixes"
+                        )
+            elif self._enhanced_converter:
+                # Wrapped PL/pgSQL from TsqlToPlpgsqlConverter — skip AST/Phase 4 (they corrupt DDL).
+                pass
+
+            if body_already_wrapped:
+                post_result = TsqlPatternConverter().postprocess(converted)
+                converted = post_result.sql
+                result.warnings.extend(post_result.warnings)
 
             # Add warnings for complex patterns
             if obj.difficulty in (ConversionDifficulty.COMPLEX, ConversionDifficulty.EXTREME):
@@ -857,6 +998,9 @@ class ProceduralConverter:
                     f"Object contains complex patterns: {', '.join(obj.detected_patterns)}"
                 )
                 result.warnings.append("Manual review recommended after conversion")
+
+            if self._schema_mapper is not None:
+                converted = self._schema_mapper.apply(converted)
 
             result.converted_sql = converted
             result.success = True

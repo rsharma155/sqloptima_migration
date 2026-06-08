@@ -1,38 +1,42 @@
-"""Unit tests for Go dispatch column/type resolution."""
+"""Tests for cast-safe column resolution during Go dispatch."""
 
 from __future__ import annotations
 
-from shared.kernel.database_object import Column, DataType
+from unittest.mock import AsyncMock
+
+import pytest
+
 from application.go_engine_migration.go_migration_column_resolver import (
-    format_sqlserver_column_type,
+    resolve_source_table_columns,
 )
 
 
-def test_format_sqlserver_nvarchar_max():
-    col = Column(
-        table_id=None,  # type: ignore[arg-type]
-        column_name="Notes",
-        ordinal_position=1,
-        data_type=DataType(type_name="nvarchar", max_length=-1),
+@pytest.mark.asyncio
+async def test_resolve_columns_uses_catalog_not_select_star():
+    connector = AsyncMock()
+    connector.execute = AsyncMock(
+        return_value=[
+            {"column_name": "id"},
+            {"column_name": "col_sql_variant"},
+            {"column_name": "col_hierarchyid"},
+        ],
     )
-    assert format_sqlserver_column_type(col) == "nvarchar(max)"
 
-
-def test_format_sqlserver_decimal_with_scale():
-    col = Column(
-        table_id=None,  # type: ignore[arg-type]
-        column_name="Amount",
-        ordinal_position=1,
-        data_type=DataType(type_name="decimal", precision=18, scale=2),
+    cols = await resolve_source_table_columns(
+        connector, "dbo", "dt_MiscTypes", ["*"],
     )
-    assert format_sqlserver_column_type(col) == "decimal(18,2)"
+
+    assert cols == ["id", "col_sql_variant", "col_hierarchyid"]
+    sql = connector.execute.call_args[0][0]
+    assert "sys.columns" in sql
+    assert "SELECT TOP 1 *" not in sql
 
 
-def test_format_sqlserver_int():
-    col = Column(
-        table_id=None,  # type: ignore[arg-type]
-        column_name="BookingId",
-        ordinal_position=1,
-        data_type=DataType(type_name="int"),
+@pytest.mark.asyncio
+async def test_resolve_columns_returns_explicit_list_unchanged():
+    connector = AsyncMock()
+    cols = await resolve_source_table_columns(
+        connector, "dbo", "Orders", ["OrderId", "Total"],
     )
-    assert format_sqlserver_column_type(col) == "int"
+    assert cols == ["OrderId", "Total"]
+    connector.execute.assert_not_called()

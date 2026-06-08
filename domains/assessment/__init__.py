@@ -10,6 +10,7 @@ from domains.assessment.assessment_engine import (
     AssessmentEngine,
     DatabaseAssessment,
     MigrationTier,
+    RoutineAssessment,
     TableAssessment,
 )
 
@@ -17,5 +18,6 @@ __all__ = [
     "AssessmentEngine",
     "DatabaseAssessment",
     "MigrationTier",
+    "RoutineAssessment",
     "TableAssessment",
 ]
