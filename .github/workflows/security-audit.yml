@@ -15,12 +15,25 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-      - name: Install project + pip-audit
+      - name: Install dependencies + pip-audit
         run: |
-          pip install ".[dev]"
+          pip install --upgrade pip
           pip install pip-audit
+          python <<'EOF'
+          import subprocess
+          import sys
+          import tomllib
+
+          with open("pyproject.toml", "rb") as f:
+              project = tomllib.load(f)
+          deps = (
+              project["project"]["dependencies"]
+              + project["project"]["optional-dependencies"]["dev"]
+          )
+          subprocess.check_call([sys.executable, "-m", "pip", "install", *deps])
+          EOF
       - name: Run pip-audit
-        run: pip-audit --desc --skip-editable
+        run: pip-audit --desc
 
   sbom:
     runs-on: ubuntu-latest
