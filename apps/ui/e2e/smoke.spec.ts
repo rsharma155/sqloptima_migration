@@ -9,7 +9,7 @@ test.describe("UI smoke", () => {
       timeout: 15_000,
     });
     await expect(page.getByLabel(/username/i)).toBeVisible();
-    await expect(page.getByLabel(/password/i)).toBeVisible();
+    await expect(page.getByRole("textbox", { name: /password/i })).toBeVisible();
     await expect(page.getByRole("button", { name: /sign in/i })).toBeVisible({
       timeout: 15_000,
     });
