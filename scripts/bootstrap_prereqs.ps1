@@ -144,8 +144,6 @@ Ensure-Node
 Ensure-Go
 Save-PathEnv
 Write-Host ""
-match '^[yY](es)?$')
-}
 
 Write-Host ""
 Write-Host "  Bootstrapping prerequisites..." -ForegroundColor White
