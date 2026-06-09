@@ -153,6 +153,25 @@ async def list_connections(
 @router.post("/connections", response_model=ConnectionResponse)
 async def create_connection(req: ConnectionCreateRequest, user: dict = require_role(UserRole.OPERATOR)):
     from apps.api.dependencies import get_secrets
+    
+    # Validation: database name is mandatory (handled by Pydantic str type, but we check for empty)
+    if not req.database.strip():
+        raise HTTPException(status_code=400, detail="Database name is mandatory")
+        
+    # Validation: do not allow 'postgres' for PostgreSQL target connections
+    if req.type == "target" and req.database.strip().lower() == "postgres":
+        raise HTTPException(
+            status_code=400,
+            detail="The default 'postgres' database cannot be used as a target for migrations. Please create a new target database for the migration."
+        )
+
+    # Validation: do not allow SQL Server system databases for source connections
+    if req.type == "source" and req.database.strip().lower() in ("master", "model", "msdb", "tempdb", "distribution"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"The system database '{req.database.strip()}' cannot be used for migration. Please select a user database."
+        )
+
     if _find_duplicate_name(req.name):
         raise HTTPException(
             status_code=409,
@@ -175,6 +194,25 @@ async def create_connection(req: ConnectionCreateRequest, user: dict = require_r
 @router.put("/connections/{connection_id}", response_model=ConnectionResponse)
 async def update_connection(connection_id: str, req: ConnectionCreateRequest, _: dict = require_role(UserRole.OPERATOR)):
     from apps.api.dependencies import get_secrets
+
+    # Validation: database name is mandatory
+    if not req.database.strip():
+        raise HTTPException(status_code=400, detail="Database name is mandatory")
+        
+    # Validation: do not allow 'postgres' for PostgreSQL target connections
+    if req.type == "target" and req.database.strip().lower() == "postgres":
+        raise HTTPException(
+            status_code=400,
+            detail="The default 'postgres' database cannot be used as a target for migrations. Please create a new target database for the migration."
+        )
+
+    # Validation: do not allow SQL Server system databases for source connections
+    if req.type == "source" and req.database.strip().lower() in ("master", "model", "msdb", "tempdb", "distribution"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"The system database '{req.database.strip()}' cannot be used for migration. Please select a user database."
+        )
+
     existing = get_entry(connection_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Connection not found")

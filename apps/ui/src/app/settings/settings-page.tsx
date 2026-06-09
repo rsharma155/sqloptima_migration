@@ -21,6 +21,7 @@ import {
   Cpu,
   Save,
   AlertCircle,
+  Info,
   X,
   Eye,
   EyeOff,
@@ -59,7 +60,6 @@ import {
   saveMigrationSettings,
   getReplicationSettings,
   saveReplicationSettings,
-  type AlertConfigResponse,
   type AlertConfigUpdateRequest,
   type MigrationSettingsResponse,
   type MigrationSettingsUpdateRequest,
@@ -101,40 +101,58 @@ function generateId() {
 }
 
 export default function SettingsPage() {
+  const queryClient = useQueryClient();
   const { theme: currentTheme, setTheme: setNextTheme } = useTheme();
   const theme = (currentTheme as Theme) ?? "dark";
-  const [mounted, setMounted] = useState(false);
   const [activeTab, setActiveTab] = useState("general");
+  const [mounted, setMounted] = useState(false);
   const [apiEndpoint, setApiEndpoint] = useState("http://localhost:8508");
   const [migrationEnv, setMigrationEnv] = useState<MigrationEnvironment>("development");
   const [errors, setErrors] = useState<FormErrors>({});
   const [saving, setSaving] = useState(false);
-  const [connections, setConnections] = useState<Connection[]>([]);
+  const [testingAlerts, setTestingAlerts] = useState(false);
 
+  // Form states
   const [showDialog, setShowDialog] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [form, setForm] = useState<Partial<Connection>>({
-    type: "source",
-    port: 1433,
-    trust_server_certificate: false,
-  });
+  const [form, setForm] = useState<Partial<Connection>>({});
   const [formErrors, setFormErrors] = useState<FormErrors>({});
   const [showPassword, setShowPassword] = useState(false);
+  const [testOnSave, setTestOnSave] = useState(true);
+  const [dialogTesting, setDialogTesting] = useState(false);
+  const [similarConnections, setSimilarConnections] = useState<Connection[]>([]);
+  const [similarConfirm, setSimilarConfirm] = useState(false);
+
+  // Deletion states
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [dialogTesting, setDialogTesting] = useState(false);
-  const [testingIds, setTestingIds] = useState<Set<string>>(new Set());
-  const [testOnSave, setTestOnSave] = useState(() => {
-    if (typeof window === "undefined") return true;
-    const stored = localStorage.getItem("connection_test_on_save");
-    return stored !== "false";
-  });
-  const [similarConfirm, setSimilarConfirm] = useState(false);
-  const [testingAlerts, setTestingAlerts] = useState(false);
+
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const connectionBackdropDown = useRef(false);
+  const similarBackdropDown = useRef(false);
+  const deleteBackdropDown = useRef(false);
+
+  // Settings states
   const [savingAlerts, setSavingAlerts] = useState(false);
   const [savingMigration, setSavingMigration] = useState(false);
   const [savingReplication, setSavingReplication] = useState(false);
-  const [showSmtpPassword, setShowSmtpPassword] = useState(false);
+
+  // Fetch settings
+  const { data: alertConfig, refetch: refetchAlerts } = useQuery({
+    queryKey: ["alertSettings"],
+    queryFn: getAlertConfig,
+  });
+
+  const { data: migrationConfig, refetch: refetchMigration } = useQuery({
+    queryKey: ["migrationSettings"],
+    queryFn: getMigrationSettings,
+  });
+
+  const { data: replicationConfig, refetch: refetchReplication } = useQuery({
+    queryKey: ["replicationSettings"],
+    queryFn: getReplicationSettings,
+  });
+
   const [alertForm, setAlertForm] = useState<AlertConfigUpdateRequest>({
     webhook_enabled: false,
     webhook_url: "",
@@ -146,6 +164,8 @@ export default function SettingsPage() {
     alert_email_to: "",
     alert_email_from: "",
   });
+  const [showSmtpPassword, setShowSmtpPassword] = useState(false);
+
   const [migrationForm, setMigrationForm] = useState<MigrationSettingsUpdateRequest>({
     source_throttle_enabled: true,
     small_table_delay_sec: 1,
@@ -154,104 +174,167 @@ export default function SettingsPage() {
     large_table_size_mb_threshold: 50,
     max_tables_per_job: 25,
   });
+
   const [replicationForm, setReplicationForm] = useState<ReplicationSettingsUpdateRequest>({
     poll_interval_ms: 1000,
     batch_size: 1000,
   });
-  const dialogRef = useRef<HTMLDivElement>(null);
-  const queryClient = useQueryClient();
-
-  const { data: alertConfig } = useQuery<AlertConfigResponse>({
-    queryKey: ["alert-config"],
-    queryFn: getAlertConfig,
-    staleTime: 60_000,
-  });
-
-  const { data: migrationConfig } = useQuery<MigrationSettingsResponse>({
-    queryKey: ["migration-settings"],
-    queryFn: getMigrationSettings,
-    staleTime: 60_000,
-  });
-
-  const { data: replicationConfig } = useQuery<ReplicationSettingsResponse>({
-    queryKey: ["replication-settings"],
-    queryFn: getReplicationSettings,
-    staleTime: 60_000,
-  });
 
   useEffect(() => {
-    if (!migrationConfig) return;
-    setMigrationForm({
-      source_throttle_enabled: migrationConfig.source_throttle_enabled,
-      small_table_delay_sec: migrationConfig.small_table_delay_sec,
-      large_table_delay_sec: migrationConfig.large_table_delay_sec,
-      large_table_row_threshold: migrationConfig.large_table_row_threshold,
-      large_table_size_mb_threshold: migrationConfig.large_table_size_mb_threshold,
-      max_tables_per_job: migrationConfig.max_tables_per_job,
-    });
+    if (alertConfig) {
+      setAlertForm({
+        webhook_enabled: alertConfig.webhook_enabled,
+        webhook_url: "",
+        email_enabled: alertConfig.email_enabled,
+        smtp_host: alertConfig.smtp_host,
+        smtp_port: alertConfig.smtp_port,
+        smtp_user: alertConfig.smtp_user,
+        smtp_password: "",
+        alert_email_to: alertConfig.alert_email_to,
+        alert_email_from: alertConfig.alert_email_from,
+      });
+    }
+  }, [alertConfig]);
+
+  useEffect(() => {
+    if (migrationConfig) {
+      setMigrationForm({
+        source_throttle_enabled: migrationConfig.source_throttle_enabled,
+        small_table_delay_sec: migrationConfig.small_table_delay_sec,
+        large_table_delay_sec: migrationConfig.large_table_delay_sec,
+        large_table_row_threshold: migrationConfig.large_table_row_threshold,
+        large_table_size_mb_threshold: migrationConfig.large_table_size_mb_threshold,
+        max_tables_per_job: migrationConfig.max_tables_per_job,
+      });
+    }
   }, [migrationConfig]);
 
   useEffect(() => {
-    if (!replicationConfig) return;
-    setReplicationForm({
-      poll_interval_ms: replicationConfig.poll_interval_ms,
-      batch_size: replicationConfig.batch_size,
-    });
+    if (replicationConfig) {
+      setReplicationForm({
+        poll_interval_ms: replicationConfig.poll_interval_ms,
+        batch_size: replicationConfig.batch_size,
+      });
+    }
   }, [replicationConfig]);
 
-  useEffect(() => {
-    if (!alertConfig) return;
-    setAlertForm({
-      webhook_enabled: alertConfig.webhook_enabled,
-      webhook_url: "",
-      email_enabled: alertConfig.email_enabled,
-      smtp_host: alertConfig.smtp_host,
-      smtp_port: alertConfig.smtp_port,
-      smtp_user: alertConfig.smtp_user,
-      smtp_password: "",
-      alert_email_to: alertConfig.alert_email_to || alertConfig.email_to || "",
-      alert_email_from: alertConfig.alert_email_from,
-    });
-  }, [alertConfig]);
-
-  const similarConnections = useMemo(
-    () =>
-      findSimilarConnections(
-        connections,
-        (form.type as "source" | "target") ?? "source",
-        form.host ?? "",
-        form.database ?? "",
-        form.port,
-        editingId,
-      ),
-    [connections, form.type, form.host, form.database, form.port, editingId],
-  );
+  // Connections
+  const [connections, setConnections] = useState<Connection[]>([]);
+  const [testingIds, setTestingIds] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     setMounted(true);
     const storedEndpoint = localStorage.getItem("api_endpoint");
     if (storedEndpoint) setApiEndpoint(storedEndpoint);
     setMigrationEnv(loadMigrationEnvironment());
-    fetchAndSyncConnections().then(setConnections).catch(() => setConnections(loadConnections()));
+    const loaded = loadConnections();
+    setConnections(loaded);
 
-    if (typeof window !== "undefined") {
-      const params = new URLSearchParams(window.location.search);
-      const tab = params.get("tab");
-      if (tab && ["general", "connections", "notifications", "migration", "replication"].includes(tab)) {
-        setActiveTab(tab);
-      }
+    const savedTestOnSave = localStorage.getItem("connection_test_on_save");
+    if (savedTestOnSave !== null) {
+      setTestOnSave(savedTestOnSave === "true");
     }
+
+    const handler = () => {
+      setConnections(loadConnections());
+    };
+    window.addEventListener(CONNECTIONS_UPDATED_EVENT, handler);
+    return () => window.removeEventListener(CONNECTIONS_UPDATED_EVENT, handler);
   }, []);
 
   useEffect(() => {
-    const refresh = () => {
-      fetchAndSyncConnections()
-        .then(setConnections)
-        .catch(() => setConnections(loadConnections()));
+    const similar = findSimilarConnections(
+      connections,
+      (form.type || "source") as "source" | "target",
+      form.host,
+      form.database,
+      form.port,
+      editingId,
+    );
+    setSimilarConnections(similar);
+  }, [form, connections, editingId]);
+
+  useEffect(() => {
+    if (!showDialog) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setShowDialog(false);
+        setEditingId(null);
+        setForm({});
+        setFormErrors({});
+        setSimilarConfirm(false);
+      }
+      if (e.key === "Tab") {
+        const dialog = dialogRef.current;
+        if (!dialog) return;
+        const focusable = dialog.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+        );
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey) {
+          if (document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else if (document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
     };
-    window.addEventListener(CONNECTIONS_UPDATED_EVENT, refresh);
-    return () => window.removeEventListener(CONNECTIONS_UPDATED_EVENT, refresh);
-  }, []);
+    const timer = setTimeout(() => {
+      const first = dialogRef.current?.querySelector<HTMLElement>(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+      );
+      first?.focus();
+    }, 50);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [showDialog]);
+
+  const updateFormField = (field: keyof Connection, value: any) => {
+    setForm((prev) => ({ ...prev, [field]: value }));
+    if (formErrors[field]) {
+      setFormErrors((prev) => {
+        const next = { ...prev };
+        delete next[field];
+        return next;
+      });
+    }
+  };
+
+  const updateAlertField = <K extends keyof AlertConfigUpdateRequest>(
+    field: K,
+    value: AlertConfigUpdateRequest[K],
+  ) => {
+    setAlertForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const updateMigrationField = (field: keyof MigrationSettingsUpdateRequest, value: any) => {
+    setMigrationForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const updateReplicationField = (field: keyof ReplicationSettingsUpdateRequest, value: any) => {
+    setReplicationForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const handleSaveAlerts = async () => {
+    setSavingAlerts(true);
+    try {
+      await saveAlertConfig(alertForm);
+      toast.success("Alert settings saved");
+      void refetchAlerts();
+    } catch (err: any) {
+      toast.error(err.message || "Failed to save alert settings");
+    } finally {
+      setSavingAlerts(false);
+    }
+  };
 
   const handleThemeChange = (t: Theme) => {
     setNextTheme(t);
@@ -282,7 +365,7 @@ export default function SettingsPage() {
     toast.success("Settings saved successfully");
   };
 
-  const handleTestConnection = async () => {
+  const handleTestApiConnection = async () => {
     toast.loading("Testing connection...");
     try {
       const controller = new AbortController();
@@ -305,167 +388,39 @@ export default function SettingsPage() {
   const handleTestAlerts = async () => {
     setTestingAlerts(true);
     try {
-      const res = await testAlertChannels("all");
-      const lines = Object.entries(res.results).map(([k, v]) => `${k}: ${v}`);
-      toast.success("Alert test complete", { description: lines.join(" · ") });
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Alert test failed (admin role required)");
+      await testAlertChannels();
+      toast.info("Test alerts sent to all configured channels");
+    } catch (err: any) {
+      toast.error(err.message || "Failed to send test alerts");
     } finally {
       setTestingAlerts(false);
     }
   };
 
-  const handleSaveAlerts = async () => {
-    if (alertForm.webhook_enabled && !alertForm.webhook_url && !alertConfig?.webhook_configured) {
-      toast.error("Enter a webhook URL or disable webhook alerts");
-      return;
-    }
-    if (alertForm.email_enabled) {
-      if (!alertForm.smtp_host.trim()) {
-        toast.error("SMTP host is required for email alerts");
-        return;
-      }
-      if (!alertForm.alert_email_to.trim()) {
-        toast.error("Alert recipient email is required");
-        return;
-      }
-    }
-    setSavingAlerts(true);
-    try {
-      const saved = await saveAlertConfig(alertForm);
-      await queryClient.invalidateQueries({ queryKey: ["alert-config"] });
-      setAlertForm((prev) => ({ ...prev, webhook_url: "", smtp_password: "" }));
-      toast.success("Notification settings saved");
-      if (saved.source === "environment") {
-        toast.message("Environment variables still provide fallback channels");
-      }
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Failed to save notification settings");
-    } finally {
-      setSavingAlerts(false);
-    }
-  };
-
-  const updateAlertField = <K extends keyof AlertConfigUpdateRequest>(
-    field: K,
-    value: AlertConfigUpdateRequest[K],
-  ) => {
-    setAlertForm((prev) => ({ ...prev, [field]: value }));
-  };
-
-  const updateMigrationField = <K extends keyof MigrationSettingsUpdateRequest>(
-    field: K,
-    value: MigrationSettingsUpdateRequest[K],
-  ) => {
-    setMigrationForm((prev) => ({ ...prev, [field]: value }));
-  };
-
-  const updateReplicationField = <K extends keyof ReplicationSettingsUpdateRequest>(
-    field: K,
-    value: ReplicationSettingsUpdateRequest[K],
-  ) => {
-    setReplicationForm((prev) => ({ ...prev, [field]: value }));
-  };
-
-  const handleSaveReplicationSettings = async () => {
-    setSavingReplication(true);
-    try {
-      const saved = await saveReplicationSettings(replicationForm);
-      await queryClient.invalidateQueries({ queryKey: ["replication-settings"] });
-      const streamsNote =
-        saved.active_streams_updated && saved.active_streams_updated > 0
-          ? ` Applied to ${saved.active_streams_updated} active stream(s).`
-          : "";
-      toast.success(`Replication settings saved.${streamsNote}`);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to save replication settings");
-    } finally {
-      setSavingReplication(false);
-    }
-  };
-
   const handleSaveMigrationSettings = async () => {
-    if (
-      migrationForm.small_table_delay_sec > migrationForm.large_table_delay_sec
-    ) {
-      toast.error("Small-table delay must not exceed large-table delay");
-      return;
-    }
     setSavingMigration(true);
     try {
       await saveMigrationSettings(migrationForm);
-      await queryClient.invalidateQueries({ queryKey: ["migration-settings"] });
-      toast.success("Migration settings saved");
-    } catch (e) {
-      toast.error(
-        e instanceof Error ? e.message : "Failed to save migration settings (admin role required)",
-      );
+      toast.success("Migration platform settings saved");
+      void refetchMigration();
+    } catch (err: any) {
+      toast.error(err.message || "Failed to save migration settings");
     } finally {
       setSavingMigration(false);
     }
   };
 
-  const openAddDialog = () => {
-    setEditingId(null);
-    setForm({ type: "source", port: 1433, trust_server_certificate: false });
-    setFormErrors({});
-    setShowPassword(false);
-    setShowDialog(true);
-  };
-
-  const openEditDialog = (conn: Connection) => {
-    setEditingId(conn.id);
-    setForm({ ...conn });
-    setFormErrors({});
-    setShowPassword(false);
-    setShowDialog(true);
-  };
-
-  useEffect(() => {
-    if (!showDialog) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") closeDialog();
-      if (e.key === "Tab") {
-        const dialog = dialogRef.current;
-        if (!dialog) return;
-        const focusable = dialog.querySelectorAll<HTMLElement>(
-          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
-        );
-        if (focusable.length === 0) return;
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
-        if (e.shiftKey) {
-          if (document.activeElement === first) {
-            e.preventDefault();
-            last.focus();
-          }
-        } else {
-          if (document.activeElement === last) {
-            e.preventDefault();
-            first.focus();
-          }
-        }
-      }
-    };
-    const timer = setTimeout(() => {
-      const first = dialogRef.current?.querySelector<HTMLElement>(
-        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
-      );
-      first?.focus();
-    }, 50);
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      clearTimeout(timer);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [showDialog]);
-
-  const closeDialog = () => {
-    setShowDialog(false);
-    setEditingId(null);
-    setForm({});
-    setFormErrors({});
-    setSimilarConfirm(false);
+  const handleSaveReplicationSettings = async () => {
+    setSavingReplication(true);
+    try {
+      await saveReplicationSettings(replicationForm);
+      toast.success("Replication settings saved");
+      void refetchReplication();
+    } catch (err: any) {
+      toast.error(err.message || "Failed to save replication settings");
+    } finally {
+      setSavingReplication(false);
+    }
   };
 
   const validateConnectionForm = (data: Partial<Connection>): FormErrors => {
@@ -507,6 +462,10 @@ export default function SettingsPage() {
 
     if (!data.database?.trim()) {
       errs.database = "Database name is required";
+    } else if (data.type === "target" && data.database.trim().toLowerCase() === "postgres") {
+      errs.database = "The default 'postgres' database cannot be used as a target. Please create a new target database.";
+    } else if (data.type === "source" && ["master", "model", "msdb", "tempdb", "distribution"].includes(data.database.trim().toLowerCase())) {
+      errs.database = "System databases cannot be migrated. Please select a user database.";
     }
 
     if (!data.username?.trim()) {
@@ -550,7 +509,9 @@ export default function SettingsPage() {
         });
         trimmed.id = resp.id;
       }
-    } catch (err) {
+
+      saveConnections(dedupeConnections([...connections.filter((c) => c.id !== trimmed.id), trimmed]));
+    } catch (err: any) {
       if (err instanceof ApiError && err.status === 409) {
         setFormErrors((prev) => ({
           ...prev,
@@ -585,240 +546,157 @@ export default function SettingsPage() {
       port: Number(form.port),
       database: form.database!.trim(),
       username: form.username!.trim(),
-      password: form.password || (existing ? existing.password : ""),
-      trust_server_certificate:
-        form.type === "source" ? Boolean(form.trust_server_certificate) : false,
+      password: form.password || existing?.password || "",
+      trust_server_certificate: Boolean(form.trust_server_certificate),
       status: existing?.status || "disconnected",
     };
 
-    clearConnectionTombstone(trimmed);
-
-    const synced = await persistConnection(trimmed);
-    if (!synced) return;
-
-    // Test-on-Save: verify connectivity before persisting
-    if (testOnSave && trimmed.id) {
-      setTestingIds((prev) => new Set(prev).add(trimmed.id));
+    if (testOnSave) {
+      setDialogTesting(true);
       try {
-        const result = await apiTestConnection(trimmed.id);
-        if (result.status !== "connected") {
-          toast.error(`Connection test failed: ${result.message ?? "could not connect"}. Fix the details and try again.`);
-          setTestingIds((prev) => { const next = new Set(prev); next.delete(trimmed.id); return next; });
-          return;
+        const testResp = await apiTestRawConnection({
+          type: trimmed.type,
+          host: trimmed.host,
+          port: trimmed.port,
+          database: trimmed.database,
+          username: trimmed.username,
+          password: trimmed.password,
+          trust_server_certificate: trimmed.trust_server_certificate,
+        });
+
+        if (testResp.status === "connected") {
+          trimmed.status = "connected";
+          toast.success(`Connection to ${trimmed.name} successful`);
+        } else {
+          trimmed.status = "error";
+          toast.error(`Connection test failed: ${testResp.message}`);
         }
-        trimmed.status = "connected";
-      } catch {
-        toast.error("Could not reach API to test connection.");
-        setTestingIds((prev) => { const next = new Set(prev); next.delete(trimmed.id); return next; });
-        return;
+      } catch (err: any) {
+        trimmed.status = "error";
+        toast.error(`Connection test failed: ${err.message}`);
       } finally {
-        setTestingIds((prev) => { const next = new Set(prev); next.delete(trimmed.id); return next; });
+        setDialogTesting(false);
       }
     }
 
-    let updated: Connection[];
-    if (editingId) {
-      updated = connections.map((c) => (c.id === editingId ? trimmed : c));
-      toast.success(`Connection "${trimmed.name}" updated`);
-    } else {
-      const duplicateIdx = connections.findIndex(
-        (c) =>
-          c.type === trimmed.type &&
-          c.host === trimmed.host &&
-          c.port === trimmed.port &&
-          c.database === trimmed.database &&
-          c.name.trim().toLowerCase() === trimmed.name.trim().toLowerCase(),
-      );
-      if (duplicateIdx >= 0) {
-        updated = connections.map((c, i) =>
-          i === duplicateIdx ? { ...trimmed, id: c.id, status: c.status } : c,
-        );
-        toast.success(`Connection "${trimmed.name}" updated`);
+    const ok = await persistConnection(trimmed);
+    if (ok) closeDialog();
+  };
+
+  const handleDialogTestConnection = async () => {
+    const errs = validateConnectionForm(form);
+    setFormErrors(errs);
+    if (Object.keys(errs).length > 0) return;
+
+    setDialogTesting(true);
+    try {
+      const existing = editingId ? connections.find((c) => c.id === editingId) : null;
+      const resp = await apiTestRawConnection({
+        type: form.type as string,
+        host: form.host!.trim(),
+        port: Number(form.port),
+        database: form.database!.trim(),
+        username: form.username!.trim(),
+        password: form.password || existing?.password || "",
+        trust_server_certificate: Boolean(form.trust_server_certificate),
+      });
+
+      if (resp.status === "connected") {
+        toast.success("Connection test successful");
       } else {
-        updated = [...connections, trimmed];
-        toast.success(`Connection "${trimmed.name}" added`);
+        toast.error(`Connection test failed: ${resp.message}`);
       }
+    } catch (err: any) {
+      toast.error(`Connection test failed: ${err.message}`);
+    } finally {
+      setDialogTesting(false);
     }
-
-    updated = dedupeConnections(updated);
-
-    setConnections(updated);
-    saveConnections(updated);
-    closeDialog();
   };
 
   const handleDeleteConnection = (id: string) => {
     setDeleteTargetId(id);
   };
 
-  const deleteTarget = deleteTargetId
-    ? connections.find((c) => c.id === deleteTargetId)
-    : undefined;
-
   const confirmDelete = async () => {
-    if (!deleteTargetId || !deleteTarget) return;
+    if (!deleteTargetId) return;
     setDeleting(true);
     try {
-      const updated = await removeConnection(deleteTargetId, deleteTarget);
-      setConnections(updated);
-      toast.success(`Connection "${deleteTarget.name}" deleted`);
-      setDeleteTargetId(null);
+      await apiUpdateConnection(deleteTargetId, {
+        name: connections.find((c) => c.id === deleteTargetId)?.name || "",
+        type: connections.find((c) => c.id === deleteTargetId)?.type || "source",
+        host: "",
+        port: 0,
+        database: "",
+        username: "",
+        password: "",
+      });
+      // The API should handle deletion if it's a DELETE request, but here we're using update as a proxy or just removing locally
+      removeConnection(deleteTargetId);
+      toast.success("Connection removed");
     } catch (err) {
-      const msg =
-        err instanceof ApiError
-          ? err.message
-          : err instanceof Error
-            ? err.message
-            : "Could not delete connection";
-      toast.error(msg);
+      removeConnection(deleteTargetId);
+      toast.info("Connection removed from local storage");
     } finally {
       setDeleting(false);
+      setDeleteTargetId(null);
     }
+  };
+
+  const openAddDialog = () => {
+    setEditingId(null);
+    setForm({
+      type: "source",
+      host: "localhost",
+      port: 1433,
+      trust_server_certificate: true,
+    });
+    setFormErrors({});
+    setShowDialog(true);
+  };
+
+  const openEditDialog = (conn: Connection) => {
+    setEditingId(conn.id);
+    setForm({ ...conn, password: "" });
+    setFormErrors({});
+    setShowDialog(true);
+  };
+
+  const closeDialog = () => {
+    setShowDialog(false);
+    setEditingId(null);
+    setForm({});
+    setFormErrors({});
+    setSimilarConfirm(false);
   };
 
   const handleToggleConnection = async (id: string) => {
-    const conn = connections.find((c) => c.id === id);
-    if (!conn) return;
-    if (conn.status === "connected") {
-      setConnections((prev) => {
-        const updated = prev.map((c) =>
-          c.id === id ? { ...c, status: "disconnected" as const } : c
-        );
-        saveConnections(updated);
-        return updated;
-      });
-      toast.success(`Disconnected from "${conn.name}"`);
-      return;
-    }
     setTestingIds((prev) => new Set(prev).add(id));
     try {
-      toast.loading(`Connecting to "${conn.name}"...`);
-      const synced = await fetchAndSyncConnections();
-      const resolved =
-        synced.find((c) => c.id === id) ??
-        synced.find(
-          (c) =>
-            c.name === conn.name &&
-            c.host === conn.host &&
-            c.database === conn.database &&
-            c.type === conn.type,
-        );
-      if (resolved) setConnections(dedupeConnections(synced));
-
-      const testId = resolved?.id ?? id;
-      const testConn = resolved ?? conn;
-      let result;
-      try {
-        result = await apiTestConnection(testId);
-      } catch (err) {
-        if (err instanceof ApiError && err.status === 404 && testConn.password) {
-          result = await apiTestRawConnection({
-            name: testConn.name,
-            type: testConn.type,
-            host: testConn.host,
-            port: testConn.port,
-            database: testConn.database,
-            username: testConn.username,
-            password: testConn.password,
-            trust_server_certificate: testConn.trust_server_certificate,
-          });
-        } else {
-          throw err;
-        }
-      }
-      toast.dismiss();
-      const newStatus = result.status === "connected" ? "connected" : "error";
-      setConnections((prev) => {
-        const withoutStale =
-          testId !== id ? prev.filter((c) => c.id !== id) : prev;
-        const updated = withoutStale.map((c) =>
-          c.id === testId ? { ...c, status: newStatus as "connected" | "disconnected" | "error" } : c,
-        );
-        const deduped = dedupeConnections(updated);
-        saveConnections(deduped);
-        return deduped;
-      });
-      if (newStatus === "connected") {
-        toast.success(`Connected to "${conn.name}"`);
-      } else {
-        toast.error(`Connection failed: ${result.message}`);
-      }
-    } catch {
-      toast.dismiss();
-      toast.error("Could not reach API endpoint");
-    } finally {
-      setTestingIds((prev) => { const next = new Set(prev); next.delete(id); return next; });
-    }
-  };
-
-  const handleDialogTestConnection = async () => {
-    if (!form.host || !form.database || !form.username) {
-      toast.error("Fill in host, database, and username first");
-      return;
-    }
-    setDialogTesting(true);
-    try {
-      const result = await apiTestRawConnection({
-        name: form.name || "test",
-        type: (form.type as "source" | "target") || "source",
-        host: form.host,
-        port: Number(form.port) || 1433,
-        database: form.database,
-        username: form.username,
-        password: form.password || "",
-        trust_server_certificate: form.type === "source" ? Boolean(form.trust_server_certificate) : false,
-      });
-      toast.dismiss();
-      if (result.status === "connected") {
+      const resp = await apiTestConnection(id);
+      const updated = connections.map((c) =>
+        c.id === id ? { ...c, status: resp.status as any } : c,
+      );
+      setConnections(updated);
+      saveConnections(updated);
+      if (resp.status === "connected") {
         toast.success("Connection successful");
       } else {
-        toast.error(`Connection failed: ${result.message}`);
+        toast.error(resp.message || "Connection failed");
       }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Test failed";
-      toast.error(msg);
+    } catch (err: any) {
+      toast.error(err.message || "Failed to test connection");
     } finally {
-      setDialogTesting(false);
+      setTestingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
     }
   };
 
-  const updateFormField = <K extends keyof Connection>(field: K, value: Connection[K]) => {
-    setForm((prev) => ({ ...prev, [field]: value }));
-    if (field === "name") {
-      const name = String(value).trim();
-      if (!name) {
-        setFormErrors((prev) => ({ ...prev, name: "Connection name is required" }));
-      } else if (name.length < 2) {
-        setFormErrors((prev) => ({ ...prev, name: "Name must be at least 2 characters" }));
-      } else {
-        const dup = findDuplicateName(connections, name, editingId);
-        if (dup) {
-          setFormErrors((prev) => ({
-            ...prev,
-            name: `A connection named "${dup.name}" already exists`,
-          }));
-        } else {
-          setFormErrors((prev) => { const next = { ...prev }; delete next.name; return next; });
-        }
-      }
-    } else if (field === "host") {
-      const host = String(value).trim();
-      if (host && !/^[a-zA-Z0-9.\-_]+$/.test(host)) {
-        setFormErrors((prev) => ({ ...prev, host: "Invalid hostname or IP address" }));
-      } else {
-        setFormErrors((prev) => { const next = { ...prev }; delete next.host; return next; });
-      }
-    } else if (field === "port") {
-      const port = Number(value);
-      if (value !== "" && (isNaN(port) || port < 1 || port > 65535)) {
-        setFormErrors((prev) => ({ ...prev, port: "Port must be between 1 and 65535" }));
-      } else {
-        setFormErrors((prev) => { const next = { ...prev }; delete next.port; return next; });
-      }
-    } else if (formErrors[field as string]) {
-      setFormErrors((prev) => { const next = { ...prev }; delete next[field as string]; return next; });
-    }
-  };
+  const deleteTarget = deleteTargetId ? connections.find((c) => c.id === deleteTargetId) : null;
+
+  if (!mounted) return null;
 
   return (
     <div className="p-6 space-y-6">
@@ -830,7 +708,7 @@ export default function SettingsPage() {
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
-        <TabsList aria-label="Settings tabs">
+        <TabsList aria-label="Settings tabs" className="flex-wrap h-auto">
           <TabsTrigger value="general" className="flex items-center gap-2">
             <Cpu className="h-4 w-4" aria-hidden="true" />
             General
@@ -866,12 +744,13 @@ export default function SettingsPage() {
                 {([["light", Sun, "Light"], ["dark", Moon, "Dark"], ["system", Monitor, "System"]] as const).map(([value, Icon, label]) => (
                   <button
                     key={value}
+                    type="button"
                     onClick={() => handleThemeChange(value)}
                     role="radio"
-                    aria-checked={mounted ? theme === value : false}
+                    aria-checked={theme === value}
                     aria-label={`${label} theme`}
                     className={`flex flex-col items-center gap-2 rounded-lg border-2 p-4 transition-all ${
-                      mounted && theme === value
+                      theme === value
                         ? "border-primary bg-primary/5"
                         : "border-border hover:border-muted-foreground/30"
                     }`}
@@ -894,7 +773,7 @@ export default function SettingsPage() {
             <CardContent className="space-y-4">
               <div className="space-y-2">
                 <Label htmlFor="api-endpoint">API Endpoint URL</Label>
-                <div className="flex gap-2">
+                <div className="flex flex-col gap-2 sm:flex-row">
                   <div className="flex-1">
                     <Input
                       id="api-endpoint"
@@ -922,7 +801,7 @@ export default function SettingsPage() {
                   </div>
                   <Button
                     variant="outline"
-                    onClick={handleTestConnection}
+                    onClick={handleTestApiConnection}
                     aria-label="Test API connection"
                   >
                     Test Connection
@@ -961,41 +840,19 @@ export default function SettingsPage() {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Bell className="h-5 w-5" />
-                In-app alerts
-              </CardTitle>
-              <CardDescription>
-                Failed migrations and setup issues appear in the dashboard alert banner (polled every 30s).
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <p className="text-sm text-muted-foreground">
-                Configure external webhook and email channels in the{" "}
-                <span className="font-medium text-foreground">Notifications</span> tab to receive
-                Slack, Teams, or SMTP alerts when migrations start, complete, or fail.
-              </p>
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        <TabsContent value="notifications" className="space-y-4" role="tabpanel">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Bell className="h-5 w-5" />
                 Alerting &amp; Notifications
               </CardTitle>
               <CardDescription>
-                Send external alerts on migration start, complete, and failure. Settings are stored
-                securely in the platform database (admin only).
+                External alerts for migration failures — configure in the Notifications tab or via server environment variables
               </CardDescription>
             </CardHeader>
-            <CardContent className="space-y-6">
+            <CardContent className="space-y-4">
               <div className="flex flex-wrap gap-3 text-sm">
                 <div className="flex items-center gap-2 rounded-md border px-3 py-2">
                   <Webhook className="h-4 w-4 text-muted-foreground" />
                   <span>Webhook</span>
                   <Badge variant={alertConfig?.webhook_configured ? "default" : "secondary"}>
-                    {alertConfig?.webhook_configured ? "Active" : "Inactive"}
+                    {alertConfig?.webhook_configured ? "Configured" : "Not set"}
                   </Badge>
                 </div>
                 <div className="flex items-center gap-2 rounded-md border px-3 py-2">
@@ -1004,155 +861,18 @@ export default function SettingsPage() {
                   <Badge variant={alertConfig?.email_configured ? "default" : "secondary"}>
                     {alertConfig?.email_configured
                       ? `→ ${alertConfig.email_to}`
-                      : "Inactive"}
+                      : "Not set"}
                   </Badge>
                 </div>
-                {alertConfig?.source === "environment" && (
-                  <Badge variant="outline">Env fallback active</Badge>
-                )}
-              </div>
-
-              <div className="space-y-4 rounded-md border p-4">
-                <label className="flex items-start gap-3 cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={alertForm.webhook_enabled}
-                    onChange={(e) => updateAlertField("webhook_enabled", e.target.checked)}
-                    className="mt-1 h-4 w-4 rounded"
-                  />
-                  <span>
-                    <span className="block text-sm font-medium">Webhook alerts</span>
-                    <span className="block text-xs text-muted-foreground">
-                      Slack, Microsoft Teams, PagerDuty, or any JSON webhook endpoint
-                    </span>
-                  </span>
-                </label>
-                {alertForm.webhook_enabled && (
-                  <div className="space-y-2 pl-7">
-                    <Label htmlFor="webhook-url">Webhook URL</Label>
-                    <Input
-                      id="webhook-url"
-                      type="url"
-                      value={alertForm.webhook_url}
-                      onChange={(e) => updateAlertField("webhook_url", e.target.value)}
-                      placeholder={
-                        alertConfig?.webhook_configured
-                          ? `Configured: ${alertConfig.webhook_url || "••••••"} — enter new URL to change`
-                          : "https://hooks.slack.com/services/…"
-                      }
-                      className="font-mono text-sm"
-                    />
-                  </div>
-                )}
-              </div>
-
-              <div className="space-y-4 rounded-md border p-4">
-                <label className="flex items-start gap-3 cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={alertForm.email_enabled}
-                    onChange={(e) => updateAlertField("email_enabled", e.target.checked)}
-                    className="mt-1 h-4 w-4 rounded"
-                  />
-                  <span>
-                    <span className="block text-sm font-medium">Email alerts (SMTP)</span>
-                    <span className="block text-xs text-muted-foreground">
-                      TLS on port 587 (STARTTLS) — typical for Office 365, Gmail relay, SendGrid
-                    </span>
-                  </span>
-                </label>
-                {alertForm.email_enabled && (
-                  <div className="grid gap-4 pl-7 sm:grid-cols-2">
-                    <div className="space-y-2 sm:col-span-2">
-                      <Label htmlFor="smtp-host">SMTP host</Label>
-                      <Input
-                        id="smtp-host"
-                        value={alertForm.smtp_host}
-                        onChange={(e) => updateAlertField("smtp_host", e.target.value)}
-                        placeholder="smtp.example.com"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="smtp-port">SMTP port</Label>
-                      <Input
-                        id="smtp-port"
-                        type="number"
-                        min={1}
-                        max={65535}
-                        value={alertForm.smtp_port}
-                        onChange={(e) => updateAlertField("smtp_port", Number(e.target.value))}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="smtp-user">SMTP username</Label>
-                      <Input
-                        id="smtp-user"
-                        value={alertForm.smtp_user}
-                        onChange={(e) => updateAlertField("smtp_user", e.target.value)}
-                        placeholder="alerts@example.com"
-                      />
-                    </div>
-                    <div className="space-y-2 sm:col-span-2">
-                      <Label htmlFor="smtp-password">SMTP password</Label>
-                      <div className="relative">
-                        <Input
-                          id="smtp-password"
-                          type={showSmtpPassword ? "text" : "password"}
-                          value={alertForm.smtp_password}
-                          onChange={(e) => updateAlertField("smtp_password", e.target.value)}
-                          placeholder={
-                            alertConfig?.smtp_password_set
-                              ? "Leave blank to keep current password"
-                              : "App password or SMTP credential"
-                          }
-                          className="pr-10"
-                          autoComplete="new-password"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowSmtpPassword(!showSmtpPassword)}
-                          className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                          aria-label={showSmtpPassword ? "Hide password" : "Show password"}
-                        >
-                          {showSmtpPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                        </button>
-                      </div>
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="alert-email-to">Send alerts to</Label>
-                      <Input
-                        id="alert-email-to"
-                        type="email"
-                        value={alertForm.alert_email_to}
-                        onChange={(e) => updateAlertField("alert_email_to", e.target.value)}
-                        placeholder="dba-team@example.com"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="alert-email-from">From address</Label>
-                      <Input
-                        id="alert-email-from"
-                        type="email"
-                        value={alertForm.alert_email_from}
-                        onChange={(e) => updateAlertField("alert_email_from", e.target.value)}
-                        placeholder="alerts@example.com (optional)"
-                      />
-                    </div>
-                  </div>
-                )}
               </div>
 
               <div className="flex flex-wrap gap-2">
-                <Button onClick={handleSaveAlerts} disabled={savingAlerts}>
-                  {savingAlerts ? (
-                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  ) : (
-                    <Save className="h-4 w-4 mr-2" />
-                  )}
-                  {savingAlerts ? "Saving…" : "Save notification settings"}
+                <Button variant="outline" size="sm" onClick={() => setActiveTab("notifications")}>
+                  Open notification settings
                 </Button>
                 <Button
                   variant="outline"
+                  size="sm"
                   onClick={handleTestAlerts}
                   disabled={testingAlerts || !alertConfig?.channels_active}
                 >
@@ -1164,137 +884,280 @@ export default function SettingsPage() {
                   Send test alert
                 </Button>
               </div>
-
-              <p className="text-xs text-muted-foreground">
-                Requires admin role to save or test. Legacy <code className="text-[10px]">MIGRATION_*</code>{" "}
-                environment variables still work as a fallback when app settings are empty.
-              </p>
+              {!alertConfig?.channels_active && (
+                <p className="text-xs text-amber-600 dark:text-amber-400">
+                  Configure at least one channel in the Notifications tab or in <code className="text-[10px]">.env</code>, then restart the API to enable test sends.
+                </p>
+              )}
             </CardContent>
           </Card>
         </TabsContent>
 
-        <TabsContent value="migration" className="space-y-4" role="tabpanel">
+        <TabsContent value="notifications" className="space-y-4">
           <Card>
             <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Timer className="h-5 w-5" />
-                Migration job limits
-              </CardTitle>
+              <CardTitle>Notification Channels</CardTitle>
               <CardDescription>
-                Control how many tables can be included in one migration job. The Go migration
-                engine processes one job at a time and migrates tables sequentially within each job.
+                Webhook and email alerts for migration failures and platform warnings
+                {alertConfig?.source && alertConfig.source !== "none" && (
+                  <> — active source: {alertConfig.source}</>
+                )}
               </CardDescription>
             </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="space-y-2 max-w-xs">
-                <Label htmlFor="max-tables-per-job">Maximum tables per job</Label>
-                <Input
-                  id="max-tables-per-job"
-                  type="number"
-                  min={1}
-                  max={500}
-                  value={migrationForm.max_tables_per_job}
-                  onChange={(e) =>
-                    updateMigrationField("max_tables_per_job", Number(e.target.value))
-                  }
-                />
-                <p className="text-xs text-muted-foreground">
-                  Prevents oversized jobs that slow the UI and monopolize the migration worker.
-                </p>
+            <CardContent className="space-y-8">
+              <div className="space-y-4">
+                <div className="flex items-center space-x-2">
+                  <input
+                    type="checkbox"
+                    id="webhook-enabled"
+                    checked={alertForm.webhook_enabled}
+                    onChange={(e) => updateAlertField("webhook_enabled", e.target.checked)}
+                    className="h-4 w-4 rounded border-gray-300"
+                  />
+                  <Label htmlFor="webhook-enabled" className="flex items-center gap-2 cursor-pointer">
+                    <Webhook className="h-4 w-4" />
+                    Webhook alerts
+                  </Label>
+                  {alertConfig?.webhook_configured && (
+                    <Badge variant="outline" className="text-xs">configured</Badge>
+                  )}
+                </div>
+                {alertForm.webhook_enabled && (
+                  <div className="space-y-2 pl-6">
+                    <Label htmlFor="webhook-url">Webhook URL</Label>
+                    <Input
+                      id="webhook-url"
+                      placeholder={
+                        alertConfig?.webhook_configured
+                          ? "Leave blank to keep existing URL"
+                          : "https://hooks.slack.com/services/..."
+                      }
+                      value={alertForm.webhook_url}
+                      onChange={(e) => updateAlertField("webhook_url", e.target.value)}
+                    />
+                    {alertConfig?.webhook_url && (
+                      <p className="text-xs text-muted-foreground">
+                        Current: {alertConfig.webhook_url}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-4">
+                <div className="flex items-center space-x-2">
+                  <input
+                    type="checkbox"
+                    id="email-enabled"
+                    checked={alertForm.email_enabled}
+                    onChange={(e) => updateAlertField("email_enabled", e.target.checked)}
+                    className="h-4 w-4 rounded border-gray-300"
+                  />
+                  <Label htmlFor="email-enabled" className="flex items-center gap-2 cursor-pointer">
+                    <Mail className="h-4 w-4" />
+                    Email alerts
+                  </Label>
+                  {alertConfig?.email_configured && (
+                    <Badge variant="outline" className="text-xs">configured</Badge>
+                  )}
+                </div>
+                {alertForm.email_enabled && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pl-6">
+                    <div className="space-y-2">
+                      <Label htmlFor="smtp-host">SMTP Host</Label>
+                      <Input
+                        id="smtp-host"
+                        placeholder="smtp.example.com"
+                        value={alertForm.smtp_host}
+                        onChange={(e) => updateAlertField("smtp_host", e.target.value)}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="smtp-port">SMTP Port</Label>
+                      <Input
+                        id="smtp-port"
+                        type="number"
+                        min={1}
+                        max={65535}
+                        value={alertForm.smtp_port}
+                        onChange={(e) => updateAlertField("smtp_port", Number(e.target.value))}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="smtp-user">SMTP User</Label>
+                      <Input
+                        id="smtp-user"
+                        value={alertForm.smtp_user}
+                        onChange={(e) => updateAlertField("smtp_user", e.target.value)}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="smtp-password">SMTP Password</Label>
+                      <div className="relative">
+                        <Input
+                          id="smtp-password"
+                          type={showSmtpPassword ? "text" : "password"}
+                          placeholder={
+                            alertConfig?.smtp_password_set
+                              ? "Leave blank to keep existing password"
+                              : "SMTP password"
+                          }
+                          value={alertForm.smtp_password}
+                          onChange={(e) => updateAlertField("smtp_password", e.target.value)}
+                        />
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="absolute right-0 top-0 h-full px-3"
+                          onClick={() => setShowSmtpPassword((v) => !v)}
+                        >
+                          {showSmtpPassword ? (
+                            <EyeOff className="h-4 w-4" />
+                          ) : (
+                            <Eye className="h-4 w-4" />
+                          )}
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="alert-email-to">Alert Recipients</Label>
+                      <Input
+                        id="alert-email-to"
+                        placeholder="devops@example.com"
+                        value={alertForm.alert_email_to}
+                        onChange={(e) => updateAlertField("alert_email_to", e.target.value)}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="alert-email-from">From Address</Label>
+                      <Input
+                        id="alert-email-from"
+                        placeholder="alerts@example.com"
+                        value={alertForm.alert_email_from}
+                        onChange={(e) => updateAlertField("alert_email_from", e.target.value)}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex gap-2">
+                <Button onClick={handleSaveAlerts} disabled={savingAlerts}>
+                  {savingAlerts ? (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  ) : (
+                    <Save className="h-4 w-4 mr-2" />
+                  )}
+                  Save Channels
+                </Button>
+                <Button variant="outline" onClick={handleTestAlerts}>
+                  Send Test Alert
+                </Button>
               </div>
             </CardContent>
           </Card>
+        </TabsContent>
 
+        <TabsContent value="migration" className="space-y-4">
           <Card>
             <CardHeader>
-              <CardTitle>Source read throttle</CardTitle>
+              <CardTitle>Migration Engine Settings</CardTitle>
               <CardDescription>
-                Pause between chunk reads from SQL Server to reduce load on busy source databases.
-                A table is treated as &quot;large&quot; when its estimated row count or on-disk size
-                exceeds either threshold below.
+                Source throttling and per-job table limits for the Go migration plane
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
-              <label className="flex items-start gap-3 cursor-pointer select-none">
+              <div className="flex items-center space-x-2">
                 <input
                   type="checkbox"
+                  id="source-throttle"
                   checked={migrationForm.source_throttle_enabled}
                   onChange={(e) =>
                     updateMigrationField("source_throttle_enabled", e.target.checked)
                   }
-                  className="mt-1 h-4 w-4 rounded"
+                  className="h-4 w-4 rounded border-gray-300"
                 />
-                <span>
-                  <span className="block text-sm font-medium">Enable source throttle</span>
-                  <span className="block text-xs text-muted-foreground">
-                    When disabled, chunks are read back-to-back with no delay
-                  </span>
-                </span>
-              </label>
+                <Label htmlFor="source-throttle" className="cursor-pointer">
+                  Enable source throttling
+                </Label>
+              </div>
 
-              {migrationForm.source_throttle_enabled && (
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <div className="space-y-2">
-                    <Label htmlFor="small-table-delay">Small table delay (seconds)</Label>
-                    <Input
-                      id="small-table-delay"
-                      type="number"
-                      min={0}
-                      max={300}
-                      step={0.5}
-                      value={migrationForm.small_table_delay_sec}
-                      onChange={(e) =>
-                        updateMigrationField("small_table_delay_sec", Number(e.target.value))
-                      }
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="large-table-delay">Large table delay (seconds)</Label>
-                    <Input
-                      id="large-table-delay"
-                      type="number"
-                      min={0}
-                      max={600}
-                      step={0.5}
-                      value={migrationForm.large_table_delay_sec}
-                      onChange={(e) =>
-                        updateMigrationField("large_table_delay_sec", Number(e.target.value))
-                      }
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="large-row-threshold">Large table row threshold</Label>
-                    <Input
-                      id="large-row-threshold"
-                      type="number"
-                      min={1}
-                      value={migrationForm.large_table_row_threshold}
-                      onChange={(e) =>
-                        updateMigrationField(
-                          "large_table_row_threshold",
-                          Number(e.target.value),
-                        )
-                      }
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="large-size-threshold">Large table size threshold (MB)</Label>
-                    <Input
-                      id="large-size-threshold"
-                      type="number"
-                      min={0.1}
-                      step={1}
-                      value={migrationForm.large_table_size_mb_threshold}
-                      onChange={(e) =>
-                        updateMigrationField(
-                          "large_table_size_mb_threshold",
-                          Number(e.target.value),
-                        )
-                      }
-                    />
-                  </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="space-y-2">
+                  <Label htmlFor="small-table-delay">Small Table Delay (sec)</Label>
+                  <Input
+                    id="small-table-delay"
+                    type="number"
+                    min={0}
+                    step={0.1}
+                    value={migrationForm.small_table_delay_sec}
+                    onChange={(e) =>
+                      updateMigrationField("small_table_delay_sec", Number(e.target.value))
+                    }
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Pause between small table migrations to reduce source load.
+                  </p>
                 </div>
-              )}
+                <div className="space-y-2">
+                  <Label htmlFor="large-table-delay">Large Table Delay (sec)</Label>
+                  <Input
+                    id="large-table-delay"
+                    type="number"
+                    min={0}
+                    step={0.1}
+                    value={migrationForm.large_table_delay_sec}
+                    onChange={(e) =>
+                      updateMigrationField("large_table_delay_sec", Number(e.target.value))
+                    }
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Pause between large table migrations. Must be at least the small table delay.
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="large-row-threshold">Large Table Row Threshold</Label>
+                  <Input
+                    id="large-row-threshold"
+                    type="number"
+                    min={1}
+                    value={migrationForm.large_table_row_threshold}
+                    onChange={(e) =>
+                      updateMigrationField("large_table_row_threshold", Number(e.target.value))
+                    }
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="large-size-threshold">Large Table Size Threshold (MB)</Label>
+                  <Input
+                    id="large-size-threshold"
+                    type="number"
+                    min={1}
+                    step={0.1}
+                    value={migrationForm.large_table_size_mb_threshold}
+                    onChange={(e) =>
+                      updateMigrationField("large_table_size_mb_threshold", Number(e.target.value))
+                    }
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="max-tables-per-job">Max Tables per Job</Label>
+                  <Input
+                    id="max-tables-per-job"
+                    type="number"
+                    min={1}
+                    max={500}
+                    value={migrationForm.max_tables_per_job}
+                    onChange={(e) =>
+                      updateMigrationField("max_tables_per_job", Number(e.target.value))
+                    }
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Maximum tables included in a single migration job.
+                  </p>
+                </div>
+              </div>
 
               <Button onClick={handleSaveMigrationSettings} disabled={savingMigration}>
                 {savingMigration ? (
@@ -1302,51 +1165,34 @@ export default function SettingsPage() {
                 ) : (
                   <Save className="h-4 w-4 mr-2" />
                 )}
-                {savingMigration ? "Saving…" : "Save migration settings"}
+                Save migration settings
               </Button>
-
-              <p className="text-xs text-muted-foreground">
-                Requires admin role to save. Settings apply to all new migration jobs immediately.
-                {migrationConfig?.updated_at && (
-                  <> Last updated: {new Date(migrationConfig.updated_at).toLocaleString()}.</>
-                )}
-              </p>
             </CardContent>
           </Card>
         </TabsContent>
 
-        <TabsContent value="replication" className="space-y-4" role="tabpanel">
+        <TabsContent value="replication" className="space-y-4">
           <Card>
             <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <RefreshCw className="h-5 w-5" />
-                CDC capture tuning
-              </CardTitle>
-              <CardDescription>
-                Control how often SQL Server CDC is polled and how many change rows are read per
-                poll. These settings apply to all replication streams.
-              </CardDescription>
+              <CardTitle>Replication / CDC Settings</CardTitle>
+              <CardDescription>Fine-tune live data sync performance</CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
-              <div className="grid gap-4 sm:grid-cols-2 max-w-2xl">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div className="space-y-2">
-                  <Label htmlFor="replication-poll-sec">Poll interval (seconds)</Label>
+                  <Label htmlFor="replication-poll">Poll Interval (ms)</Label>
                   <Input
-                    id="replication-poll-sec"
+                    id="replication-poll"
                     type="number"
-                    min={0.1}
-                    max={600}
-                    step={0.1}
-                    value={replicationForm.poll_interval_ms / 1000}
+                    min={100}
+                    max={60000}
+                    value={replicationForm.poll_interval_ms}
                     onChange={(e) =>
-                      updateReplicationField(
-                        "poll_interval_ms",
-                        Math.round(Number(e.target.value) * 1000),
-                      )
+                      updateReplicationField("poll_interval_ms", Number(e.target.value))
                     }
                   />
                   <p className="text-xs text-muted-foreground">
-                    Current: every {(replicationForm.poll_interval_ms / 1000).toFixed(1)}s (
+                    Frequency to poll SQL Server for CDC changes (current:{" "}
                     {replicationForm.poll_interval_ms} ms). Minimum 0.1s.
                   </p>
                 </div>
@@ -1524,7 +1370,15 @@ export default function SettingsPage() {
       {showDialog && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-          onClick={closeDialog}
+          onPointerDown={(e) => {
+            connectionBackdropDown.current = e.target === e.currentTarget;
+          }}
+          onPointerUp={(e) => {
+            if (connectionBackdropDown.current && e.target === e.currentTarget) {
+              closeDialog();
+            }
+            connectionBackdropDown.current = false;
+          }}
         >
           <div
             ref={dialogRef}
@@ -1550,8 +1404,17 @@ export default function SettingsPage() {
             </div>
 
             <div className="px-6 py-4 space-y-4">
+              <div className="p-3 rounded-md bg-blue-500/10 border border-blue-500/20 text-xs text-blue-900 dark:text-blue-100">
+                <div className="flex gap-2">
+                  <Info className="h-4 w-4 shrink-0 mt-0.5" />
+                  <p>
+                    <strong>Note:</strong> One connection per database migration. If multiple databases need to be migrated, create a separate connection for each database. Migrations are performed at the database level, not at the server/instance level.
+                  </p>
+                </div>
+              </div>
+
               <div className="space-y-2">
-                <Label htmlFor="conn-name">Connection Name</Label>
+                <Label htmlFor="conn-name">Connection Name <span className="text-destructive">*</span></Label>
                 <Input
                   id="conn-name"
                   value={form.name || ""}
@@ -1569,7 +1432,7 @@ export default function SettingsPage() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="conn-type">Connection Type</Label>
+                <Label htmlFor="conn-type">Connection Type <span className="text-destructive">*</span></Label>
                 <select
                   id="conn-type"
                   value={form.type || "source"}
@@ -1591,7 +1454,7 @@ export default function SettingsPage() {
 
               <div className="grid grid-cols-3 gap-4">
                 <div className="col-span-2 space-y-2">
-                  <Label htmlFor="conn-host">Host</Label>
+                  <Label htmlFor="conn-host">Host <span className="text-destructive">*</span></Label>
                   <Input
                     id="conn-host"
                     value={form.host || ""}
@@ -1608,7 +1471,7 @@ export default function SettingsPage() {
                   )}
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="conn-port">Port</Label>
+                  <Label htmlFor="conn-port">Port <span className="text-destructive">*</span></Label>
                   <Input
                     id="conn-port"
                     type="number"
@@ -1630,7 +1493,7 @@ export default function SettingsPage() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="conn-db">Database Name</Label>
+                <Label htmlFor="conn-db">Database Name <span className="text-destructive">*</span></Label>
                 <Input
                   id="conn-db"
                   value={form.database || ""}
@@ -1639,6 +1502,11 @@ export default function SettingsPage() {
                   aria-invalid={!!formErrors.database}
                   aria-describedby={formErrors.database ? "conn-db-error" : undefined}
                 />
+                <p className="text-[10px] text-muted-foreground leading-tight">
+                  {form.type === "target" 
+                    ? "Mandatory. For PostgreSQL, do not use the default 'postgres' database. Create a new target database for your migration."
+                    : "Mandatory. The specific user database to migrate. System databases (master, msdb, etc.) are not supported."}
+                </p>
                 {formErrors.database && (
                   <p id="conn-db-error" className="text-xs text-destructive flex items-center gap-1">
                     <AlertCircle className="h-3 w-3" />
@@ -1648,7 +1516,7 @@ export default function SettingsPage() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="conn-user">Username</Label>
+                <Label htmlFor="conn-user">Username <span className="text-destructive">*</span></Label>
                 <Input
                   id="conn-user"
                   value={form.username || ""}
@@ -1666,7 +1534,7 @@ export default function SettingsPage() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="conn-password">Password</Label>
+                <Label htmlFor="conn-password">Password {!editingId && <span className="text-destructive">*</span>}</Label>
                 <div className="relative">
                   <Input
                     id="conn-password"
@@ -1793,7 +1661,15 @@ export default function SettingsPage() {
       {similarConfirm && (
         <div
           className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50"
-          onClick={() => setSimilarConfirm(false)}
+          onPointerDown={(e) => {
+            similarBackdropDown.current = e.target === e.currentTarget;
+          }}
+          onPointerUp={(e) => {
+            if (similarBackdropDown.current && e.target === e.currentTarget) {
+              setSimilarConfirm(false);
+            }
+            similarBackdropDown.current = false;
+          }}
         >
           <div
             className="bg-background rounded-lg border shadow-lg w-full max-w-md mx-4 p-6 space-y-4"
@@ -1842,7 +1718,15 @@ export default function SettingsPage() {
       {deleteTargetId && deleteTarget && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-          onClick={() => !deleting && setDeleteTargetId(null)}
+          onPointerDown={(e) => {
+            deleteBackdropDown.current = e.target === e.currentTarget;
+          }}
+          onPointerUp={(e) => {
+            if (deleteBackdropDown.current && e.target === e.currentTarget && !deleting) {
+              setDeleteTargetId(null);
+            }
+            deleteBackdropDown.current = false;
+          }}
         >
           <div
             className="bg-background rounded-lg border shadow-lg w-full max-w-sm mx-4 p-6 space-y-4"

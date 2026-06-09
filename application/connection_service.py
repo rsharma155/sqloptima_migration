@@ -101,6 +101,23 @@ class ConnectionService:
             raise ConnectionServiceError(
                 f"Unsupported db_type {req.db_type!r}; must be 'sqlserver' or 'postgresql'"
             )
+        
+        # Validation: database name is mandatory
+        if not req.database_name.strip():
+            raise ConnectionServiceError("Database name is mandatory")
+            
+        # Validation: do not allow 'postgres' for PostgreSQL target connections
+        if req.db_type == "postgresql" and req.database_name.strip().lower() == "postgres":
+            raise ConnectionServiceError(
+                "The default 'postgres' database cannot be used as a target for migrations. Please create a new target database for the migration."
+            )
+
+        # Validation: do not allow SQL Server system databases for source connections
+        if req.db_type == "sqlserver" and req.database_name.strip().lower() in ("master", "model", "msdb", "tempdb", "distribution"):
+            raise ConnectionServiceError(
+                f"The system database {req.database_name.strip()!r} cannot be used for migration. Please select a user database."
+            )
+
         encrypted = self._secrets.encrypt(req.password) if req.password else ""
         record = await self._repo.create(
             id_=str(uuid4()),
@@ -137,6 +154,24 @@ class ConnectionService:
         record = await self._repo.get_by_id(conn_id)
         if record is None:
             raise ConnectionServiceError(f"Connection {conn_id!r} not found")
+
+        # Validation: database name is mandatory if provided
+        if database_name is not None and not database_name.strip():
+            raise ConnectionServiceError("Database name is mandatory")
+            
+        # Validation: do not allow 'postgres' for PostgreSQL target connections
+        target_db_name = database_name if database_name is not None else record.database_name
+        target_db_type = record.db_type
+        if target_db_type == "postgresql" and target_db_name.strip().lower() == "postgres":
+            raise ConnectionServiceError(
+                "The default 'postgres' database cannot be used as a target for migrations. Please create a new target database for the migration."
+            )
+
+        # Validation: do not allow SQL Server system databases for source connections
+        if target_db_type == "sqlserver" and target_db_name.strip().lower() in ("master", "model", "msdb", "tempdb", "distribution"):
+            raise ConnectionServiceError(
+                f"The system database {target_db_name.strip()!r} cannot be used for migration. Please select a user database."
+            )
 
         encrypted_password = (
             self._secrets.encrypt(password) if password is not None else None
