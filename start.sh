@@ -83,9 +83,25 @@ if [ -z "$PYTHON" ]; then
     exit 1
 fi
 
-if ! "$PYTHON" -m venv --help &>/dev/null 2>&1; then
+python_venv_ready() {
+    local py="$1"
+    if ! "$py" -c "import ensurepip" &>/dev/null 2>&1; then
+        return 1
+    fi
+    local tmp
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/sqlo-venv.XXXXXX" 2>/dev/null) || return 1
+    if "$py" -m venv "$tmp" &>/dev/null 2>&1; then
+        rm -rf "$tmp"
+        return 0
+    fi
+    rm -rf "$tmp"
+    return 1
+}
+
+if ! python_venv_ready "$PYTHON"; then
     err "Python venv module not available."
-    echo "  Re-run ./start.sh or: sudo apt install python3-venv"
+    py_minor=$("$PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo "3")
+    echo "  Re-run ./start.sh or: sudo apt install python${py_minor}-venv"
     exit 1
 fi
 
