@@ -61,7 +61,8 @@ venv.bak/
 .env.*.local
 *.key
 *.pem
-secrets/
+/secrets/
+!engine-go/internal/secrets/
 
 # ── Database & Local Files ───────────────────────────────────────────────────
 *.db
@@ -110,7 +111,8 @@ CLAUDE.md
 # ── Debug & Test Artifacts ───────────────────────────────────────────────────
 *.json.bak
 debug_*.py
-phase*_*.py
+SP_test/phase*_*.py
+!domains/transpilation/phase4_enhancements.py
 *.debug
 .coverage
 htmlcov/
