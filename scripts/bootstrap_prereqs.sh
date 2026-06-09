@@ -99,11 +99,15 @@ ensure_python() {
     ok "Python available ($("$py" --version 2>&1 | head -1))"
 
     if ! "$py" -m venv --help &>/dev/null; then
-        info "Installing Python venv module..."
+        local minor
+        minor=$(python_minor "$py")
+        info "Installing Python venv module for Python ${minor}..."
         local pm
         pm=$(detect_pkg_manager)
         case "$pm" in
             apt)
+                # On Ubuntu/Debian, we need the version-specific venv package (e.g. python3.12-venv)
+                maybe_sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "python${minor}-venv" python3-pip || \
                 maybe_sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv python3-pip || true
                 ;;
             dnf) maybe_sudo dnf install -y python3-devel || true ;;
@@ -233,10 +237,28 @@ ensure_go() {
 main() {
     echo ""
     echo "  Bootstrapping prerequisites..."
+    
+    if ! find_python &>/dev/null || ! command -v npm &>/dev/null || ! (command -v go &>/dev/null && go_version_ok); then
+        if ! ask_permission; then
+            echo ""
+            warn "Bootstrap cancelled by user. Please install prerequisites manually:"
+            echo "    - Python 3.11+"
+            echo "    - Node.js 20+"
+            echo "    - Go 1.23+"
+            echo ""
+            return 1
+        fi
+    fi
+
     ensure_python
     ensure_node
     ensure_go
     write_path_env
+    echo ""
+}
+
+main "$@"
+
     echo ""
 }
 

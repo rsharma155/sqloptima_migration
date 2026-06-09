@@ -27,6 +27,8 @@ services:
       - PYTHONPATH=/app
       - REDIS_URL=redis://redis:6379/0
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+      - METADATA_DB_URL=postgresql+asyncpg://postgres:postgres@postgres_checklist:5432/migration_checklist
+      - MIGRATION_DATABASE_METADATA_URL=postgresql://postgres:postgres@postgres_checklist:5432/migration_checklist
     depends_on:
       redis:
         condition: service_healthy
@@ -52,6 +54,8 @@ services:
       - PYTHONPATH=/app
       - TEMPORAL_HOST=temporal:7233
       - REDIS_URL=redis://redis:6379/0
+      - METADATA_DB_URL=postgresql+asyncpg://postgres:postgres@postgres_checklist:5432/migration_checklist
+      - MIGRATION_DATABASE_METADATA_URL=postgresql://postgres:postgres@postgres_checklist:5432/migration_checklist
     depends_on:
       redis:
         condition: service_healthy

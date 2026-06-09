@@ -33,7 +33,8 @@ logger = get_logger(__name__)
 
 
 def _resolve_url() -> str:
-    url = os.environ.get("METADATA_DB_URL", _DEFAULT_DB_URL)
+    # Priority: METADATA_DB_URL (Python convention) > MIGRATION_DATABASE_METADATA_URL (Go convention)
+    url = os.environ.get("METADATA_DB_URL") or os.environ.get("MIGRATION_DATABASE_METADATA_URL") or _DEFAULT_DB_URL
     if url.startswith("postgresql://"):
         url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
     elif url.startswith("sqlite:///") and not url.startswith("sqlite+aiosqlite:///"):

@@ -14,12 +14,12 @@ export interface ConnectionIdentity {
   status?: "connected" | "disconnected" | "error";
 }
 
-export function normalizeConnectionHost(host: string): string {
-  return host.trim().toLowerCase();
+export function normalizeConnectionHost(host: string | null | undefined): string {
+  return (host || "").trim().toLowerCase();
 }
 
-export function normalizeConnectionDatabase(database: string): string {
-  return database.trim().toLowerCase();
+export function normalizeConnectionDatabase(database: string | null | undefined): string {
+  return (database || "").trim().toLowerCase();
 }
 
 export function normalizeConnectionPort(port: number | string | undefined): number {
@@ -30,15 +30,15 @@ export function normalizeConnectionPort(port: number | string | undefined): numb
 /** Stable key for type + host + port + database endpoint matching (case-insensitive host/database). */
 export function connectionEndpointKey(
   type: "source" | "target",
-  host: string,
-  database: string,
+  host: string | null | undefined,
+  database: string | null | undefined,
   port: number | string | undefined,
 ): string {
   return `${type}:${normalizeConnectionHost(host)}:${normalizeConnectionPort(port)}:${normalizeConnectionDatabase(database)}`;
 }
 
 export function connectionKey(c: ConnectionIdentity): string {
-  return `${c.type}:${normalizeConnectionHost(c.host)}:${normalizeConnectionPort(c.port)}:${normalizeConnectionDatabase(c.database)}:${c.name.trim().toLowerCase()}`;
+  return `${c.type}:${normalizeConnectionHost(c.host)}:${normalizeConnectionPort(c.port)}:${normalizeConnectionDatabase(c.database)}:${(c.name || "").trim().toLowerCase()}`;
 }
 
 /** Find an existing connection with the same name (case-insensitive). */
@@ -47,10 +47,10 @@ export function findDuplicateName<T extends ConnectionIdentity>(
   name: string,
   excludeId?: string | null,
 ): T | undefined {
-  const normalized = name.trim().toLowerCase();
+  const normalized = (name || "").trim().toLowerCase();
   if (!normalized) return undefined;
   return connections.find(
-    (c) => c.id !== excludeId && c.name.trim().toLowerCase() === normalized,
+    (c) => c.id !== excludeId && (c.name || "").trim().toLowerCase() === normalized,
   );
 }
 
@@ -58,13 +58,13 @@ export function findDuplicateName<T extends ConnectionIdentity>(
 export function findSimilarConnections<T extends ConnectionIdentity>(
   connections: T[],
   type: "source" | "target",
-  host: string,
-  database: string,
+  host: string | null | undefined,
+  database: string | null | undefined,
   port: number | string | undefined,
   excludeId?: string | null,
 ): T[] {
+  if (!host?.trim() || !database?.trim()) return [];
   const endpoint = connectionEndpointKey(type, host, database, port);
-  if (!host.trim() || !database.trim()) return [];
   return connections.filter(
     (c) =>
       c.id !== excludeId &&

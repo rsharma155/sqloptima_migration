@@ -39,7 +39,7 @@ from infrastructure.metadata_db.models import Base
 
 target_metadata = Base.metadata
 
-_raw_url = os.environ.get("METADATA_DB_URL", "sqlite+aiosqlite:///migration_platform.db")
+_raw_url = os.environ.get("METADATA_DB_URL") or os.environ.get("MIGRATION_DATABASE_METADATA_URL") or "sqlite+aiosqlite:///migration_platform.db"
 # Normalise plain driver URLs to async variants.
 if _raw_url.startswith("postgresql://"):
     _raw_url = _raw_url.replace("postgresql://", "postgresql+asyncpg://", 1)

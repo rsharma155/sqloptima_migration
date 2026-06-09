@@ -55,13 +55,13 @@ describe("findSimilarConnections", () => {
       base({ id: "a", name: "Primary", host: "LOCALHOST", database: "AdventureWorks" }),
       base({ id: "b", name: "Replica", host: "db.example.com", database: "OtherDb" }),
     ];
-    const matches = findSimilarConnections(connections, "localhost", "adventureworks");
+    const matches = findSimilarConnections(connections, "source", "localhost", "adventureworks", 1433);
     expect(matches).toHaveLength(1);
     expect(matches[0].name).toBe("Primary");
   });
 
   it("excludes the connection being edited", () => {
     const connections = [base({ id: "edit-me", host: "localhost", database: "AdventureWorks" })];
-    expect(findSimilarConnections(connections, "localhost", "AdventureWorks", "edit-me")).toHaveLength(0);
+    expect(findSimilarConnections(connections, "source", "localhost", "AdventureWorks", 1433, "edit-me")).toHaveLength(0);
   });
 });

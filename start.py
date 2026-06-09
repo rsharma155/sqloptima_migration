@@ -115,22 +115,28 @@ def _run_bootstrap_prereqs() -> None:
     """Invoke platform bootstrap script to install Node, Go, Python venv support."""
     if os.environ.get("SQLOPTIMA_BOOTSTRAP_DONE") == "1":
         return
+    
+    # Check if --yes was passed in sys.argv
+    auto_yes = "--yes" in sys.argv or "-y" in sys.argv
+
     if IS_WINDOWS:
         script = ROOT / "scripts" / "bootstrap_prereqs.ps1"
         if not script.is_file():
             return
-        print(f"\n {C.BOLD}Auto-installing missing prerequisites (Windows)...{C.END}")
-        subprocess.run(
-            ["pwsh", "-NoProfile", "-File", str(script)],
-            cwd=ROOT,
-            check=False,
-        )
+        print(f"\n {C.BOLD}Checking prerequisites (Windows)...{C.END}")
+        args = ["pwsh", "-NoProfile", "-File", str(script)]
+        if auto_yes:
+            args.append("-Yes")
+        subprocess.run(args, cwd=ROOT, check=False)
     else:
         script = ROOT / "scripts" / "bootstrap_prereqs.sh"
         if not script.is_file():
             return
-        print(f"\n {C.BOLD}Auto-installing missing prerequisites...{C.END}")
-        subprocess.run(["bash", str(script)], cwd=ROOT, check=False)
+        print(f"\n {C.BOLD}Checking prerequisites...{C.END}")
+        args = ["bash", str(script)]
+        if auto_yes:
+            args.append("--yes")
+        subprocess.run(args, cwd=ROOT, check=False)
     os.environ["SQLOPTIMA_BOOTSTRAP_DONE"] = "1"
     _load_bootstrap_path()
     _refresh_tool_paths()
@@ -162,7 +168,17 @@ def ensure_project_venv() -> None:
             subprocess.check_call([py, "-m", "venv", str(VENV_DIR)], cwd=ROOT)
         except subprocess.CalledProcessError:
             _run_bootstrap_prereqs()
-            subprocess.check_call([py, "-m", "venv", str(VENV_DIR)], cwd=ROOT)
+            try:
+                subprocess.check_call([py, "-m", "venv", str(VENV_DIR)], cwd=ROOT)
+            except subprocess.CalledProcessError:
+                if not IS_WINDOWS:
+                    minor = f"{v.major}.{v.minor}"
+                    print(f"\n {C.RED}✗{C.END} Failed to create .venv — the 'venv' module might be missing.")
+                    print(f"   Run this command to fix it: {C.BOLD}sudo apt install python{minor}-venv{C.END}")
+                    print(f"   Then re-run: {C.BOLD}./start.sh --all{C.END}")
+                else:
+                    print(f"\n {C.RED}✗{C.END} Failed to create .venv.")
+                sys.exit(1)
 
     if not VENV_PYTHON.is_file():
         launcher = ".\\start.ps1 -all" if IS_WINDOWS else "./start.sh --all"
@@ -731,6 +747,15 @@ def _api_subprocess_env() -> dict[str, str]:
     env.setdefault("MIGRATION_LOG_LEVEL", "WARNING")
     if IS_WINDOWS:
         env.setdefault("PYTHONUTF8", "1")
+
+    # Sync DB URLs: if one is set, set the other to ensure consistency between Python/Go parts.
+    m_url = env.get("MIGRATION_DATABASE_METADATA_URL")
+    p_url = env.get("METADATA_DB_URL")
+    if m_url and not p_url:
+        env["METADATA_DB_URL"] = m_url
+    elif p_url and not m_url:
+        env["MIGRATION_DATABASE_METADATA_URL"] = p_url
+
     return env
 
 

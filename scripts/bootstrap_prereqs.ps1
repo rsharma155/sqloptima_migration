@@ -1,6 +1,10 @@
 # Bootstrap system prerequisites for SQL Optima (Windows).
 # Installs Python 3.11+, Node.js LTS, and Go 1.23+ when missing via winget or direct download.
 
+param (
+    [switch]$Yes
+)
+
 $ErrorActionPreference = "Stop"
 
 $LocalRoot = Join-Path $env:LOCALAPPDATA "sqloptima"
@@ -135,6 +139,34 @@ function Ensure-Go {
 
 Write-Host ""
 Write-Host "  Bootstrapping prerequisites..." -ForegroundColor White
+Ensure-Python
+Ensure-Node
+Ensure-Go
+Save-PathEnv
+Write-Host ""
+match '^[yY](es)?$')
+}
+
+Write-Host ""
+Write-Host "  Bootstrapping prerequisites..." -ForegroundColor White
+
+$missing = $false
+if (-not (Test-Python311)) { $missing = $true }
+if (-not (Get-Command npm -ErrorAction SilentlyContinue)) { $missing = $true }
+if (-not (Test-GoVersion)) { $missing = $true }
+
+if ($missing) {
+    if (-not (Ask-Permission)) {
+        Write-Host ""
+        Write-Warn "Bootstrap cancelled by user. Please install prerequisites manually:"
+        Write-Host "    - Python 3.11+"
+        Write-Host "    - Node.js LTS"
+        Write-Host "    - Go 1.23+"
+        Write-Host ""
+        exit 0
+    }
+}
+
 Ensure-Python
 Ensure-Node
 Ensure-Go
