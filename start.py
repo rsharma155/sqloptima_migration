@@ -164,21 +164,18 @@ def ensure_project_venv() -> None:
             print(f"   Run {C.BOLD}./start.sh --all{C.END} (Linux/macOS) or {C.BOLD}.\\start.ps1 -all{C.END} (Windows)")
             sys.exit(1)
         print(f"\n {C.CYAN}→{C.END} Creating project virtual environment (.venv)...")
+        _run_bootstrap_prereqs()
         try:
             subprocess.check_call([py, "-m", "venv", str(VENV_DIR)], cwd=ROOT)
         except subprocess.CalledProcessError:
-            _run_bootstrap_prereqs()
-            try:
-                subprocess.check_call([py, "-m", "venv", str(VENV_DIR)], cwd=ROOT)
-            except subprocess.CalledProcessError:
-                if not IS_WINDOWS:
-                    minor = f"{v.major}.{v.minor}"
-                    print(f"\n {C.RED}✗{C.END} Failed to create .venv — the 'venv' module might be missing.")
-                    print(f"   Run this command to fix it: {C.BOLD}sudo apt install python{minor}-venv{C.END}")
-                    print(f"   Then re-run: {C.BOLD}./start.sh --all{C.END}")
-                else:
-                    print(f"\n {C.RED}✗{C.END} Failed to create .venv.")
-                sys.exit(1)
+            if not IS_WINDOWS:
+                minor = f"{v.major}.{v.minor}"
+                print(f"\n {C.RED}✗{C.END} Failed to create .venv — the 'venv' module might be missing.")
+                print(f"   Run this command to fix it: {C.BOLD}sudo apt install python{minor}-venv{C.END}")
+                print(f"   Then re-run: {C.BOLD}python3 start.py --all{C.END} or {C.BOLD}./start.sh --all{C.END}")
+            else:
+                print(f"\n {C.RED}✗{C.END} Failed to create .venv.")
+            sys.exit(1)
 
     if not VENV_PYTHON.is_file():
         launcher = ".\\start.ps1 -all" if IS_WINDOWS else "./start.sh --all"
@@ -1265,6 +1262,8 @@ Examples:
     parser.add_argument("--purge-deps", action="store_true",
                         help="With --clean: also remove .venv and node_modules")
     parser.add_argument("--no-ui", action="store_true", help="Skip UI setup/start")
+    parser.add_argument("--yes", "-y", action="store_true",
+                        help="Auto-approve prerequisite installs (non-interactive)")
     parser.add_argument("option", nargs="?", type=int, choices=[1, 2, 3, 4, 5],
                         help="Menu option: 1=all, 2=API, 3=UI, 4=tests, 5=exit")
 

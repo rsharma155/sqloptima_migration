@@ -50,6 +50,40 @@ python_minor() {
     "$py" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || true
 }
 
+python_venv_ready() {
+    local py="$1"
+    if ! "$py" -c "import ensurepip" &>/dev/null; then
+        return 1
+    fi
+    local tmp=""
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/sqlo-venv.XXXXXX" 2>/dev/null) || return 1
+    if "$py" -m venv "$tmp" &>/dev/null 2>&1; then
+        rm -rf "$tmp"
+        return 0
+    fi
+    rm -rf "$tmp"
+    return 1
+}
+
+ask_permission() {
+    for arg in "$@"; do
+        if [ "$arg" = "--yes" ] || [ "$arg" = "-y" ]; then
+            return 0
+        fi
+    done
+    if [ ! -t 0 ]; then
+        return 0
+    fi
+    echo ""
+    warn "Missing prerequisites. Install via package manager (may require sudo)?"
+    printf "  Continue? [y/N] "
+    read -r reply
+    case "$reply" in
+        [yY]|[yY][eE][sS]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 find_python() {
     for candidate in python3.13 python3.12 python3.11 python3 python; do
         if command -v "$candidate" &>/dev/null; then
@@ -98,10 +132,10 @@ ensure_python() {
     fi
     ok "Python available ($("$py" --version 2>&1 | head -1))"
 
-    if ! "$py" -m venv --help &>/dev/null; then
+    if ! python_venv_ready "$py"; then
         local minor
         minor=$(python_minor "$py")
-        info "Installing Python venv module for Python ${minor}..."
+        info "Installing Python venv support for Python ${minor}..."
         local pm
         pm=$(detect_pkg_manager)
         case "$pm" in
@@ -113,6 +147,10 @@ ensure_python() {
             dnf) maybe_sudo dnf install -y python3-devel || true ;;
             brew) brew install python@3.12 || true ;;
         esac
+        if ! python_venv_ready "$py"; then
+            warn "Python venv still unavailable after install attempt."
+            echo "    Try: sudo apt install python${minor}-venv"
+        fi
     fi
 
     if ! "$py" -m pip --version &>/dev/null; then
@@ -239,7 +277,7 @@ main() {
     echo "  Bootstrapping prerequisites..."
     
     if ! find_python &>/dev/null || ! command -v npm &>/dev/null || ! (command -v go &>/dev/null && go_version_ok); then
-        if ! ask_permission; then
+        if ! ask_permission "$@"; then
             echo ""
             warn "Bootstrap cancelled by user. Please install prerequisites manually:"
             echo "    - Python 3.11+"
@@ -254,11 +292,6 @@ main() {
     ensure_node
     ensure_go
     write_path_env
-    echo ""
-}
-
-main "$@"
-
     echo ""
 }
 
