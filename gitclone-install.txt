@@ -1,0 +1,63 @@
+Starting API server...
+  Traceback (most recent call last):
+    File "<frozen runpy>", line 198, in _run_module_as_main
+    File "<frozen runpy>", line 88, in _run_code
+    File "C:\Users\Admin\Documents\sql2pg\sqloptima_migration\.venv\Lib\site-packages\uvicorn\__main__.py", line 4, in <module>
+    File "C:\Users\Admin\Documents\sql2pg\sqloptima_migration\.venv\Lib\site-packages\click\core.py", line 1524, in __call__
+    File "C:\Users\Admin\Documents\sql2pg\sqloptima_migration\.venv\Lib\site-packages\click\core.py", line 1445, in main
+    File "C:\Users\Admin\Documents\sql2pg\sqloptima_migration\.venv\Lib\site-packages\click\core.py", line 1308, in invoke
+    File "C:\Users\Admin\Documents\sql2pg\sqloptima_migration\.venv\Lib\site-packages\click\core.py", line 877, in invoke
+    File "C:\Users\Admin\Documents\sql2pg\sqloptima_migration\.venv\Lib\site-packages\uvicorn\main.py", line 441, in main
+    File "C:\Users\Admin\Documents\sql2pg\sqloptima_migration\.venv\Lib\site-packages\uvicorn\main.py", line 609, in run
+    File "C:\Users\Admin\Documents\sql2pg\sqloptima_migration\.venv\Lib\site-packages\uvicorn\config.py", line 415, in load_app
+    File "C:\Users\Admin\Documents\sql2pg\sqloptima_migration\.venv\Lib\site-packages\uvicorn\importer.py", line 19, in import_from_string
+    File "C:\Users\Admin\AppData\Local\Programs\Python\Python311\Lib\importlib\__init__.py", line 126, in import_module
+    File "<frozen importlib._bootstrap>", line 1204, in _gcd_import
+    File "<frozen importlib._bootstrap>", line 1176, in _find_and_load
+    File "<frozen importlib._bootstrap>", line 1147, in _find_and_load_unlocked
+    File "<frozen importlib._bootstrap>", line 690, in _load_unlocked
+    File "<frozen importlib._bootstrap_external>", line 940, in exec_module
+    File "<frozen importlib._bootstrap>", line 241, in _call_with_frames_removed
+    File "C:\Users\Admin\Documents\sql2pg\sqloptima_migration\apps\api\main.py", line 51, in <module>
+    File "C:\Users\Admin\Documents\sql2pg\sqloptima_migration\apps\api\routers\auth_router.py", line 20, in <module>
+    File "C:\Users\Admin\Documents\sql2pg\sqloptima_migration\apps\api\rate_limit.py", line 13, in <module>
+    File "C:\Users\Admin\Documents\sql2pg\sqloptima_migration\.venv\Lib\site-packages\slowapi\extension.py", line 159, in __init__
+    File "C:\Users\Admin\Documents\sql2pg\sqloptima_migration\.venv\Lib\site-packages\starlette\config.py", line 64, in __init__
+    File "C:\Users\Admin\Documents\sql2pg\sqloptima_migration\.venv\Lib\site-packages\starlette\config.py", line 114, in _read_file
+    File "<frozen codecs>", line 322, in decode
+  UnicodeDecodeError: 'utf-8' codec can't decode byte 0x97 in position 23: invalid start byte
+ ✗ API server exited (code 1)
+   Last output:
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      File "<frozen importlib._bootstrap>", line 1204, in _gcd_import
+      File "<frozen importlib._bootstrap>", line 1176, in _find_and_load
+      File "<frozen importlib._bootstrap>", line 1147, in _find_and_load_unlocked
+      File "<frozen importlib._bootstrap>", line 690, in _load_unlocked
+      File "<frozen importlib._bootstrap_external>", line 940, in exec_module
+      File "<frozen importlib._bootstrap>", line 241, in _call_with_frames_removed
+      File "C:\Users\Admin\Documents\sql2pg\sqloptima_migration\apps\api\main.py", line 51, in <module>
+        from apps.api.routers import (
+      File "C:\Users\Admin\Documents\sql2pg\sqloptima_migration\apps\api\routers\auth_router.py", line 20, in <module>
+        from apps.api.rate_limit import available as _rate_limit_available
+      File "C:\Users\Admin\Documents\sql2pg\sqloptima_migration\apps\api\rate_limit.py", line 13, in <module>
+        limiter = Limiter(key_func=get_remote_address, default_limits=["200/minute"])
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      File "C:\Users\Admin\Documents\sql2pg\sqloptima_migration\.venv\Lib\site-packages\slowapi\extension.py", line 159, in __init__
+        self.app_config = Config(
+                          ^^^^^^^
+      File "C:\Users\Admin\Documents\sql2pg\sqloptima_migration\.venv\Lib\site-packages\starlette\config.py", line 64, in __init__
+        self.file_values = self._read_file(env_file, encoding)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      File "C:\Users\Admin\Documents\sql2pg\sqloptima_migration\.venv\Lib\site-packages\starlette\config.py", line 114, in _read_file
+        for line in input_file.readlines():
+                    ^^^^^^^^^^^^^^^^^^^^^^
+      File "<frozen codecs>", line 322, in decode
+    UnicodeDecodeError: 'utf-8' codec can't decode byte 0x97 in position 23: invalid start byte
+   Hints:
+    • Install deps: python start.py --setup  or  .\start.ps1 -setup
+    • Start metadata DB: docker compose up postgres_checklist -d
+    • Ensure Docker Desktop is running (Windows)
+    • Full logs: .\.venv\Scripts\python.exe -m uvicorn apps.api.main:app --port 8508
+
+ Starting Go migration-engine...
+ ✗ Failed to start migration-engine: [WinError 4551] An Application Control policy has blocked this file

@@ -32,6 +32,7 @@ UI_DIR = ROOT / "apps" / "ui"
 ENGINE_DIR = ROOT / "engine-go"
 DATA_DIR = ROOT / "data"
 ENV_FILE = ROOT / ".env"
+ENV_ENCODING = "utf-8"
 PYPROJECT = ROOT / "pyproject.toml"
 REQUIREMENTS = ROOT / "requirements.txt"
 
@@ -219,7 +220,7 @@ def check_go() -> bool:
 
 # ── Environment ───────────────────────────────────────────────────────
 
-DEFAULT_ENV = """# SQL Optima Migration — Environment Configuration
+DEFAULT_ENV = """# SQL Optima Migration - Environment Configuration
 # Copy this to .env and adjust for your environment.
 
 MIGRATION_MASTER_KEY={master_key}
@@ -244,7 +245,7 @@ MIGRATION_TARGET_PASSWORD=
 # Optional
 MIGRATION_JOBS_FILE=migration_jobs.json
 
-# Metadata database (postgres_checklist container — auto-started by start.py)
+# Metadata database (postgres_checklist container - auto-started by start.py)
 METADATA_DB_URL=postgresql+asyncpg://postgres:postgres@localhost:5555/migration_checklist
 
 # Go migration-engine (start.py backfills if missing)
@@ -259,6 +260,40 @@ def _random_key(length: int = 32) -> str:
     return base64.urlsafe_b64encode(secrets.token_bytes(length)).decode()
 
 
+def _read_env_file() -> str:
+    """Read .env as UTF-8, falling back to Windows locale encodings when needed."""
+    if not ENV_FILE.exists():
+        return ""
+    try:
+        return ENV_FILE.read_text(encoding=ENV_ENCODING)
+    except UnicodeDecodeError:
+        for enc in ("cp1252", "latin-1"):
+            try:
+                return ENV_FILE.read_text(encoding=enc)
+            except UnicodeDecodeError:
+                continue
+        return ENV_FILE.read_text(encoding=ENV_ENCODING, errors="replace")
+
+
+def _write_env_file(text: str) -> None:
+    """Always persist .env as UTF-8 (Starlette/slowapi require UTF-8 on read)."""
+    ENV_FILE.write_text(text, encoding=ENV_ENCODING, newline="\n")
+
+
+def _repair_env_encoding() -> bool:
+    """Rewrite legacy Windows-locale .env files as UTF-8."""
+    if not ENV_FILE.exists():
+        return False
+    try:
+        ENV_FILE.read_text(encoding=ENV_ENCODING)
+        return False
+    except UnicodeDecodeError:
+        pass
+    _write_env_file(_read_env_file())
+    print(f" {C.YELLOW}✦{C.END} Repaired .env encoding (saved as UTF-8 for Windows compatibility)")
+    return True
+
+
 _ENV_BACKFILL: dict[str, str] = {
     "MIGRATION_SOURCE_TRUST_CERT": "false",
     "METADATA_DB_URL": "postgresql+asyncpg://postgres:postgres@localhost:5555/migration_checklist",
@@ -271,7 +306,7 @@ def _backfill_env_keys() -> list[str]:
     """Append missing template keys to an existing .env without overwriting values."""
     if not ENV_FILE.exists():
         return []
-    lines = ENV_FILE.read_text().splitlines()
+    lines = _read_env_file().splitlines()
     existing = {
         ln.partition("=")[0].strip()
         for ln in lines
@@ -284,12 +319,13 @@ def _backfill_env_keys() -> list[str]:
         lines.append(f"{key}={default}")
         added.append(key)
     if added:
-        ENV_FILE.write_text("\n".join(lines) + "\n")
+        _write_env_file("\n".join(lines) + "\n")
     return added
 
 
 def ensure_env():
     if ENV_FILE.exists():
+        _repair_env_encoding()
         added = _backfill_env_keys()
         print(f" {C.GREEN}✓{C.END} .env file exists")
         if added:
@@ -298,7 +334,7 @@ def ensure_env():
 
     master_key = _random_key()
     jwt_secret = _random_key()
-    ENV_FILE.write_text(DEFAULT_ENV.format(master_key=master_key, jwt_secret=jwt_secret))
+    _write_env_file(DEFAULT_ENV.format(master_key=master_key, jwt_secret=jwt_secret))
     print(f" {C.YELLOW}✦{C.END} Created .env with generated keys")
     print(f"   MIGRATION_MASTER_KEY={master_key}")
     print(f"   MIGRATION_JWT_SECRET={jwt_secret}")
@@ -309,7 +345,8 @@ def load_env():
     """Load .env into os.environ (simple parser, no dotenv dependency)."""
     if not ENV_FILE.exists():
         return
-    for line in ENV_FILE.read_text().splitlines():
+    _repair_env_encoding()
+    for line in _read_env_file().splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -600,6 +637,7 @@ def run_metadata_migrations() -> bool:
 
 processes: list[subprocess.Popen] = []
 _subprocess_log_buffers: dict[int, list[str]] = {}
+_docker_engine_started_by_us = False
 
 
 def _unregister_process(proc: subprocess.Popen | None) -> None:
@@ -691,7 +729,154 @@ def _api_subprocess_env() -> dict[str, str]:
     load_env()
     env = os.environ.copy()
     env.setdefault("MIGRATION_LOG_LEVEL", "WARNING")
+    if IS_WINDOWS:
+        env.setdefault("PYTHONUTF8", "1")
     return env
+
+
+def _win_app_control_blocked(exc: BaseException) -> bool:
+    """True when Windows Application Control / Smart App Control blocks execution."""
+    if not IS_WINDOWS:
+        return False
+    if isinstance(exc, OSError) and getattr(exc, "winerror", None) == 4551:
+        return True
+    return "4551" in str(exc) and "application control" in str(exc).lower()
+
+
+def _api_failure_hints(log_tail: list[str] | None = None) -> list[str]:
+    hints = [
+        "Install deps: python start.py --setup  or  .\\start.ps1 -setup",
+        "Start metadata DB: docker compose up postgres_checklist -d",
+        "Ensure Docker Desktop is running (Windows)",
+    ]
+    joined = "\n".join(log_tail or []).lower()
+    if "unicodedecodeerror" in joined and ".env" in joined:
+        hints.insert(
+            0,
+            "Delete .env and re-run, or: python start.py --clean --all (repairs UTF-8 encoding)",
+        )
+    if IS_WINDOWS:
+        hints.append(
+            "Full logs: .\\.venv\\Scripts\\python.exe -m uvicorn apps.api.main:app --port 8508",
+        )
+    else:
+        hints.append("Full logs: .venv/bin/python -m uvicorn apps.api.main:app --port 8508")
+    return hints
+
+
+def _go_engine_blocked_hints() -> list[str]:
+    return [
+        "Windows Application Control blocked the local Go binary",
+        "Ask IT to allowlist engine-go\\migration-engine.exe, or use Docker:",
+        "  docker compose up postgres_checklist migration-engine -d",
+        "Or run API/UI only: python start.py --api --ui (no bulk data migration)",
+        "Install Go 1.23+ and ensure `go version` works in this terminal",
+    ]
+
+
+def start_go_engine_docker(env: dict[str, str]) -> bool:
+    """Start migration-engine in Docker when the local binary is blocked on Windows."""
+    global _docker_engine_started_by_us
+    if not _docker_available():
+        return False
+    print(f"\n {C.CYAN}→{C.END} Starting Go migration-engine via Docker...")
+    compose_env = os.environ.copy()
+    master_key = env.get("MIGRATION_MASTER_KEY", "").strip()
+    if master_key:
+        compose_env["MIGRATION_MASTER_KEY"] = master_key
+    for cmd in (
+        ["docker", "compose", "up", "migration-engine", "-d", "--build"],
+        ["docker-compose", "up", "migration-engine", "-d", "--build"],
+    ):
+        try:
+            subprocess.check_call(cmd, cwd=ROOT, env=compose_env)
+            _docker_engine_started_by_us = True
+            print(f" {C.GREEN}✓{C.END} Go migration-engine running in Docker")
+            print("   metadata: postgresql://postgres:postgres@localhost:5555/migration_checklist")
+            return True
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            continue
+    print(f" {C.YELLOW}⚠{C.END} Could not start migration-engine container")
+    return False
+
+
+def _launch_go_engine_subprocess(
+    engine_cmd: list[str],
+    *,
+    engine_cwd: Path,
+    env: dict[str, str],
+) -> subprocess.Popen:
+    return subprocess.Popen(
+        engine_cmd,
+        cwd=engine_cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        encoding="utf-8",
+        bufsize=1,
+        env=env,
+    )
+
+
+def _wait_for_go_engine(proc: subprocess.Popen, env: dict[str, str]) -> bool:
+    """Stream engine logs and wait until startup completes or the process exits."""
+    import threading
+
+    def stream_output() -> None:
+        if not proc.stdout:
+            return
+        buf = _subprocess_log_buffers.setdefault(proc.pid, [])
+        for line in iter(proc.stdout.readline, ""):
+            if not line:
+                break
+            l = line.rstrip()
+            buf.append(l)
+            low = l.lower()
+            if any(
+                k in low
+                for k in ("error", "fatal", "panic", "connect metadata", "migration engine", "migration worker")
+            ):
+                print(f"  [engine] {l}")
+
+    threading.Thread(target=stream_output, daemon=True).start()
+
+    deadline = time.time() + 180
+    last_progress = time.time()
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            _unregister_process(proc)
+            _print_subprocess_failure(
+                "migration-engine",
+                proc,
+                hints=[
+                    "Install Go 1.23+ and ensure `go version` works in this terminal",
+                    "Start Docker Desktop, then run: docker compose up postgres_checklist -d",
+                    f"Verify metadata DB: {env['MIGRATION_DATABASE_METADATA_URL']}",
+                    "Run engine alone for full logs: python start.py --engine",
+                ],
+            )
+            return False
+        if _engine_startup_complete(proc.pid):
+            return True
+        if time.time() - last_progress >= 15:
+            print(f"  {C.DIM}… still starting (waiting for engine logs){C.END}")
+            last_progress = time.time()
+        time.sleep(0.5)
+    return True
+
+
+def prepare_windows_startup() -> None:
+    """Windows-first startup: UTF-8 .env, then metadata DB before API/engine."""
+    if not IS_WINDOWS:
+        return
+    ensure_env()
+    load_env()
+    print(f"\n {C.BOLD}Windows startup preparation{C.END}")
+    print(f" {C.GREEN}✓{C.END} .env validated (UTF-8)")
+    if not _docker_available():
+        print(f" {C.YELLOW}⚠{C.END} Docker Desktop not detected — metadata DB must be started manually")
+        print(f"   Run: {C.CYAN}docker compose up postgres_checklist -d{C.END}")
+    else:
+        print(f" {C.GREEN}✓{C.END} Docker available — metadata DB will be started next")
 
 
 def start_go_engine() -> subprocess.Popen | None:
@@ -725,71 +910,44 @@ def start_go_engine() -> subprocess.Popen | None:
 
     # Engine cwd must be engine-go/ — config lives at engine-go/config/default.toml
     engine_cwd = ENGINE_DIR
+    engine_cmds: list[list[str]] = []
     if binary.is_file():
-        engine_cmd = [str(binary.resolve())]
-    else:
-        engine_cmd = ["go", "run", "./cmd/migration-engine"]
-        print(f" {C.DIM}  Using go run (compile may take 1–3 min on first start)...{C.END}")
+        engine_cmds.append([str(binary.resolve())])
+    engine_cmds.append(["go", "run", "./cmd/migration-engine"])
 
-    try:
-        proc = subprocess.Popen(
-            engine_cmd,
-            cwd=engine_cwd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            encoding="utf-8",
-            bufsize=1,
-            env=env,
-        )
+    app_control_blocked = False
+    for idx, engine_cmd in enumerate(engine_cmds):
+        if idx > 0:
+            label = "go run" if engine_cmd[0] == "go" else engine_cmd[0]
+            print(f" {C.CYAN}→{C.END} Retrying migration-engine with {label}...")
+            if engine_cmd[0] == "go":
+                print(f" {C.DIM}  (first compile may take 1-3 min){C.END}")
+        try:
+            proc = _launch_go_engine_subprocess(engine_cmd, engine_cwd=engine_cwd, env=env)
+        except OSError as exc:
+            if _win_app_control_blocked(exc):
+                app_control_blocked = True
+                print(f" {C.YELLOW}⚠{C.END} Windows blocked {engine_cmd[0]} (Application Control policy)")
+                continue
+            print(f" {C.RED}✗{C.END} Failed to start migration-engine: {exc}")
+            return None
+
         processes.append(proc)
+        if _wait_for_go_engine(proc, env):
+            print(f" {C.GREEN}✓{C.END} Go migration-engine started")
+            print(f"   metadata: {env['MIGRATION_DATABASE_METADATA_URL']}")
+            print(f"   queue:    {env['MIGRATION_QUEUE_PATH']}")
+            return proc
 
-        import threading
-
-        def stream_output():
-            if not proc or not proc.stdout:
-                return
-            buf = _subprocess_log_buffers.setdefault(proc.pid, [])
-            for line in iter(proc.stdout.readline, ""):
-                if not line:
-                    break
-                l = line.rstrip()
-                buf.append(l)
-                low = l.lower()
-                if any(k in low for k in ("error", "fatal", "panic", "connect metadata", "migration engine", "migration worker")):
-                    print(f"  [engine] {l}")
-
-        threading.Thread(target=stream_output, daemon=True).start()
-
-        deadline = time.time() + 180
-        last_progress = time.time()
-        while time.time() < deadline:
-            if proc.poll() is not None:
-                _unregister_process(proc)
-                _print_subprocess_failure(
-                    "migration-engine",
-                    proc,
-                    hints=[
-                        "Install Go 1.23+ and ensure `go version` works in this terminal",
-                        "Start Docker Desktop, then run: docker compose up postgres_checklist -d",
-                        f"Verify metadata DB: {env['MIGRATION_DATABASE_METADATA_URL']}",
-                        "Run engine alone for full logs: python start.py --engine",
-                    ],
-                )
-                return None
-            if _engine_startup_complete(proc.pid):
-                break
-            if time.time() - last_progress >= 15:
-                print(f"  {C.DIM}… still starting (waiting for engine logs){C.END}")
-                last_progress = time.time()
-            time.sleep(0.5)
-
-        print(f" {C.GREEN}✓{C.END} Go migration-engine started")
-        print(f"   metadata: {env['MIGRATION_DATABASE_METADATA_URL']}")
-        print(f"   queue:    {env['MIGRATION_QUEUE_PATH']}")
-        return proc
-    except Exception as e:
-        print(f" {C.RED}✗{C.END} Failed to start migration-engine: {e}")
+    if IS_WINDOWS and start_go_engine_docker(env):
         return None
+
+    if app_control_blocked:
+        print(f" {C.RED}✗{C.END} Failed to start migration-engine (Windows Application Control)")
+        print(f" {C.YELLOW}  Hints:{C.END}")
+        for hint in _go_engine_blocked_hints():
+            print(f"    • {hint}")
+    return None
 
 
 def start_api() -> subprocess.Popen | None:
@@ -837,15 +995,11 @@ def start_api() -> subprocess.Popen | None:
         for _ in range(60):
             if proc.poll() is not None:
                 _unregister_process(proc)
+                tail = _subprocess_log_buffers.get(proc.pid, [])
                 _print_subprocess_failure(
                     "API server",
                     proc,
-                    hints=[
-                        "Install deps: python start.py --setup  or  .\\start.ps1 -setup",
-                        "Start metadata DB: docker compose up postgres_checklist -d",
-                        "Ensure Docker Desktop is running (Windows)",
-                        "Full logs: .\\.venv\\Scripts\\python.exe -m uvicorn apps.api.main:app --port 8508",
-                    ],
+                    hints=_api_failure_hints(tail),
                 )
                 return None
             try:
@@ -937,10 +1091,23 @@ def _kill_proc_tree(proc: subprocess.Popen) -> None:
 
 
 def shutdown(signum=None, frame=None):
+    global _docker_engine_started_by_us
     print(f"\n\n {C.YELLOW}Shutting down...{C.END}")
     for proc in processes:
         if proc and proc.poll() is None:
             _kill_proc_tree(proc)
+    if _docker_engine_started_by_us:
+        for cmd in (
+            ["docker", "compose", "stop", "migration-engine"],
+            ["docker-compose", "stop", "migration-engine"],
+        ):
+            try:
+                subprocess.run(cmd, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                print(f" {C.GREEN}✓{C.END} Stopped Docker migration-engine")
+                break
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                continue
+        _docker_engine_started_by_us = False
     print(f" {C.GREEN}✓{C.END} All services stopped")
     sys.exit(0)
 
@@ -1136,6 +1303,7 @@ Examples:
             args.all = True
 
     # ── Start services ──
+    prepare_windows_startup()
     load_env()
     import signal
     signal.signal(signal.SIGINT, shutdown)
@@ -1159,7 +1327,7 @@ Examples:
     engine_running = False
     if args.engine or args.all:
         engine_proc = start_go_engine()
-        if engine_proc:
+        if engine_proc or _docker_engine_started_by_us:
             started = True
             engine_running = True
         elif args.engine:
