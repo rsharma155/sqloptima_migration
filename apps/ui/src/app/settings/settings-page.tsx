@@ -555,6 +555,7 @@ export default function SettingsPage() {
       setDialogTesting(true);
       try {
         const testResp = await apiTestRawConnection({
+          name: trimmed.name,
           type: trimmed.type,
           host: trimmed.host,
           port: trimmed.port,
@@ -592,7 +593,8 @@ export default function SettingsPage() {
     try {
       const existing = editingId ? connections.find((c) => c.id === editingId) : null;
       const resp = await apiTestRawConnection({
-        type: form.type as string,
+        name: form.name!.trim(),
+        type: form.type as "source" | "target",
         host: form.host!.trim(),
         port: Number(form.port),
         database: form.database!.trim(),
