@@ -3,9 +3,8 @@
 .SYNOPSIS
   Migration Platform — one-command launcher for Windows.
 .DESCRIPTION
-  Checks prerequisites, creates an isolated Python virtual environment,
-  installs all dependencies, and starts the SQL Server to PostgreSQL
-  Migration Platform — no manual steps required.
+  Auto-installs prerequisites (Python, Node.js, Go), creates a virtual
+  environment, installs project dependencies, and starts the platform.
 .EXAMPLE
   .\start.ps1              # Interactive menu
   .\start.ps1 -all         # Start API + UI + Go engine (recommended)
@@ -15,7 +14,6 @@
   .\start.ps1 -setup       # Install dependencies only
   .\start.ps1 -test        # Run the test suite
   .\start.ps1 1            # Non-interactive: start all
-  .\start.ps1 2            # Non-interactive: API only
 .NOTES
   If you see an execution-policy error, run once in an Admin PowerShell:
     Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
@@ -61,17 +59,40 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ScriptDir
 
 # ══════════════════════════════════════════════════════════════════════
-# STEP 1 — Locate Python 3.11+
+# STEP 1 — Bootstrap prerequisites (Python, Node, Go)
 # ══════════════════════════════════════════════════════════════════════
-Write-Step "[1/3] Checking prerequisites..."
+Write-Step "[1/4] Bootstrapping prerequisites..."
+
+$Bootstrap = Join-Path $ScriptDir "scripts\bootstrap_prereqs.ps1"
+if (Test-Path $Bootstrap) {
+    try {
+        & $Bootstrap
+    } catch {
+        Write-Warn "Some prerequisites could not be auto-installed: $_"
+    }
+} else {
+    Write-Warn "bootstrap_prereqs.ps1 not found — skipping auto-install"
+}
+
+$PathEnvFile = Join-Path $env:LOCALAPPDATA "sqloptima\path.env"
+if (Test-Path $PathEnvFile) {
+    Get-Content $PathEnvFile | ForEach-Object {
+        if ($_ -match '^PATH=(.+)$') { $env:Path = $Matches[1] }
+        elseif ($_ -match '^GOROOT=(.+)$') { $env:GOROOT = $Matches[1] }
+    }
+}
+
+# ══════════════════════════════════════════════════════════════════════
+# STEP 2 — Locate Python 3.11+
+# ══════════════════════════════════════════════════════════════════════
+Write-Step "[2/4] Checking prerequisites..."
 
 function Find-Python {
-    # Try common command names first
     foreach ($cmd in @('python', 'python3')) {
         $exe = Get-Command $cmd -ErrorAction SilentlyContinue
         if ($null -eq $exe) { continue }
         try {
-            $ver = & $cmd -c "import sys; v=sys.version_info; print(f'{v.major}.{v.minor}.{v.micro}')" 2>$null
+            $ver = & $cmd -c 'import sys; v=sys.version_info; print(f"{v.major}.{v.minor}.{v.micro}")' 2>$null
             if ($ver -match '^(\d+)\.(\d+)\.') {
                 if ([int]$Matches[1] -ge 3 -and [int]$Matches[2] -ge 11) {
                     return @{ Cmd = $cmd; Ver = $ver }
@@ -79,12 +100,11 @@ function Find-Python {
             }
         } catch {}
     }
-    # Try Windows Python Launcher (py.exe) with explicit versions
     foreach ($minor in @('13','12','11')) {
         $pyExe = Get-Command 'py' -ErrorAction SilentlyContinue
         if ($null -eq $pyExe) { break }
         try {
-            $ver = & py "-3.$minor" -c "import sys; v=sys.version_info; print(f'{v.major}.{v.minor}.{v.micro}')" 2>$null
+            $ver = & py "-3.$minor" -c 'import sys; v=sys.version_info; print(f"{v.major}.{v.minor}.{v.micro}")' 2>$null
             if ($ver -match '^\d+\.\d+\.') {
                 return @{ Cmd = "py -3.$minor"; Ver = $ver }
             }
@@ -97,35 +117,31 @@ $pyInfo = Find-Python
 if ($null -eq $pyInfo) {
     Write-Err "Python 3.11 or newer is required but was not found."
     Write-Host ""
-    Write-Host "  Download from: https://www.python.org/downloads/" -ForegroundColor Cyan
-    Write-Host "  (Check 'Add Python to PATH' during installation)" -ForegroundColor Yellow
+    Write-Host "  Re-run .\start.ps1 (auto-install) or download from:" -ForegroundColor Cyan
+    Write-Host "  https://www.python.org/downloads/ (check Add Python to PATH)" -ForegroundColor Yellow
     Read-Host "`nPress Enter to exit"
     exit 1
 }
 Write-Ok "Python $($pyInfo.Ver)"
 
-# Npm / Node.js — optional (required only for the UI)
 $NpmCmd = Get-Command npm -ErrorAction SilentlyContinue
 if ($null -ne $NpmCmd) {
     Write-Ok "npm $(npm --version 2>$null)"
 } else {
-    Write-Warn "Node.js / npm not found — UI will be skipped"
-    Write-Host "         Install from: https://nodejs.org" -ForegroundColor Cyan
+    Write-Warn "Node.js / npm still not available — UI will be skipped"
 }
 
-# Go — optional (required for migration-engine)
 $GoCmd = Get-Command go -ErrorAction SilentlyContinue
 if ($null -ne $GoCmd) {
     Write-Ok "$(go version 2>$null)"
 } else {
-    Write-Warn "Go not found — migration-engine will be skipped"
-    Write-Host "         Install Go 1.23+ from: https://go.dev/dl/" -ForegroundColor Cyan
+    Write-Warn "Go still not available — migration-engine will be skipped"
 }
 
 # ══════════════════════════════════════════════════════════════════════
-# STEP 2 — Create / reuse virtual environment
+# STEP 3 — Create / reuse virtual environment
 # ══════════════════════════════════════════════════════════════════════
-Write-Step "[2/3] Setting up Python virtual environment..."
+Write-Step "[3/4] Setting up Python virtual environment..."
 
 $VenvDir    = Join-Path $ScriptDir ".venv"
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
@@ -135,7 +151,6 @@ if (-not (Test-Path $VenvPython)) {
     Write-Info "Creating .venv ..."
     $pyCmd = $pyInfo.Cmd
     if ($pyCmd -match '^py\s+-') {
-        # e.g. "py -3.11"  →  py, -3.11
         $parts = $pyCmd -split '\s+'
         & $parts[0] $parts[1] -m venv $VenvDir
     } else {
@@ -150,17 +165,14 @@ if (-not (Test-Path $VenvPython)) {
     Write-Ok "Using existing .venv"
 }
 
-# Upgrade pip in the venv
 & $VenvPip install --quiet --upgrade pip 2>$null | Out-Null
 
 # ══════════════════════════════════════════════════════════════════════
-# STEP 3 — Hand off to start.py (it handles the rest)
-#   start.py installs Python deps, npm deps, .env, then starts services.
+# STEP 4 — Hand off to start.py
 # ══════════════════════════════════════════════════════════════════════
-Write-Step "[3/3] Launching..."
+Write-Step "[4/4] Launching..."
 Write-Host ""
 
-# Build the argument list to forward to start.py
 $fwdArgs = [System.Collections.Generic.List[string]]::new()
 if ($api)            { $fwdArgs.Add('--api') }
 if ($ui)             { $fwdArgs.Add('--ui') }
@@ -171,6 +183,7 @@ if ($test)           { $fwdArgs.Add('--test') }
 if ($help)           { $fwdArgs.Add('--help') }
 if ($option -gt 0)   { $fwdArgs.Add($option.ToString()) }
 
+$env:SQLOPTIMA_IN_VENV = "1"
 $startPy = Join-Path $ScriptDir "start.py"
 & $VenvPython $startPy @fwdArgs
 exit $LASTEXITCODE

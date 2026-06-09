@@ -19,6 +19,9 @@ from infrastructure.metadata_db.repositories.notification_settings_repository im
 from infrastructure.metadata_db.repositories.migration_settings_repository import (
     MigrationSettingsRepository,
 )
+from infrastructure.metadata_db.repositories.replication_settings_repository import (
+    ReplicationSettingsRepository,
+)
 from infrastructure.metadata_db.repositories.validation_repository import ValidationRepository
 
 __all__ = [
@@ -29,6 +32,7 @@ __all__ = [
     "MigrationSettingsRepository",
     "NotificationSettingsRepository",
     "ProjectRepository",
+    "ReplicationSettingsRepository",
     "ReplicationStreamRepository",
     "UserRepository",
     "ValidationRepository",

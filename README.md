@@ -1,10 +1,10 @@
 # SQL Optima — SQL Server → PostgreSQL Migration Platform
 
-[License: MIT](https://opensource.org/licenses/MIT)
-[Python](https://www.python.org/downloads/)
-[Go](https://go.dev/)
-[Next.js](https://nextjs.org/)
-[GitHub](https://github.com/rsharma155/sqloptima_migration)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
+[![Go 1.23+](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![Next.js 15](https://img.shields.io/badge/Next.js-15-000000?logo=next.js&logoColor=white)](https://nextjs.org/)
+[![GitHub](https://img.shields.io/badge/GitHub-sqloptima__migration-181717?logo=github)](https://github.com/rsharma155/sqloptima_migration)
 
 **Repository:** [github.com/rsharma155/sqloptima_migration](https://github.com/rsharma155/sqloptima_migration)
 
@@ -14,7 +14,7 @@
 
 ## One-Command Quickstart
 
-> **Prerequisites:** Python 3.11+, Node.js 18+, npm, Go 1.23+ (for data migration), Docker (optional — auto-starts metadata PostgreSQL)
+> **Prerequisites:** Python 3.11+, Node.js 18+, npm, Go 1.23+ (for data migration), Docker (recommended — metadata PostgreSQL). Missing toolchains can be auto-installed via `scripts/bootstrap_prereqs.sh` / `bootstrap_prereqs.ps1` when you use `./start.sh` or `.\start.ps1`.
 
 Copy and paste this into a terminal — it clones the repo and starts the full stack (API + UI + Go migration-engine):
 
@@ -87,7 +87,7 @@ Migrating from SQL Server to PostgreSQL is hard due to deep differences in proce
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Complex T-SQL logic   | Multi-pass AST transpiler (SQLGlot + ANTLR4 fallback) with T-SQL parse unblockers, pgparse validation, and an auto-repair loop — never regex on full SQL |
 | Bulk data movement    | Go engine: half-open PK chunk boundaries, adaptive chunking, bbolt crash-safe queue, binary `COPY`, parallel workers                                     |
-| PII / compliance      | Column transforms (`mask_hash`, `mask_tokenize`, …) with `masking_policy: auto|strict` discovery via `pii_classifier`                                    |
+| PII / compliance      | Column transforms (`mask_hash`, `mask_tokenize`, …) with `masking_policy: auto\|strict` discovery via `pii_classifier`                                    |
 | Staying in sync       | 9-state CDC finite state machine (snapshot → streaming)                                                                                                  |
 | Trust & correctness   | L1–L4 validation: row counts, aggregates, chunk hashing, statistical sampling; optional procedure/query equivalence harnesses                            |
 | Production cutover    | Snapshot gate (`pg_dump`), cutover checkpoints, write-freeze, rollback window, connection-switch manifest                                                |
@@ -147,7 +147,7 @@ Four validation tiers (L1–L4) run against source and target with correct `targ
 | **L4** | Statistical row sampling                                                      |
 
 
-Validation defaults to **L1–L4** on first visit (auto-run if no prior runs). A **row sample compare** fetches the top 10 rows from source and target sorted by primary key (or unique index).
+Validation is **manual** — click **Run Validation** to start. L1 is lightweight; L2/L3 run full-table aggregate scans on the source (avoid on large production tables during peak hours). A **row sample compare** fetches the top 10 rows from source and target sorted by primary key (or unique index).
 
 ### 5. Sync (Replication / CDC)
 
@@ -165,6 +165,8 @@ CaptureAgent (SQL Server CDC capture)
 
 Optional external broker: set `REPLICATION_RABBITMQ_URL` to also consume via **aio-pika**. Stream lifecycle is tracked in metadata `replication_streams` with a 9-state FSM (`IDLE → STARTING → CDC_STREAMING → PAUSED → COMPLETED / FAILED`). **Pause**, **resume**, and **stop** preserve LSN/checkpoint position.
 
+Platform-wide **CDC capture tuning** (poll interval and batch size) is persisted in `platform_replication_settings` and editable under **Settings → Replication**; active streams pick up changes immediately.
+
 ### Cutover & Migration Programs (Enterprise)
 
 For staged rollouts and production cutover, the platform adds:
@@ -173,7 +175,7 @@ For staged rollouts and production cutover, the platform adds:
 - **Cutover workflow** — `POST /api/v1/workflows/cutover/start` creates durable checkpoints in `cutover_checkpoints`; operators approve, commit, or rollback within a 24-hour window
 - **Write freeze + connection switch** — `WriteFreezeService` and a connection-switch manifest guide DNS/connection-string cutover after validation passes
 
-See `docs/OPERATIONS.md` for runbooks and SLO targets.
+See [OPERATIONS.md](OPERATIONS.md) for runbooks and SLO targets.
 
 ---
 
@@ -278,7 +280,13 @@ Admin panel and API endpoints (ADMIN role unless noted):
 
 #### Settings — `/settings`
 
-Per-user preferences: theme (light/dark), default connection timeouts, and notification preferences.
+Platform configuration (admin and operator roles; viewers are redirected):
+
+- **General** — API endpoint, theme, migration environment
+- **Connections** — saved source/target connection profiles
+- **Notifications** — webhook and SMTP alert delivery
+- **Migration** — source throttle, table delays, max tables per job
+- **Replication** — CDC poll interval and rows-per-chunk batch size (hot-reloads active streams)
 
 #### Setup — `/setup`
 
@@ -361,7 +369,7 @@ MIGRATION_QUEUE_PATH=data/migration_queue.bbolt
 REPLICATION_QUEUE_SIZE=2000
 # REPLICATION_RABBITMQ_URL=amqp://guest:guest@localhost:5672/
 
-# Product edition & licensing (see docs/PACKAGING.md)
+# Product edition & licensing (see PACKAGING.md)
 MIGRATION_EDITION=enterprise          # assess | migrate | replicate | enterprise
 MIGRATION_LICENSE_KEY=DEV-LOCAL         # HMAC license token; DEV-LOCAL blocked when MIGRATION_ENV=production
 # MIGRATION_LICENSE_SECRET=             # defaults to MIGRATION_MASTER_KEY
@@ -461,14 +469,14 @@ helm install sql-optima ./deploy/helm/sql-optima \
 ### Operator documentation
 
 
-| Document                                 | Contents                                                    |
-| ---------------------------------------- | ----------------------------------------------------------- |
-| [ARCHITECTURE.md](ARCHITECTURE.md)       | Full system design and data flows                           |
-| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Runbooks, SLOs, cutover checklist, live equivalence tests   |
-| [docs/PACKAGING.md](docs/PACKAGING.md)   | Editions, license key generation, Helm deployment           |
-| [docs/SECURITY.md](docs/SECURITY.md)     | Production hardening, JWT rotation, metadata security audit |
-| [SECURITY.md](SECURITY.md)               | How to report security vulnerabilities                      |
-| [CONTRIBUTING.md](CONTRIBUTING.md)       | Development setup, tests, and pull request guidelines       |
+| Document                            | Contents                                                    |
+| ----------------------------------- | ----------------------------------------------------------- |
+| [ARCHITECTURE.md](ARCHITECTURE.md)  | Full system design and data flows                           |
+| [OPERATIONS.md](OPERATIONS.md)      | Runbooks, SLOs, cutover checklist, live equivalence tests   |
+| [PACKAGING.md](PACKAGING.md)        | Editions, license key generation, Helm deployment           |
+| [RELEASE.md](RELEASE.md)            | Version history, upgrade notes, and release highlights      |
+| [SECURITY.md](SECURITY.md)          | Production hardening, JWT rotation, metadata security audit |
+| [CONTRIBUTING.md](CONTRIBUTING.md)  | Development setup, tests, and pull request guidelines       |
 
 
 ---

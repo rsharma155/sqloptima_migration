@@ -217,6 +217,42 @@ class TestHtmlExport:
         html_str = exporter.to_html(_build_report())
         assert ">1<" in html_str  # passed count
 
+    def test_result_to_dict_serializes_decimal_aggregate_values(self):
+        from decimal import Decimal
+
+        from domains.validation.validation_report_exporter import result_to_dict
+
+        result = ValidationResult(
+            object_name="Purchasing.ProductVendor",
+            category=ValidationCategory.AGGREGATE,
+            status=ValidationStatus.PASSED,
+            details={
+                "column_results": [
+                    {
+                        "column": "StandardPrice",
+                        "status": "passed",
+                        "source": {
+                            "min": Decimal("1.25"),
+                            "max": Decimal("99.99"),
+                            "sum": Decimal("1234.56"),
+                            "avg": Decimal("12.345678"),
+                        },
+                        "target": {
+                            "min": Decimal("1.25"),
+                            "max": Decimal("99.99"),
+                            "sum": Decimal("1234.56"),
+                            "avg": Decimal("12.345678"),
+                        },
+                    }
+                ],
+            },
+        )
+        payload = result_to_dict(result)
+        json.dumps(payload)
+        col = payload["details"]["column_results"][0]
+        assert col["source"]["min"] == 1.25
+        assert col["target"]["sum"] == 1234.56
+
     def test_aggregate_html_shows_column_details(self):
         exporter = ValidationReportExporter()
         result = ValidationResult(

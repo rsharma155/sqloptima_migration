@@ -87,7 +87,7 @@ class ChangeApplier:
             else:
                 sql, params = self._build_upsert(event, pk_columns or self._detect_pk(event))
 
-            await self._conn.execute(sql, params)
+            await self._conn.execute(sql, *params.values())
         except Exception as exc:
             self.stats["failed"] += 1
             msg = f"{qualified} {event.operation.value}: {exc}"

@@ -32,6 +32,7 @@ class StreamTableConfig:
     watermark_column: str | None = None
     soft_delete_column: str | None = None
     pk_columns: list[str] = field(default_factory=list)
+    target_table_name: str | None = None
 
 
 @dataclass(frozen=True)

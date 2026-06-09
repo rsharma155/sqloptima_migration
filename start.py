@@ -36,6 +36,8 @@ PYPROJECT = ROOT / "pyproject.toml"
 REQUIREMENTS = ROOT / "requirements.txt"
 
 IS_WINDOWS = sys.platform == "win32"
+VENV_DIR = ROOT / ".venv"
+VENV_PYTHON = (VENV_DIR / "Scripts" / "python.exe") if IS_WINDOWS else (VENV_DIR / "bin" / "python")
 PYTHON = sys.executable
 NPM = shutil.which("npm") or shutil.which("npm.cmd")
 
@@ -72,6 +74,105 @@ def print_banner():
 
 # ── Prerequisites ─────────────────────────────────────────────────────
 
+def _bootstrap_path_env_file() -> Path:
+    if IS_WINDOWS:
+        local = os.environ.get("LOCALAPPDATA", "")
+        return Path(local) / "sqloptima" / "path.env" if local else Path.home() / "sqloptima" / "path.env"
+    return Path.home() / ".local" / "sqloptima" / "path.env"
+
+
+def _load_bootstrap_path() -> None:
+    """Apply PATH/GOROOT written by scripts/bootstrap_prereqs.*."""
+    path_env = _bootstrap_path_env_file()
+    if not path_env.is_file():
+        return
+    for line in path_env.read_text().splitlines():
+        if line.startswith("PATH="):
+            os.environ["PATH"] = line[5:]
+        elif line.startswith("GOROOT="):
+            os.environ["GOROOT"] = line[7:]
+
+
+def _refresh_tool_paths() -> None:
+    global NPM
+    NPM = shutil.which("npm") or shutil.which("npm.cmd")
+
+
+def _pip_available() -> bool:
+    try:
+        subprocess.run(
+            [PYTHON, "-m", "pip", "--version"],
+            capture_output=True,
+            check=True,
+        )
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return False
+
+
+def _run_bootstrap_prereqs() -> None:
+    """Invoke platform bootstrap script to install Node, Go, Python venv support."""
+    if os.environ.get("SQLOPTIMA_BOOTSTRAP_DONE") == "1":
+        return
+    if IS_WINDOWS:
+        script = ROOT / "scripts" / "bootstrap_prereqs.ps1"
+        if not script.is_file():
+            return
+        print(f"\n {C.BOLD}Auto-installing missing prerequisites (Windows)...{C.END}")
+        subprocess.run(
+            ["pwsh", "-NoProfile", "-File", str(script)],
+            cwd=ROOT,
+            check=False,
+        )
+    else:
+        script = ROOT / "scripts" / "bootstrap_prereqs.sh"
+        if not script.is_file():
+            return
+        print(f"\n {C.BOLD}Auto-installing missing prerequisites...{C.END}")
+        subprocess.run(["bash", str(script)], cwd=ROOT, check=False)
+    os.environ["SQLOPTIMA_BOOTSTRAP_DONE"] = "1"
+    _load_bootstrap_path()
+    _refresh_tool_paths()
+
+
+def _in_project_venv() -> bool:
+    if os.environ.get("SQLOPTIMA_IN_VENV") == "1":
+        return True
+    try:
+        return Path(sys.executable).resolve() == VENV_PYTHON.resolve()
+    except OSError:
+        return False
+
+
+def ensure_project_venv() -> None:
+    """Create .venv when needed and re-exec start.py inside it (bundled pip)."""
+    if _in_project_venv():
+        return
+
+    if not VENV_PYTHON.is_file():
+        py = sys.executable
+        v = sys.version_info
+        if v.major < 3 or (v.major == 3 and v.minor < 11):
+            print(f" {C.RED}✗{C.END} Python >= 3.11 required (found {v.major}.{v.minor}.{v.micro})")
+            print(f"   Run {C.BOLD}./start.sh --all{C.END} (Linux/macOS) or {C.BOLD}.\\start.ps1 -all{C.END} (Windows)")
+            sys.exit(1)
+        print(f"\n {C.CYAN}→{C.END} Creating project virtual environment (.venv)...")
+        try:
+            subprocess.check_call([py, "-m", "venv", str(VENV_DIR)], cwd=ROOT)
+        except subprocess.CalledProcessError:
+            _run_bootstrap_prereqs()
+            subprocess.check_call([py, "-m", "venv", str(VENV_DIR)], cwd=ROOT)
+
+    if not VENV_PYTHON.is_file():
+        launcher = ".\\start.ps1 -all" if IS_WINDOWS else "./start.sh --all"
+        print(f" {C.RED}✗{C.END} Could not create .venv — use the platform launcher:")
+        print(f"   {C.BOLD}{launcher}{C.END}")
+        sys.exit(1)
+
+    os.environ["SQLOPTIMA_IN_VENV"] = "1"
+    os.execv(str(VENV_PYTHON), [str(VENV_PYTHON), str(ROOT / "start.py"), *sys.argv[1:]])
+
+
 def check_python() -> bool:
     v = sys.version_info
     if v.major < 3 or (v.major == 3 and v.minor < 11):
@@ -82,6 +183,10 @@ def check_python() -> bool:
 
 
 def check_node() -> bool:
+    _refresh_tool_paths()
+    if not NPM:
+        _run_bootstrap_prereqs()
+        _refresh_tool_paths()
     if not NPM:
         print(f" {C.YELLOW}⚠{C.END} Node.js/npm not found — UI will not start")
         return False
@@ -97,8 +202,11 @@ def check_node() -> bool:
 def check_go() -> bool:
     go = shutil.which("go")
     if not go:
+        _run_bootstrap_prereqs()
+        go = shutil.which("go")
+    if not go:
         print(f" {C.YELLOW}⚠{C.END} Go toolchain not found — migration-engine will not start")
-        print(f"   Install Go 1.23+ from https://go.dev/dl/")
+        print(f"   Install Go 1.23+ from https://go.dev/dl/ or re-run ./start.sh / .\\start.ps1")
         return False
     try:
         out = subprocess.check_output([go, "version"], text=True).strip()
@@ -243,9 +351,45 @@ def _sync_go_engine_env() -> None:
     Path(queue).parent.mkdir(parents=True, exist_ok=True)
 
 
+def _postgres_port_open(host: str = "127.0.0.1", port: int = 5555, timeout: float = 1.0) -> bool:
+    import socket
+
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _using_postgres_metadata() -> bool:
+    return "postgresql" in os.environ.get("METADATA_DB_URL", "")
+
+
+def require_postgres_metadata() -> bool:
+    """Ensure PostgreSQL metadata is reachable. Fails hard — no SQLite fallback."""
+    load_env()
+    if not _using_postgres_metadata():
+        return True
+    if _postgres_port_open():
+        return True
+
+    print(f" {C.RED}✗{C.END} Metadata PostgreSQL is not reachable on port 5555")
+    print(f"   SQL Optima requires the {C.BOLD}postgres_checklist{C.END} database.")
+    if IS_WINDOWS:
+        print(f"   1. Install and start {C.CYAN}Docker Desktop{C.END}")
+    else:
+        print(f"   1. Install Docker and ensure the daemon is running")
+    print(f"   2. From the project root, run:")
+    print(f"      {C.CYAN}docker compose up postgres_checklist -d{C.END}")
+    print(f"   3. Re-run: {C.BOLD}python start.py --all{C.END}")
+    return False
+
+
 # ── Setup ─────────────────────────────────────────────────────────────
 
 def install_python_deps():
+    if not _pip_available():
+        ensure_project_venv()  # re-execs inside .venv when system Python lacks pip
     print(f"\n {C.BOLD}Installing Python dependencies...{C.END}")
     try:
         subprocess.check_call(
@@ -266,6 +410,8 @@ def install_python_deps():
             print(f" {C.GREEN}✓{C.END} Python dependencies installed (from requirements.txt)")
         except subprocess.CalledProcessError as e:
             print(f" {C.RED}✗{C.END} Failed to install Python deps: {e}")
+            launcher = ".\\start.ps1 -setup" if IS_WINDOWS else "./start.sh --setup"
+            print(f"   Try the platform launcher: {C.BOLD}{launcher}{C.END}")
             sys.exit(1)
 
 
@@ -283,21 +429,42 @@ def install_ui_deps():
         return False
 
 
-def warm_go_modules() -> None:
-    """Pre-fetch Go module deps so the engine starts faster."""
+def _go_engine_binary() -> Path:
+    name = "migration-engine.exe" if IS_WINDOWS else "migration-engine"
+    return ENGINE_DIR / name
+
+
+def build_go_engine(*, quiet: bool = False) -> bool:
+    """Compile the Go migration-engine binary (avoids slow silent ``go run`` at startup)."""
     if not shutil.which("go") or not ENGINE_DIR.is_dir():
-        return
-    print(f"\n {C.BOLD}Fetching Go module dependencies...{C.END}")
+        return False
+    binary = _go_engine_binary()
+    if not quiet:
+        print(f"\n {C.BOLD}Building Go migration-engine...{C.END}")
+        print(f" {C.DIM}  (first build downloads modules — may take 1–3 minutes){C.END}")
     try:
         subprocess.check_call(
-            ["go", "mod", "download"],
+            ["go", "build", "-o", str(binary), "./cmd/migration-engine"],
             cwd=ENGINE_DIR,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL if quiet else None,
+            stderr=subprocess.STDOUT if not quiet else subprocess.DEVNULL,
         )
-        print(f" {C.GREEN}✓{C.END} Go modules ready")
+        if not quiet:
+            print(f" {C.GREEN}✓{C.END} Go engine built ({binary.name})")
+        return True
     except subprocess.CalledProcessError:
-        print(f" {C.YELLOW}⚠{C.END} go mod download failed — engine may still compile on first run")
+        if not quiet:
+            print(f" {C.YELLOW}⚠{C.END} Go build failed — will retry with ``go run`` at engine start")
+        return False
+
+
+def _engine_startup_complete(pid: int) -> bool:
+    """True when the engine process logged a successful startup line."""
+    for line in _subprocess_log_buffers.get(pid, []):
+        low = line.lower()
+        if "migration worker loop started" in low or "migration engine starting" in low:
+            return True
+    return False
 
 
 # ── Docker services ───────────────────────────────────────────────────
@@ -323,6 +490,9 @@ def ensure_postgres_checklist() -> bool:
 
     if not _docker_available():
         print(f" {C.YELLOW}⚠{C.END} Docker not available — skipping postgres_checklist auto-start")
+        if IS_WINDOWS:
+            print(f"   Install {C.CYAN}Docker Desktop{C.END} and ensure it is running, then retry.")
+            print(f"   Or start metadata DB manually: docker compose up postgres_checklist -d")
         return False
 
     # Check if already running and healthy
@@ -415,13 +585,63 @@ def run_metadata_migrations() -> bool:
     except Exception as e:
         print(f" {C.RED}✗{C.END} Metadata database setup failed: {e}")
         print(f"   Ensure postgres_checklist is running and METADATA_DB_URL is correct.")
-        print(f"   Fresh reset: docker compose down postgres_checklist && docker volume rm sqlserver_to_postgres_pg_checklist_data")
+        err = str(e).lower()
+        if "migration_job_id" in err or "undefinedcolumn" in err:
+            print(f"   Stale metadata schema detected. Reset the checklist database volume:")
+            print(f"   {C.CYAN}docker compose down postgres_checklist{C.END}")
+            print(f"   {C.CYAN}docker volume rm sqloptima_migration_pg_checklist_data{C.END}")
+            print(f"   (volume name may differ — run {C.CYAN}docker volume ls{C.END} and remove *pg_checklist*)")
+        else:
+            print(f"   Fresh reset: docker compose down postgres_checklist && docker volume rm <pg_checklist_volume>")
         return False
 
 
 # ── Servers ───────────────────────────────────────────────────────────
 
 processes: list[subprocess.Popen] = []
+_subprocess_log_buffers: dict[int, list[str]] = {}
+
+
+def _unregister_process(proc: subprocess.Popen | None) -> None:
+    """Drop a subprocess from the monitor list (e.g. after a failed startup)."""
+    if proc is None:
+        return
+    try:
+        processes.remove(proc)
+    except ValueError:
+        pass
+
+
+def _drain_subprocess_output(proc: subprocess.Popen, *, max_lines: int = 40) -> list[str]:
+    """Read any buffered stdout from a subprocess that already exited."""
+    if not proc.stdout:
+        return []
+    lines: list[str] = []
+    while len(lines) < max_lines:
+        line = proc.stdout.readline()
+        if not line:
+            break
+        lines.append(line.rstrip())
+    return lines
+
+
+def _print_subprocess_failure(name: str, proc: subprocess.Popen, *, hints: list[str] | None = None) -> None:
+    """Surface the last lines of a failed child process to aid troubleshooting."""
+    print(f" {C.RED}✗{C.END} {name} exited (code {proc.returncode})")
+    tail = _subprocess_log_buffers.get(proc.pid, []) or _drain_subprocess_output(proc)
+    if tail:
+        print(f" {C.DIM}  Last output:{C.END}")
+        # Prefer full traceback block when present.
+        start = 0
+        for i, line in enumerate(tail):
+            if "traceback" in line.lower():
+                start = i
+        for line in tail[start:][-25:]:
+            print(f"    {line}")
+    if hints:
+        print(f" {C.YELLOW}  Hints:{C.END}")
+        for hint in hints:
+            print(f"    • {hint}")
 
 
 def _should_print_service_log(line: str) -> bool:
@@ -436,6 +656,21 @@ def _should_print_service_log(line: str) -> bool:
     if "[warning" in low or "[error" in low or "[critical" in low:
         return True
     if any(k in low for k in ("traceback", "exception (", " critical:")):
+        return True
+    if any(
+        k in low
+        for k in (
+            "error:",
+            "runtimeerror",
+            "importerror",
+            "modulenotfounderror",
+            "connectionrefused",
+            "cannot connect",
+            'file "',
+            "  file ",
+            "raise ",
+        )
+    ):
         return True
     if " failed" in low or low.startswith("failed"):
         return True
@@ -469,7 +704,17 @@ def start_go_engine() -> subprocess.Popen | None:
         return None
 
     load_env()
+    if not _using_postgres_metadata() or not _postgres_port_open():
+        print(f" {C.YELLOW}⚠{C.END} Go migration-engine requires PostgreSQL metadata (port 5555)")
+        print(f"   Start Docker Desktop, then: {C.CYAN}docker compose up postgres_checklist -d{C.END}")
+        return None
+
     _sync_go_engine_env()
+
+    binary = _go_engine_binary()
+    if not binary.is_file():
+        print(f"\n {C.CYAN}→{C.END} Go binary missing — compiling now...")
+        build_go_engine()
 
     print(f"\n {C.BOLD}Starting Go migration-engine...{C.END}")
     env = os.environ.copy()
@@ -478,10 +723,18 @@ def start_go_engine() -> subprocess.Popen | None:
     if not env.get("MIGRATION_MASTER_KEY"):
         print(f" {C.YELLOW}⚠{C.END} MIGRATION_MASTER_KEY not set — password decryption will fail")
 
+    # Engine cwd must be engine-go/ — config lives at engine-go/config/default.toml
+    engine_cwd = ENGINE_DIR
+    if binary.is_file():
+        engine_cmd = [str(binary.resolve())]
+    else:
+        engine_cmd = ["go", "run", "./cmd/migration-engine"]
+        print(f" {C.DIM}  Using go run (compile may take 1–3 min on first start)...{C.END}")
+
     try:
         proc = subprocess.Popen(
-            ["go", "run", "./cmd/migration-engine"],
-            cwd=ENGINE_DIR,
+            engine_cmd,
+            cwd=engine_cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             encoding="utf-8",
@@ -495,19 +748,41 @@ def start_go_engine() -> subprocess.Popen | None:
         def stream_output():
             if not proc or not proc.stdout:
                 return
+            buf = _subprocess_log_buffers.setdefault(proc.pid, [])
             for line in iter(proc.stdout.readline, ""):
                 if not line:
                     break
                 l = line.rstrip()
+                buf.append(l)
                 low = l.lower()
-                if any(k in low for k in ("error", "fatal", "panic")):
+                if any(k in low for k in ("error", "fatal", "panic", "connect metadata", "migration engine", "migration worker")):
                     print(f"  [engine] {l}")
 
         threading.Thread(target=stream_output, daemon=True).start()
-        time.sleep(1.5)
-        if proc.poll() is not None:
-            print(f" {C.RED}✗{C.END} migration-engine exited immediately (code {proc.returncode})")
-            return None
+
+        deadline = time.time() + 180
+        last_progress = time.time()
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                _unregister_process(proc)
+                _print_subprocess_failure(
+                    "migration-engine",
+                    proc,
+                    hints=[
+                        "Install Go 1.23+ and ensure `go version` works in this terminal",
+                        "Start Docker Desktop, then run: docker compose up postgres_checklist -d",
+                        f"Verify metadata DB: {env['MIGRATION_DATABASE_METADATA_URL']}",
+                        "Run engine alone for full logs: python start.py --engine",
+                    ],
+                )
+                return None
+            if _engine_startup_complete(proc.pid):
+                break
+            if time.time() - last_progress >= 15:
+                print(f"  {C.DIM}… still starting (waiting for engine logs){C.END}")
+                last_progress = time.time()
+            time.sleep(0.5)
+
         print(f" {C.GREEN}✓{C.END} Go migration-engine started")
         print(f"   metadata: {env['MIGRATION_DATABASE_METADATA_URL']}")
         print(f"   queue:    {env['MIGRATION_QUEUE_PATH']}")
@@ -521,10 +796,16 @@ def start_api() -> subprocess.Popen | None:
     """Start the FastAPI server and stream its output to console."""
     print(f"\n {C.BOLD}Starting API server...{C.END}")
     try:
+        api_cmd = [
+            PYTHON, "-m", "uvicorn", "apps.api.main:app",
+            "--host", "0.0.0.0", "--port", "8508",
+            "--log-level", "warning",
+        ]
+        # uvicorn --reload uses multiprocessing spawn; it is unreliable on Windows.
+        if not IS_WINDOWS:
+            api_cmd.append("--reload")
         proc = subprocess.Popen(
-            [PYTHON, "-m", "uvicorn", "apps.api.main:app",
-             "--host", "0.0.0.0", "--port", "8508", "--reload",
-             "--log-level", "warning"],
+            api_cmd,
             cwd=ROOT,
             env=_api_subprocess_env(),
             stdout=subprocess.PIPE,
@@ -539,10 +820,12 @@ def start_api() -> subprocess.Popen | None:
         def stream_output():
             if not proc or not proc.stdout:
                 return
+            buf = _subprocess_log_buffers.setdefault(proc.pid, [])
             for line in iter(proc.stdout.readline, ""):
                 if not line:
                     break
                 l = line.rstrip()
+                buf.append(l)
                 if _should_print_service_log(l):
                     print(f"  {l}")
 
@@ -553,7 +836,18 @@ def start_api() -> subprocess.Popen | None:
         import urllib.request
         for _ in range(60):
             if proc.poll() is not None:
-                break
+                _unregister_process(proc)
+                _print_subprocess_failure(
+                    "API server",
+                    proc,
+                    hints=[
+                        "Install deps: python start.py --setup  or  .\\start.ps1 -setup",
+                        "Start metadata DB: docker compose up postgres_checklist -d",
+                        "Ensure Docker Desktop is running (Windows)",
+                        "Full logs: .\\.venv\\Scripts\\python.exe -m uvicorn apps.api.main:app --port 8508",
+                    ],
+                )
+                return None
             try:
                 resp = urllib.request.urlopen("http://localhost:8508/health", timeout=1)
                 if resp.status == 200:
@@ -562,6 +856,10 @@ def start_api() -> subprocess.Popen | None:
             except Exception:
                 pass
             time.sleep(0.5)
+        if proc.poll() is not None:
+            _unregister_process(proc)
+            _print_subprocess_failure("API server", proc)
+            return None
         print(f" {C.YELLOW}⚠{C.END} API started (may still be loading)")
         return proc
     except Exception as e:
@@ -647,6 +945,65 @@ def shutdown(signum=None, frame=None):
     sys.exit(0)
 
 
+# ── Fresh install ───────────────────────────────────────────────────────
+
+def _remove_path(path: Path, label: str) -> None:
+    if not path.exists():
+        return
+    try:
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+        print(f" {C.GREEN}✓{C.END} Removed {label}")
+    except OSError as exc:
+        print(f" {C.YELLOW}⚠{C.END} Could not remove {label}: {exc}")
+
+
+def _clean_docker_metadata() -> None:
+    print(f"\n {C.BOLD}Resetting Docker metadata database...{C.END}")
+    if not _docker_available():
+        print(f" {C.YELLOW}⚠{C.END} Docker not running — skipped container/volume reset")
+        return
+    for cmd in (
+        ["docker", "compose", "down", "postgres_checklist", "-v"],
+        ["docker-compose", "down", "postgres_checklist", "-v"],
+    ):
+        try:
+            subprocess.run(
+                cmd, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True,
+            )
+            print(f" {C.GREEN}✓{C.END} postgres_checklist container and volume removed")
+            return
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            continue
+    print(f" {C.YELLOW}⚠{C.END} Could not reset postgres_checklist (run manually: docker compose down postgres_checklist -v)")
+
+
+def clean_fresh_install(*, purge_deps: bool = False) -> None:
+    """Remove local state so the next start mimics a first-time install."""
+    print(f"\n {C.BOLD}{'='*50}{C.END}")
+    print(f" {C.BOLD}  Fresh install — cleaning local state{C.END}")
+    print(f" {C.BOLD}{'='*50}{C.END}")
+
+    _clean_docker_metadata()
+
+    print(f"\n {C.BOLD}Removing local files...{C.END}")
+    _remove_path(ENV_FILE, ".env (new keys will be generated)")
+    _remove_path(ROOT / "migration_platform.db", "migration_platform.db")
+    _remove_path(ROOT / "migration_jobs.json", "migration_jobs.json")
+    _remove_path(DATA_DIR, "data/ (Go queue, etc.)")
+    _remove_path(_go_engine_binary(), f"engine-go/{_go_engine_binary().name}")
+    _remove_path(UI_DIR / ".next", "apps/ui/.next (Next.js cache)")
+
+    if purge_deps:
+        print(f"\n {C.BOLD}Removing installed dependencies...{C.END}")
+        _remove_path(VENV_DIR, ".venv")
+        _remove_path(UI_DIR / "node_modules", "apps/ui/node_modules")
+
+    print(f"\n {C.GREEN}✓{C.END} Clean complete — next start is a fresh install.")
+
+
 # ── Tests ─────────────────────────────────────────────────────────────
 
 def run_tests():
@@ -683,7 +1040,7 @@ def setup():
     install_python_deps()
     ui_ok = install_ui_deps()
     if has_go:
-        warm_go_modules()
+        build_go_engine()
 
     return has_node and ui_ok
 
@@ -696,6 +1053,7 @@ def main():
 Examples:
   python start.py              Interactive menu
   python start.py --all        Start API + UI + Go engine (recommended)
+  python start.py --clean --all   Fresh install + start everything
   python start.py --engine     Start Go migration-engine only
   python start.py --api          Start API only
   python start.py --ui           Start UI only
@@ -710,11 +1068,26 @@ Examples:
     parser.add_argument("--engine", action="store_true", help="Start Go migration-engine only")
     parser.add_argument("--setup", action="store_true", help="Install dependencies only")
     parser.add_argument("--test", action="store_true", help="Run tests")
+    parser.add_argument("--clean", action="store_true",
+                        help="Reset metadata DB, .env, and local data (fresh install)")
+    parser.add_argument("--purge-deps", action="store_true",
+                        help="With --clean: also remove .venv and node_modules")
     parser.add_argument("--no-ui", action="store_true", help="Skip UI setup/start")
     parser.add_argument("option", nargs="?", type=int, choices=[1, 2, 3, 4, 5],
                         help="Menu option: 1=all, 2=API, 3=UI, 4=tests, 5=exit")
 
     args = parser.parse_args()
+
+    if args.clean:
+        clean_fresh_install(purge_deps=args.purge_deps)
+        if not (args.all or args.api or args.ui or args.engine or args.setup or args.test):
+            print(f"\n {C.CYAN}→{C.END} Run {C.BOLD}python start.py --all{C.END} to start fresh.")
+            return
+
+    _load_bootstrap_path()
+    _refresh_tool_paths()
+    ensure_project_venv()
+
     print_banner()
 
     # ── Setup-only ──
@@ -772,6 +1145,8 @@ Examples:
 
     if args.all or args.api or args.engine:
         ensure_postgres_checklist()
+        if not require_postgres_metadata():
+            sys.exit(1)
 
     if args.all or args.api:
         cleanup_stale_sqlite()
@@ -781,13 +1156,17 @@ Examples:
         if api_proc:
             started = True
 
+    engine_running = False
     if args.engine or args.all:
         engine_proc = start_go_engine()
         if engine_proc:
             started = True
+            engine_running = True
         elif args.engine:
             print(f"\n {C.RED}Go engine failed to start.{C.END}")
             return
+        elif args.all:
+            print(f" {C.YELLOW}⚠{C.END} Continuing without Go engine — data migrations will not run")
 
     if args.all or args.ui:
         ui_proc = start_ui()
@@ -816,7 +1195,10 @@ Examples:
         print(f"   API  (network): {C.CYAN}http://{local_ip}:8508{C.END}")
         print(f"   Docs:           {C.CYAN}http://localhost:8508/docs{C.END}")
     if args.engine or args.all:
-        print(f"   Engine:         {C.GREEN}Go migration-engine running{C.END}")
+        if engine_running:
+            print(f"   Engine:         {C.GREEN}Go migration-engine running{C.END}")
+        else:
+            print(f"   Engine:         {C.YELLOW}not running (see errors above){C.END}")
     if (args.ui or args.all) and ui_ok:
         print(f"   UI   (local):   {C.CYAN}http://localhost:3508{C.END}")
         print(f"   UI   (network): {C.CYAN}http://{local_ip}:3508{C.END}")

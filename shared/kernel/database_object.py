@@ -101,6 +101,7 @@ class Table(DatabaseObject):
     """Represents a database table with columns, constraints, and indexes."""
 
     columns: list[Column] = Field(default_factory=list)
+    primary_key_columns: list[str] = Field(default_factory=list)
     is_temporal: bool = False
     is_memory_optimized: bool = False
     partition_scheme: str | None = None

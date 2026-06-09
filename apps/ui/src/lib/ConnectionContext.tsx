@@ -9,6 +9,7 @@
  */
 
 import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from "react";
+import { usePathname } from "next/navigation";
 import {
   type Connection,
   CONNECTIONS_UPDATED_EVENT,
@@ -37,7 +38,10 @@ const ConnectionContext = createContext<ConnectionContextValue>({
   getConnection: () => undefined,
 });
 
+const AUTH_PUBLIC_PATHS = new Set(["/login", "/setup"]);
+
 export function ConnectionProvider({ children }: { children: ReactNode }) {
+  const pathname = usePathname();
   const [connections, setConnections] = useState<Connection[]>([]);
 
   const refreshConnections = useCallback(() => {
@@ -56,6 +60,11 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
+    if (AUTH_PUBLIC_PATHS.has(pathname)) {
+      setConnections(loadConnections());
+      return;
+    }
+
     refreshConnections();
 
     const handleStorage = (e: StorageEvent) => {
@@ -69,7 +78,7 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
       window.removeEventListener("storage", handleStorage);
       window.removeEventListener(CONNECTIONS_UPDATED_EVENT, handleCustom);
     };
-  }, [refreshConnections]);
+  }, [refreshConnections, pathname]);
 
   const sourceConnections = connections.filter((c) => c.type === "source");
   const targetConnections = connections.filter((c) => c.type === "target");

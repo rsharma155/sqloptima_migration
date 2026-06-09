@@ -73,7 +73,15 @@ class TestChangeApplier:
         )
         result = await applier.apply(event)
         assert result is True
-        mock_conn.execute.assert_awaited_once()
+        
+        # Verify that parameters are passed as separate positional arguments, not as a dict.
+        # SQL is the first arg, then the values from after_values: 1, "Alice", "alice@test.com"
+        call_args = mock_conn.execute.await_args[0]
+        assert len(call_args) == 4  # SQL + 3 values
+        assert call_args[1] == 1
+        assert call_args[2] == "Alice"
+        assert call_args[3] == "alice@test.com"
+        
         mock_dedup.record.assert_awaited_once()
         mock_checkpoint.save.assert_awaited_once()
 
@@ -88,7 +96,12 @@ class TestChangeApplier:
         )
         result = await applier.apply(event)
         assert result is True
-        mock_conn.execute.assert_awaited_once()
+        
+        # SQL + 2 values (id, name)
+        call_args = mock_conn.execute.await_args[0]
+        assert len(call_args) == 3
+        assert call_args[1] == 1
+        assert call_args[2] == "Bob"
 
     @pytest.mark.asyncio
     async def test_apply_delete(self, applier, mock_conn):
@@ -101,7 +114,11 @@ class TestChangeApplier:
         )
         result = await applier.apply(event)
         assert result is True
-        mock_conn.execute.assert_awaited_once()
+        
+        # SQL + 1 value (id)
+        call_args = mock_conn.execute.await_args[0]
+        assert len(call_args) == 2
+        assert call_args[1] == 1
 
     @pytest.mark.asyncio
     async def test_apply_skips_already_deduplicated(self, applier, mock_dedup, mock_conn):

@@ -39,6 +39,7 @@ class CaptureAgent:
     ) -> None:
         self._provider = provider
         self._publisher = publisher
+        self._poll_interval_ms = poll_interval_ms
         self._poll_interval = poll_interval_ms / 1000.0
         self._batch_size = batch_size
         self._running = False
@@ -55,6 +56,24 @@ class CaptureAgent:
         self.capture_errors: list[str] = []
         # Fix 2.5: track tasks so stop() can cancel them individually and await completion.
         self._tasks: list[asyncio.Task] = []
+
+    @property
+    def poll_interval_ms(self) -> int:
+        return self._poll_interval_ms
+
+    @property
+    def batch_size(self) -> int:
+        return self._batch_size
+
+    def set_poll_interval_ms(self, poll_interval_ms: int) -> None:
+        """Update sleep between CDC polls (applies on the next loop iteration)."""
+        clamped = max(100, min(poll_interval_ms, 600_000))
+        self._poll_interval_ms = clamped
+        self._poll_interval = clamped / 1000.0
+
+    def set_batch_size(self, batch_size: int) -> None:
+        """Update maximum rows fetched per CDC poll."""
+        self._batch_size = max(1, min(batch_size, 10_000))
 
     async def start(
         self,

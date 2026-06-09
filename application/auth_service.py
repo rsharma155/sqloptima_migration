@@ -79,6 +79,10 @@ class AuthService:
         password: str,
         role: str = "viewer",
     ) -> UserRecord:
+        username = username.strip()
+        email = email.strip()
+        if not username:
+            raise AuthError("Username is required")
         if await self._repo.get_by_username(username):
             raise AuthError(f"Username '{username}' is already taken")
         if await self._repo.get_by_email(email):
@@ -129,7 +133,10 @@ class AuthService:
 
         Raises AuthError on invalid credentials or inactive account.
         """
-        record = await self._repo.get_by_username(username)
+        normalized = username.strip()
+        if not normalized:
+            raise AuthError("Invalid username or password")
+        record = await self._repo.get_by_username(normalized)
         # Always run bcrypt even when user is not found to prevent timing attacks.
         stored = record.password_hash if record else _DUMMY_HASH
         if not self.verify_password(password, stored) or not record:

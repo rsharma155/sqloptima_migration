@@ -131,6 +131,12 @@ class TestAuthentication:
         assert user.username == "grace"
         assert user.role == "operator"
 
+    async def test_username_lookup_is_case_insensitive(self, svc: AuthService):
+        await svc.create_user("ViewerUser", "viewer@example.com", "secret123", "viewer")
+        user = await svc.authenticate("vieweruser", "secret123")
+        assert user.username == "ViewerUser"
+        assert user.role == "viewer"
+
     async def test_wrong_password_raises(self, svc: AuthService):
         await svc.create_user("hank", "hank@example.com", "rightpw")
         with pytest.raises(AuthError, match="Invalid"):

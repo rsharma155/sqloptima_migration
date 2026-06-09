@@ -37,6 +37,7 @@ dependencies = [
 
     # Replication messaging (optional external RabbitMQ; in-process bus is default)
     "aio-pika>=9.4",
+    "apscheduler>=3.11.2",
 ]
 
 [project.optional-dependencies]

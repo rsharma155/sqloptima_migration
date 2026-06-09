@@ -74,6 +74,9 @@ func Load() (*EngineConfig, error) {
 	v.SetEnvPrefix("MIGRATION")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
+	// Explicit binds so start.py overrides always win over default.toml (esp. on Windows).
+	_ = v.BindEnv("database.metadata_url", "MIGRATION_DATABASE_METADATA_URL")
+	_ = v.BindEnv("queue.path", "MIGRATION_QUEUE_PATH")
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("read config: %w", err)

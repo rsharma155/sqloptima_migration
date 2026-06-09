@@ -249,6 +249,7 @@ async def startup() -> None:
         set_secrets_manager as set_notification_secrets_manager,
     )
     from apps.api.migration_settings_store import load_migration_settings
+    from apps.api.replication_settings_store import load_replication_settings
     from apps.api.dependencies import set_secret_provider as dep_set_secret_provider
     from apps.api.dependencies import set_secrets
     from infrastructure.metadata_db.session import AsyncSessionFactory, init_db
@@ -270,15 +271,15 @@ async def startup() -> None:
         db_url = os.environ.get("METADATA_DB_URL", "sqlite (default)")
         raise RuntimeError(
             f"Cannot connect to metadata database ({db_url}). "
-            "If using PostgreSQL, ensure the container is running: "
-            "`docker-compose up postgres_checklist -d`. "
-            "To use SQLite locally, remove METADATA_DB_URL from .env."
+            "Ensure Docker is running and start the metadata container: "
+            "`docker compose up postgres_checklist -d`."
         ) from exc
     from apps.api.startup_checks import run_startup_checks
     await run_startup_checks()
     await load_connections()
     await load_notification_settings()
     await load_migration_settings()
+    await load_replication_settings()
     await migration_svc.load_jobs()
     try:
         from application.audit_service import AuditService

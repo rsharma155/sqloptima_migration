@@ -124,8 +124,12 @@ export default function AdminUsersPage() {
       toast.success(`User ${deleteTarget.username} deleted`);
       setDeleteTarget(null);
       load();
-    } catch {
-      toast.error("Delete failed");
+    } catch (err: unknown) {
+      const msg =
+        err instanceof Error && err.message
+          ? err.message
+          : "Delete failed";
+      toast.error(msg);
     } finally {
       setDeleting(false);
     }

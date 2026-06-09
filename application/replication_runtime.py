@@ -92,10 +92,15 @@ class ReplicationRuntimeManager:
         await publisher.connect()
 
         pk_map = {t.name: t.pk_columns for t in config.tables}
+        target_name_map = {
+            t.name: (t.target_table_name or t.name)
+            for t in config.tables
+        }
         consumer = ReplicationChangeConsumer(
             target_connection,
             target_schema=config.target_schema,
             table_pk_map=pk_map,
+            table_target_names=target_name_map,
         )
         await bus.start(consumer.handle)
 
@@ -178,6 +183,18 @@ class ReplicationRuntimeManager:
         for stream_id in list(self._streams.keys()):
             await self.stop_stream(stream_id)
 
+    def apply_capture_settings(self, poll_interval_ms: int, batch_size: int) -> int:
+        """Push new poll interval / batch size to every active capture agent."""
+        updated = 0
+        for runtime in self._streams.values():
+            agent = runtime.capture_agent
+            if agent is None:
+                continue
+            agent.set_poll_interval_ms(poll_interval_ms)
+            agent.set_batch_size(batch_size)
+            updated += 1
+        return updated
+
     def status_payload(self, stream_id: str) -> dict[str, Any]:
         return self._metrics_payload(stream_id, detailed=False)
 
@@ -214,8 +231,8 @@ class ReplicationRuntimeManager:
             "apply_failures": applier_stats.get("failed", 0),
             "batches_polled": agent.batches_polled if agent else 0,
             "batches_with_changes": agent.batches_with_changes if agent else 0,
-            "batch_size": runtime.config.batch_size,
-            "poll_interval_ms": runtime.config.poll_interval_ms,
+            "batch_size": agent.batch_size if agent else runtime.config.batch_size,
+            "poll_interval_ms": agent.poll_interval_ms if agent else runtime.config.poll_interval_ms,
             "mode": runtime.config.mode,
         }
         if detailed:

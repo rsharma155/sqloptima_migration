@@ -13,6 +13,7 @@
  */
 
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useRouter } from "next/navigation";
 import {
   Search,
   ArrowUpDown,
@@ -80,6 +81,7 @@ import { TargetTableConflictDialog } from "@/components/migrations/target-table-
 import { ProceduralMigrationPanel } from "@/components/migrations/procedural-migration-panel";
 import {
   canStartMigrationFromAssessment,
+  isUnsupportedTypeOnlyBlocker,
   summarizeProceduralPreview,
   proceduralPreviewGate,
   summarizeSelectedTables,
@@ -352,6 +354,7 @@ function ConnectionPanel({
 // ---------------------------------------------------------------------------
 
 export default function MigrationsPage() {
+  const router = useRouter();
   const qc = useQueryClient();
   const [search, setSearch] = useState("");
   const [showNewDialog, setShowNewDialog] = useState(false);
@@ -612,6 +615,18 @@ export default function MigrationsPage() {
         selected_tables: options?.selectedTables,
       });
       const totalBlockers = applyAssessmentResult(assessment);
+      setSelectedTables((prev) => {
+        const next = new Set(prev);
+        for (const row of assessment.tables) {
+          if (
+            row.migration_tier === "BLOCKER" &&
+            !isUnsupportedTypeOnlyBlocker(row)
+          ) {
+            next.delete(row.table_name);
+          }
+        }
+        return next;
+      });
       if (!options?.quiet) {
         if (totalBlockers > 0) {
           toast.warning(
@@ -879,17 +894,18 @@ export default function MigrationsPage() {
         functions: selectedFunctions.size > 0 ? Array.from(selectedFunctions) : undefined,
         migrate_procedural_after_tables: true,
       });
-      toast.success(`Migration started: ${result.message}`);
+      toast.success(`Migration started — opening job details…`);
       setShowConflictDialog(false);
       setShowNewDialog(false);
       setPreflight(null);
       qc.invalidateQueries({ queryKey: ["migrations"] });
+      router.push(`/migrations/${result.job_id}`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Migration failed to start");
     } finally {
       setMigrating(false);
     }
-  }, [sourceConn, targetConn, selectedTables, schema, targetSchema, snapshotWarning.requireTargetSnapshot, qc, columnTypeOverrides, selectedProcedures, selectedFunctions]);
+  }, [sourceConn, targetConn, selectedTables, schema, targetSchema, snapshotWarning.requireTargetSnapshot, qc, columnTypeOverrides, selectedProcedures, selectedFunctions, router]);
 
   const handleStartMigration = useCallback(async () => {
     if (!sourceConn || !targetConn) { toast.error("Select both source and target connections"); return; }
@@ -1472,19 +1488,29 @@ export default function MigrationsPage() {
                       const isSelected = selectedTables.has(t.name);
                       const atSelectionLimit =
                         !isSelected && selectedTables.size >= maxTablesPerJob;
+                      const isMigrationBlocked =
+                        assess?.migration_tier === "BLOCKER" &&
+                        !isUnsupportedTypeOnlyBlocker(assess);
                       return (
                         <div key={t.name}>
                           <label
                             className={`flex items-center gap-3 px-4 py-2.5 hover:bg-muted/50 ${
-                              atSelectionLimit ? "cursor-not-allowed opacity-60" : "cursor-pointer"
+                              atSelectionLimit || isMigrationBlocked
+                                ? "cursor-not-allowed opacity-60"
+                                : "cursor-pointer"
                             }`}
                           >
                             <input
                               type="checkbox"
                               checked={isSelected}
-                              disabled={atSelectionLimit}
+                              disabled={atSelectionLimit || isMigrationBlocked}
                               onChange={() => toggleTable(t.name)}
                               className="h-4 w-4 rounded"
+                              title={
+                                isMigrationBlocked
+                                  ? "Cannot migrate — resolve BLOCKER issues (see Details)"
+                                  : undefined
+                              }
                             />
                             <Table2 className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
                             <span className="font-mono text-xs flex-1 truncate">{t.schema}.{t.name}</span>

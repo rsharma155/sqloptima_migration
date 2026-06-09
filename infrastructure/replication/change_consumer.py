@@ -28,11 +28,15 @@ class ReplicationChangeConsumer:
         *,
         target_schema: str,
         table_pk_map: dict[str, list[str]] | None = None,
+        table_target_names: dict[str, str] | None = None,
         redis_client: Any | None = None,
         dedup_capacity: int = 5000,
     ) -> None:
         self._target_schema = target_schema
         self._table_pk_map = {k.lower(): v for k, v in (table_pk_map or {}).items()}
+        self._table_target_names = {
+            k.lower(): v for k, v in (table_target_names or {}).items()
+        }
         dedup = Deduplicator(redis_client=redis_client, max_size=dedup_capacity)
         checkpoint = CheckpointStore(connection)
         self._applier = ChangeApplier(connection, checkpoint, dedup)
@@ -41,8 +45,13 @@ class ReplicationChangeConsumer:
     async def handle(self, event: ChangeEvent) -> None:
         """Apply one change event to the target database."""
         event.table_schema = self._target_schema
-        # Migrated PostgreSQL tables use lowercase unquoted identifiers.
-        event.table_name = event.table_name.lower()
+        # Preserve the actual PostgreSQL relname discovered during preflight (quoted DDL
+        # from migration may be mixed-case, e.g. "Bookings" not "bookings").
+        mapped = self._table_target_names.get(event.table_name.lower())
+        if mapped:
+            event.table_name = mapped
+        else:
+            event.table_name = event.table_name.lower()
         pk = self._table_pk_map.get(event.table_name.lower())
         applied = await self._applier.apply(event, pk_columns=pk)
         if applied:

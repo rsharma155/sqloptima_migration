@@ -661,7 +661,7 @@ export default function ComparisonPage() {
             </div>
           )}
           <p className="text-xs text-muted-foreground">
-            <a href="/settings" className="underline">Update connections in Settings</a> or start the database containers with{" "}
+            <a href="/settings?tab=connections" className="underline">Update connections in Settings</a> or start the database containers with{" "}
             <code className="text-[10px]">docker-compose up</code>.
           </p>
         </div>
@@ -828,7 +828,7 @@ export default function ComparisonPage() {
         <p className="text-xs text-muted-foreground">
           {sourceConnections.length === 0 && "Add a source (SQL Server) connection. "}
           {targetConnections.length === 0 && "Add a target (PostgreSQL) connection. "}
-          <a href="/settings" className="underline">Configure connections</a> to enable comparison.
+          <a href="/settings?tab=connections" className="underline">Configure connections</a> to enable comparison.
         </p>
       )}
 
@@ -982,7 +982,7 @@ export default function ComparisonPage() {
               Select a SQL Server source connection and a PostgreSQL target connection, choose schemas, then run Compare.
             </p>
             <div className="flex gap-3 mt-6">
-              <Button variant="default" asChild><a href="/settings">Configure Connections</a></Button>
+              <Button variant="default" asChild><a href="/settings?tab=connections">Configure Connections</a></Button>
             </div>
           </CardContent>
         </Card>

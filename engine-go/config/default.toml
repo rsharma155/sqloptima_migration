@@ -12,7 +12,7 @@ command_poll_ms = 500
 
 [queue]
 # Filesystem path for the embedded bbolt key-value store (replaces RocksDB).
-path = "/tmp/migration_queue.bbolt"
+path = "data/migration_queue.bbolt"
 
 [workers]
 # Parallel extraction goroutines.

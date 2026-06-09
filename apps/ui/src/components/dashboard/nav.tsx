@@ -9,7 +9,7 @@
  */
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
@@ -38,7 +38,8 @@ import {
   Bell,
 } from "lucide-react";
 import { useState, useEffect } from "react";
-import { logout, getToken } from "@/lib/api";
+import { logout, getToken, getAuthUsername } from "@/lib/api";
+import { canAccessAdminSettingsPages } from "@/lib/auth-role";
 import { toast } from "sonner";
 import { LoginModal } from "@/components/auth/login-modal";
 import { useGlobalAlerts } from "@/components/alerts/global-alerts-provider";
@@ -83,20 +84,30 @@ const navSections = [
 
 export function Nav() {
   const pathname = usePathname();
+  const router = useRouter();
   const [collapsed, setCollapsed] = useState(false);
   const [showLogin, setShowLogin] = useState(false);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [authUsername, setAuthUsername] = useState<string | null>(null);
   const { actionableCount, criticalCount } = useGlobalAlerts();
+
+  const [showAdminNav, setShowAdminNav] = useState(true);
 
   useEffect(() => {
     setIsLoggedIn(!!getToken());
+    setAuthUsername(getAuthUsername());
+    setShowAdminNav(canAccessAdminSettingsPages());
   }, []);
 
   const handleLogout = () => {
     logout();
     setIsLoggedIn(false);
+    setAuthUsername(null);
     toast.success("Logged out");
+    router.replace("/login");
   };
+
+  const userInitial = authUsername?.trim().charAt(0).toUpperCase() || "?";
 
   function NavLink({
     href,
@@ -197,58 +208,88 @@ export function Nav() {
 
         {/* ── Nav links ── */}
         <nav className="flex-1 overflow-y-auto p-2">
-          {navSections.map((section, si) => (
-            <div key={section.label} className={cn(si > 0 && "mt-1")}>
-              {!collapsed && (
-                <p className="px-3 pt-3 pb-1 text-[10px] font-semibold uppercase tracking-widest text-sidebar-foreground/35 select-none">
-                  {section.label}
-                </p>
-              )}
-              {collapsed && si > 0 && (
-                <div className="mx-auto my-2 h-px w-6 bg-sidebar-border" />
-              )}
-              <div className="space-y-0.5">
-                {section.links.map((link) => (
-                  <NavLink
-                    key={link.href}
-                    {...link}
-                    badge={link.href === "/alerts" ? actionableCount : undefined}
-                    badgeCritical={link.href === "/alerts" && criticalCount > 0}
-                  />
-                ))}
+          {navSections
+            .filter((section) => section.label !== "Admin" || showAdminNav)
+            .map((section, si) => (
+              <div key={section.label} className={cn(si > 0 && "mt-1")}>
+                {!collapsed && (
+                  <p className="px-3 pt-3 pb-1 text-[10px] font-semibold uppercase tracking-widest text-sidebar-foreground/35 select-none">
+                    {section.label}
+                  </p>
+                )}
+                {collapsed && si > 0 && (
+                  <div className="mx-auto my-2 h-px w-6 bg-sidebar-border" />
+                )}
+                <div className="space-y-0.5">
+                  {section.links.map((link) => (
+                    <NavLink
+                      key={link.href}
+                      {...link}
+                      badge={link.href === "/alerts" ? actionableCount : undefined}
+                      badgeCritical={link.href === "/alerts" && criticalCount > 0}
+                    />
+                  ))}
+                </div>
               </div>
-            </div>
-          ))}
+            ))}
         </nav>
 
-        {/* ── Footer: auth ── */}
-        <div className="border-t border-sidebar-border p-2">
+        {/* ── Footer: auth (pb-12 keeps clear of Next.js dev indicator) ── */}
+        <div className="border-t border-sidebar-border p-2 pb-12 space-y-1">
           {isLoggedIn ? (
             collapsed ? (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    aria-label="Logout"
-                    className="w-full justify-center px-0 text-destructive hover:text-destructive hover:bg-destructive/10"
-                    onClick={handleLogout}
-                  >
-                    <LogOut className="h-4 w-4 shrink-0" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="right">Logout</TooltipContent>
-              </Tooltip>
+              <div className="flex flex-col items-center gap-2">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <div
+                      className="flex h-9 w-9 items-center justify-center rounded-full bg-sidebar-accent text-xs font-semibold text-sidebar-accent-foreground"
+                      aria-label={authUsername ? `Signed in as ${authUsername}` : "Signed in"}
+                    >
+                      {userInitial}
+                    </div>
+                  </TooltipTrigger>
+                  <TooltipContent side="right">
+                    {authUsername ? `Signed in as ${authUsername}` : "Signed in"}
+                  </TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      aria-label="Logout"
+                      className="h-9 w-9 justify-center px-0 text-destructive hover:text-destructive hover:bg-destructive/10"
+                      onClick={handleLogout}
+                    >
+                      <LogOut className="h-4 w-4 shrink-0" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="right">Logout</TooltipContent>
+                </Tooltip>
+              </div>
             ) : (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="w-full justify-start gap-3 text-destructive hover:text-destructive hover:bg-destructive/10"
-                onClick={handleLogout}
-              >
-                <LogOut className="h-4 w-4 shrink-0" />
-                <span className="text-xs font-medium">Logout</span>
-              </Button>
+              <>
+                <div className="flex items-center gap-2 px-2 py-1 min-w-0">
+                  <div
+                    className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-sidebar-accent text-xs font-semibold text-sidebar-accent-foreground"
+                    aria-hidden="true"
+                  >
+                    {userInitial}
+                  </div>
+                  <span className="flex-1 truncate text-xs font-medium text-sidebar-foreground">
+                    {authUsername || "Signed in"}
+                  </span>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="w-full justify-start gap-3 text-destructive hover:text-destructive hover:bg-destructive/10"
+                  onClick={handleLogout}
+                >
+                  <LogOut className="h-4 w-4 shrink-0" />
+                  <span className="text-xs font-medium">Logout</span>
+                </Button>
+              </>
             )
           ) : collapsed ? (
             <Tooltip>
@@ -282,7 +323,12 @@ export function Nav() {
         {showLogin && (
           <LoginModal
             onClose={() => setShowLogin(false)}
-            onSuccess={() => { setIsLoggedIn(true); setShowLogin(false); }}
+            onSuccess={() => {
+              setIsLoggedIn(true);
+              setAuthUsername(getAuthUsername());
+              setShowAdminNav(canAccessAdminSettingsPages());
+              setShowLogin(false);
+            }}
           />
         )}
       </aside>

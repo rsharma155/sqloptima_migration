@@ -441,7 +441,6 @@ export default function ValidationPage() {
   const [downloading, setDownloading] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [selectedLevels, setSelectedLevels] = useState<Set<number>>(new Set([1, 2, 3]));
-  const [autoRunAttempted, setAutoRunAttempted] = useState(false);
   const [rowSamples, setRowSamples] = useState<RowSampleResponse | null>(null);
   const [rowSamplesLoading, setRowSamplesLoading] = useState(false);
 
@@ -534,14 +533,6 @@ export default function ValidationPage() {
       setRunning(false);
     }
   }, [jobId, jobInfo, selectedLevels, load]);
-
-  useEffect(() => {
-    const hasSupportedRuns = runs.some((r) => isSupportedValidationLevel(r.level));
-    if (!loading && !hasSupportedRuns && jobInfo && !autoRunAttempted && !running) {
-      setAutoRunAttempted(true);
-      void handleRunValidation();
-    }
-  }, [loading, runs, jobInfo, autoRunAttempted, running, handleRunValidation]);
 
   const handleLoadRowSamples = async () => {
     if (!jobId || !jobInfo) return;
@@ -655,6 +646,11 @@ export default function ValidationPage() {
         </span>
       </div>
 
+      <p className="text-xs text-muted-foreground -mt-2">
+        Validation does not run automatically. L2 and L3 issue full-table aggregate scans on the
+        source — run manually and avoid on large production tables during peak hours.
+      </p>
+
       {/* Summary badges */}
       {visibleRuns.length > 0 && !loading && (
         <div className="flex gap-4 text-sm">
@@ -685,7 +681,7 @@ export default function ValidationPage() {
         <EmptyState
           icon={ClipboardCheck}
           title="No validation runs yet"
-          description="Run L1–L3 validation using the button above, or start from the Migrations page."
+          description="Click Run Validation above to compare source and target. L1 is lightweight; L2/L3 scan source tables."
         />
       ) : (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">

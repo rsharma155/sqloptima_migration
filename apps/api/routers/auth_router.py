@@ -88,7 +88,10 @@ async def login(request: Request, req: AuthRequest):
     async with AsyncSessionFactory() as sess:
         audit = AuditService(sess)
         try:
-            user = await AuthService(sess).authenticate(req.username, req.password)
+            user = await AuthService(sess).authenticate(
+                req.username.strip(),
+                req.password,
+            )
         except AuthError:
             await audit.record(
                 AuditAction.USER_LOGIN,
@@ -265,11 +268,13 @@ async def update_user_role(user_id: str, req: UpdateRoleRequest, _: dict = requi
     )
 
 
-@router.delete("/users/{user_id}", status_code=204, response_model=None)
-async def delete_user(user_id: str, current_user: dict = require_role(UserRole.ADMIN)) -> None:
-    if current_user.get("sub") == user_id:
+@router.delete("/users/{user_id}", status_code=200)
+async def delete_user(user_id: str, current_user: dict = require_role(UserRole.ADMIN)) -> dict[str, bool]:
+    normalized_id = user_id.strip()
+    if current_user.get("sub") == normalized_id:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
     async with AsyncSessionFactory() as sess:
-        deleted = await AuthService(sess).delete_user(user_id)
+        deleted = await AuthService(sess).delete_user(normalized_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="User not found")
+    return {"deleted": True}
