@@ -46,6 +46,13 @@ _TERMINAL_STATUSES = frozenset({
 _TERMINAL_DB_STATUSES = frozenset({"completed", "partial", "failed", "stopped"})
 _COMPLETED_TABLE_STATUSES = frozenset({"completed", "done"})
 _FINISHED_TABLE_STATUSES = frozenset({"completed", "done", "failed", "skipped"})
+_ACTIVE_TABLE_STATUSES = frozenset({"migrating", "running", "in_progress", "queued", "pending"})
+_PAUSEABLE_JOB_STATUSES = frozenset({
+    MigrationStatus.RUNNING,
+    MigrationStatus.QUEUED,
+    MigrationStatus.RESUMED,
+    MigrationStatus.PENDING,
+})
 
 _registry = JobRegistry()
 
@@ -178,7 +185,12 @@ def _derive_job_status(
             if db_status in _TERMINAL_STATUSES:
                 return db_status
             # Go worker writes running/paused to metadata; in-memory cache may still say queued.
-            if db_status in (MigrationStatus.RUNNING, MigrationStatus.PAUSED, MigrationStatus.QUEUED):
+            if db_status in (
+                MigrationStatus.RUNNING,
+                MigrationStatus.PAUSED,
+                MigrationStatus.QUEUED,
+                MigrationStatus.RESUMED,
+            ):
                 if _go_job_data_complete(record):
                     return MigrationStatus.COMPLETED
                 return db_status
@@ -215,6 +227,102 @@ def _derive_job_status(
             pass
 
     return job.status
+
+
+def _can_pause_job(
+    job: MigrationJob,
+    record: MigrationJobRecord | None = None,
+) -> bool:
+    """True when the Go worker can accept a PAUSE command for this job."""
+    status = _derive_job_status(job, record)
+    if status in _TERMINAL_STATUSES or status == MigrationStatus.PAUSED:
+        return False
+    if status in _PAUSEABLE_JOB_STATUSES:
+        return True
+    return any((t.status or "").lower() in _ACTIVE_TABLE_STATUSES for t in job.tables)
+
+
+def _job_from_record(record: MigrationJobRecord) -> MigrationJob:
+    """Rebuild an in-memory MigrationJob from a metadata DB row."""
+    try:
+        persisted_status = (
+            MigrationStatus(record.status.lower()) if record.status else MigrationStatus.PENDING
+        )
+    except ValueError:
+        persisted_status = MigrationStatus.PENDING
+
+    job = MigrationJob(
+        job_id=UUID(record.migration_job_id),
+        source_connection_id=(
+            UUID(record.source_project_connection_id)
+            if record.source_project_connection_id
+            else UUID(int=0)
+        ),
+        target_connection_id=(
+            UUID(record.target_project_connection_id)
+            if record.target_project_connection_id
+            else UUID(int=0)
+        ),
+        project_id=getattr(record, "project_id", None),
+        status=persisted_status,
+        tables=[
+            TableMigrationPlan(
+                table_name=t.table_name,
+                schema_name=t.schema_name,
+                target_schema=getattr(t, "target_schema", "public"),
+                columns=t.columns if getattr(t, "columns", None) else ["*"],
+                row_count_estimate=t.row_count_estimate,
+                strategy=MigrationStrategy(t.strategy),
+                chunk_size=t.chunk_size,
+                parallel_workers=t.parallel_workers,
+                status=t.status,
+                rows_migrated=t.rows_migrated,
+            )
+            for t in record.table_plans
+        ],
+        error_message=getattr(record, "error", None),
+    )
+    job.executor = getattr(record, "executor", "go")
+    job.dispatch_config = getattr(record, "config", None)
+    cfg = getattr(record, "config", None) or {}
+    if cfg.get("procedural_migration"):
+        job.procedural_migration = cfg["procedural_migration"]
+    if cfg.get("finalize_options"):
+        job.finalize_options = cfg["finalize_options"]
+    _merge_record_into_job(job, record)
+    return job
+
+
+async def _fetch_job_and_record(
+    job_id: UUID,
+    *,
+    reconcile: bool = True,
+) -> tuple[MigrationJob | None, MigrationJobRecord | None]:
+    """Load job + metadata row, hydrating the in-memory registry when needed."""
+    try:
+        async with AsyncSessionFactory() as session:
+            result = await session.execute(
+                _sa_select(MigrationJobRecord)
+                .where(MigrationJobRecord.migration_job_id == str(job_id))
+                .options(_selectinload(MigrationJobRecord.table_plans))
+            )
+            record = result.scalar_one_or_none()
+            if record is None:
+                return _registry.get(job_id), None
+            if reconcile:
+                await _reconcile_go_job_completion(session, record)
+    except Exception as exc:
+        logger.warning("Failed to fetch job from metadata", job_id=str(job_id), error=str(exc))
+        return _registry.get(job_id), None
+
+    async with _registry.lock:
+        job = _registry.get(job_id)
+        if job is None:
+            job = _job_from_record(record)
+            _registry.put(job)
+        else:
+            _merge_record_into_job(job, record)
+    return job, record
 
 
 def _merge_record_into_job(job: MigrationJob, record: MigrationJobRecord) -> None:
@@ -457,28 +565,7 @@ def get_job(job_id: UUID) -> MigrationJob | None:
 
 async def refresh_job_from_metadata(job_id: UUID) -> MigrationJob | None:
     """Merge durable metadata DB state into the in-memory job (Go executor jobs)."""
-    job = _registry.get(job_id)
-    if job is None:
-        return None
-
-    try:
-        async with AsyncSessionFactory() as session:
-            result = await session.execute(
-                _sa_select(MigrationJobRecord)
-                .where(MigrationJobRecord.migration_job_id == str(job_id))
-                .options(_selectinload(MigrationJobRecord.table_plans))
-            )
-            record = result.scalar_one_or_none()
-            if record is None:
-                return job
-            await _reconcile_go_job_completion(session, record)
-    except Exception as exc:
-        logger.warning("Failed to refresh job from metadata", job_id=str(job_id), error=str(exc))
-        return job
-
-    async with _registry.lock:
-        _merge_record_into_job(job, record)
-
+    job, _record = await _fetch_job_and_record(job_id, reconcile=True)
     return job
 
 
@@ -950,11 +1037,12 @@ async def _dispatch_go_migration_job(job_id: UUID) -> None:
 
 
 async def pause_job(job_id: UUID) -> MigrationJob:
-    job = await refresh_job_from_metadata(job_id)
-    if not job:
+    job, record = await _fetch_job_and_record(job_id, reconcile=False)
+    if job is None:
         raise KeyError(job_id)
-    if job.status not in (MigrationStatus.RUNNING, MigrationStatus.QUEUED, MigrationStatus.RESUMED):
-        raise ValueError(f"Job is not running (status={job.status.value})")
+    effective = _derive_job_status(job, record)
+    if not _can_pause_job(job, record):
+        raise ValueError(f"Job is not running (status={effective.value})")
 
     async with AsyncSessionFactory() as session:
         from infrastructure.metadata_db.repositories.command_repository import CommandRepository
@@ -977,11 +1065,12 @@ async def pause_job(job_id: UUID) -> MigrationJob:
 
 
 async def resume_job(job_id: UUID) -> MigrationJob:
-    job = await refresh_job_from_metadata(job_id)
-    if not job:
+    job, record = await _fetch_job_and_record(job_id, reconcile=False)
+    if job is None:
         raise KeyError(job_id)
-    if job.status != MigrationStatus.PAUSED:
-        raise ValueError(f"Job is not paused (status={job.status.value})")
+    effective = _derive_job_status(job, record)
+    if effective != MigrationStatus.PAUSED:
+        raise ValueError(f"Job is not paused (status={effective.value})")
 
     async with AsyncSessionFactory() as session:
         from infrastructure.metadata_db.repositories.command_repository import CommandRepository

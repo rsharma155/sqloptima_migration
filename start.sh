@@ -30,9 +30,33 @@ BANNER
 echo -e "${RESET}${CYAN}  SQL Server → PostgreSQL Migration Platform  |  v0.2.0${RESET}"
 
 # ══════════════════════════════════════════════════════════════════════
-# STEP 1 — Locate Python 3.11+
+# STEP 1 — Bootstrap prerequisites (Python venv module, Node, Go)
 # ══════════════════════════════════════════════════════════════════════
-step "[1/3] Checking prerequisites..."
+step "[1/4] Bootstrapping prerequisites..."
+
+BOOTSTRAP="$SCRIPT_DIR/scripts/bootstrap_prereqs.sh"
+if [ -f "$BOOTSTRAP" ]; then
+    chmod +x "$BOOTSTRAP" 2>/dev/null || true
+    bash "$BOOTSTRAP" || warn "Some prerequisites could not be auto-installed"
+else
+    warn "bootstrap_prereqs.sh not found — skipping auto-install"
+fi
+
+PATH_ENV="${HOME}/.local/sqloptima/path.env"
+if [ -f "$PATH_ENV" ]; then
+    # shellcheck disable=SC1090
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            PATH=*) export PATH="${line#PATH=}" ;;
+            GOROOT=*) export GOROOT="${line#GOROOT=}" ;;
+        esac
+    done <"$PATH_ENV"
+fi
+
+# ══════════════════════════════════════════════════════════════════════
+# STEP 2 — Locate Python 3.11+
+# ══════════════════════════════════════════════════════════════════════
+step "[2/4] Checking prerequisites..."
 
 PYTHON=""
 for candidate in python3.13 python3.12 python3.11 python3 python; do
@@ -53,40 +77,34 @@ done
 if [ -z "$PYTHON" ]; then
     err "Python 3.11 or newer is required but was not found."
     echo ""
-    echo "  Install it and re-run this script:"
-    echo -e "    ${CYAN}macOS:${RESET}          brew install python@3.11"
-    echo -e "    ${CYAN}Ubuntu/Debian:${RESET}  sudo apt install python3.11 python3.11-venv"
-    echo -e "    ${CYAN}Other:${RESET}          https://www.python.org/downloads/"
+    echo "  Re-run ./start.sh (auto-install) or install manually:"
+    echo -e "    ${CYAN}Ubuntu/Debian:${RESET}  sudo apt install python3.12 python3.12-venv"
+    echo -e "    ${CYAN}macOS:${RESET}          brew install python@3.12"
     exit 1
 fi
 
-# Ensure the venv module is available
 if ! "$PYTHON" -m venv --help &>/dev/null 2>&1; then
     err "Python venv module not available."
-    echo "  On Ubuntu/Debian: sudo apt install python3-venv"
+    echo "  Re-run ./start.sh or: sudo apt install python3-venv"
     exit 1
 fi
 
-# Node.js / npm — optional (needed only for the UI)
 if command -v npm &>/dev/null; then
     ok "npm $(npm --version)  ($(command -v npm))"
 else
-    warn "Node.js / npm not found — UI will be skipped"
-    echo "         Install from: https://nodejs.org"
+    warn "Node.js / npm still not available — UI will be skipped"
 fi
 
-# Go — optional (needed for the migration-engine data plane)
 if command -v go &>/dev/null; then
     ok "$(go version)"
 else
-    warn "Go not found — migration-engine will be skipped"
-    echo "         Install Go 1.23+ from: https://go.dev/dl/"
+    warn "Go still not available — migration-engine will be skipped"
 fi
 
 # ══════════════════════════════════════════════════════════════════════
-# STEP 2 — Create / reuse virtual environment
+# STEP 3 — Create / reuse virtual environment
 # ══════════════════════════════════════════════════════════════════════
-step "[2/3] Setting up Python virtual environment..."
+step "[3/4] Setting up Python virtual environment..."
 
 VENV="$SCRIPT_DIR/.venv"
 VENV_PYTHON="$VENV/bin/python"
@@ -100,13 +118,12 @@ else
     ok "Using existing .venv"
 fi
 
-# Upgrade pip inside the venv (quiet; failures are non-fatal)
 "$VENV_PIP" install --quiet --upgrade pip 2>/dev/null || true
 
 # ══════════════════════════════════════════════════════════════════════
-# STEP 3 — Hand off to start.py (it handles the rest)
-#   start.py installs Python deps, npm deps, .env, then starts services.
+# STEP 4 — Hand off to start.py (deps, .env, services)
 # ══════════════════════════════════════════════════════════════════════
-step "[3/3] Launching..."
+step "[4/4] Launching..."
 
+export SQLOPTIMA_IN_VENV=1
 exec "$VENV_PYTHON" "$SCRIPT_DIR/start.py" "$@"

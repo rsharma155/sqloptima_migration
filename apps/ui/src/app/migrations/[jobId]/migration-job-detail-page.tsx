@@ -55,7 +55,7 @@ import {
   type ProgressResponse,
   type MigrationLogEntry,
 } from "@/lib/api";
-import { isLiveMigrationDetail, isTerminalMigration } from "@/lib/migration-status";
+import { isLiveMigrationDetail, isTerminalMigration, canPauseMigration } from "@/lib/migration-status";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -480,31 +480,6 @@ export default function MigrationDetailPage() {
 
   const migrationLogs = logsData?.logs ?? [];
 
-  const upper = effectiveStatus.toUpperCase();
-  const displayStatus = upper;
-  const isRunning =
-    !terminal && ["RUNNING", "IN_PROGRESS", "QUEUED", "RESUMED"].includes(upper);
-  const isPaused = !terminal && upper === "PAUSED";
-
-  const control = async (action: "pause" | "resume" | "stop") => {
-    if (!jobId) return;
-    const nextState: ControlState =
-      action === "pause" ? "pausing" : action === "resume" ? "resuming" : "stopping";
-    setControlState(nextState);
-    try {
-      if (action === "pause") await pauseMigration(jobId);
-      else if (action === "resume") await resumeMigration(jobId);
-      else await stopMigration(jobId);
-      toast.success(`Job ${action}d`);
-      qc.invalidateQueries({ queryKey: ["migration", jobId] });
-      qc.invalidateQueries({ queryKey: ["migration-progress", jobId] });
-    } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : `${action} failed`);
-    } finally {
-      setControlState("idle");
-    }
-  };
-
   const tableProgressFromApi = (progress?.tables_progress ?? {}) as Record<string, TableInfo>;
   const tableProgressFromJob = Object.fromEntries(
     (job?.tables ?? []).map((t) => [
@@ -526,6 +501,33 @@ export default function MigrationDetailPage() {
   }
   const mergedTableProgress = { ...tableProgressFromJob, ...tableProgressFromApi };
   const tableProgress = Object.entries(mergedTableProgress);
+
+  const upper = effectiveStatus.toUpperCase();
+  const displayStatus = upper;
+  const tableStatuses = tableProgress.map(([, info]) => info.status ?? "");
+  const isRunning =
+    !terminal &&
+    canPauseMigration(effectiveStatus, tableStatuses);
+  const isPaused = !terminal && upper === "PAUSED";
+
+  const control = async (action: "pause" | "resume" | "stop") => {
+    if (!jobId) return;
+    const nextState: ControlState =
+      action === "pause" ? "pausing" : action === "resume" ? "resuming" : "stopping";
+    setControlState(nextState);
+    try {
+      if (action === "pause") await pauseMigration(jobId);
+      else if (action === "resume") await resumeMigration(jobId);
+      else await stopMigration(jobId);
+      toast.success(`Job ${action}d`);
+      qc.invalidateQueries({ queryKey: ["migration", jobId] });
+      qc.invalidateQueries({ queryKey: ["migration-progress", jobId] });
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : `${action} failed`);
+    } finally {
+      setControlState("idle");
+    }
+  };
 
   const preparingMigration =
     live &&

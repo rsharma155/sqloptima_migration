@@ -480,6 +480,15 @@ class PlatformMigrationSettingsRecord(Base):
     updated_at = Column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now)
 
 
+class PlatformReplicationSettingsRecord(Base):
+    __tablename__ = "platform_replication_settings"
+
+    settings_id = Column(String(36), primary_key=True, default="platform-default")
+    poll_interval_ms = Column(Integer, nullable=False, default=1000)
+    batch_size = Column(Integer, nullable=False, default=1000)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now)
+
+
 class PlatformNotificationSettingsRecord(Base):
     __tablename__ = "platform_notification_settings"
 

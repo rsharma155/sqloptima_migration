@@ -18,16 +18,18 @@ import os
 from collections.abc import AsyncGenerator
 from pathlib import Path
 
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from infrastructure.metadata_db.models import Base
+from shared.logging.structured_logging import get_logger
 from infrastructure.metadata_db.schema_repair import (
     repair_go_engine_metadata,
     repair_replication_stream_metadata,
 )
 
 _DEFAULT_DB_URL = "sqlite+aiosqlite:///migration_platform.db"
+logger = get_logger(__name__)
 
 
 def _resolve_url() -> str:
@@ -136,6 +138,71 @@ async def _alembic_version_exists() -> bool:
         return "alembic_version" in tables
 
 
+def _column_names(sync_conn, table: str) -> set[str]:
+    if table not in inspect(sync_conn).get_table_names():
+        return set()
+    return {c["name"] for c in inspect(sync_conn).get_columns(table)}
+
+
+async def _schema_is_orm_compatible() -> bool:
+    """False when legacy Alembic tables (``id`` PKs) block ORM ``create_all``."""
+    async with _engine.connect() as conn:
+        tables = await conn.run_sync(lambda sync_conn: set(inspect(sync_conn).get_table_names()))
+        if not tables:
+            return True
+        job_cols = await conn.run_sync(lambda sync_conn: _column_names(sync_conn, "migration_jobs"))
+        if job_cols and "migration_job_id" not in job_cols:
+            return False
+        conn_cols = await conn.run_sync(
+            lambda sync_conn: _column_names(sync_conn, "project_connections")
+        )
+        if conn_cols and "project_connection_id" not in conn_cols and "id" in conn_cols:
+            return False
+    return True
+
+
+async def _drop_all_metadata_tables(conn) -> None:
+    """Drop every metadata table, including legacy Alembic layouts not in the ORM.
+
+    ``Base.metadata.drop_all`` fails when ``project_connections`` and
+    ``project_projects`` reference each other. PostgreSQL dev DBs use schema reset;
+    SQLite disables FK checks for the drop pass.
+    """
+    url = _resolve_url()
+    if url.startswith("postgresql"):
+
+        def _reset_public_schema(sync_conn) -> None:
+            sync_conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+            sync_conn.execute(text("CREATE SCHEMA public"))
+            sync_conn.execute(text("GRANT ALL ON SCHEMA public TO CURRENT_USER"))
+            sync_conn.execute(text("GRANT ALL ON SCHEMA public TO public"))
+
+        await conn.run_sync(_reset_public_schema)
+        return
+
+    def _drop_sqlite_tables(sync_conn) -> None:
+        sync_conn.execute(text("PRAGMA foreign_keys = OFF"))
+        existing = set(inspect(sync_conn).get_table_names())
+        for name in existing:
+            if name == "sqlite_sequence":
+                continue
+            sync_conn.execute(text(f'DROP TABLE IF EXISTS "{name}"'))
+        sync_conn.execute(text("PRAGMA foreign_keys = ON"))
+
+    await conn.run_sync(_drop_sqlite_tables)
+
+
+async def _reset_incompatible_metadata_schema() -> None:
+    """Drop legacy/partial schema so ``create_all`` can build the current ORM tables."""
+    logger.warning(
+        "metadata_schema_incompatible",
+        action="drop_and_recreate",
+        hint="Caused by an old Alembic layout (e.g. migration_jobs.id). Dev data will be lost.",
+    )
+    async with _engine.begin() as conn:
+        await _drop_all_metadata_tables(conn)
+
+
 async def init_db() -> None:
     """Ensure metadata tables exist and schema matches the current ORM models.
 
@@ -145,6 +212,8 @@ async def init_db() -> None:
     Legacy DBs with old ``id`` columns: run targeted Alembic upgrades first.
     """
     _cleanup_stale_sqlite_if_postgres()
+    if not await _schema_is_orm_compatible():
+        await _reset_incompatible_metadata_schema()
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     if await _uses_legacy_id_columns():

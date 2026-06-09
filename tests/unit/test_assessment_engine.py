@@ -31,7 +31,14 @@ def _make_table(
     row_count: int = 0,
     is_temporal: bool = False,
     is_memory_optimized: bool = False,
+    primary_key_columns: list[str] | None = None,
 ) -> Table:
+    cols = columns or []
+    pk = primary_key_columns
+    if pk is None:
+        pk = [c.column_name for c in cols if c.is_identity]
+        if not pk and any(c.column_name == "id" for c in cols):
+            pk = ["id"]
     return Table(
         database_name="AdventureWorks",
         schema_name=schema,
@@ -39,7 +46,8 @@ def _make_table(
         row_count_estimate=row_count,
         is_temporal=is_temporal,
         is_memory_optimized=is_memory_optimized,
-        columns=columns or [],
+        columns=cols,
+        primary_key_columns=pk or [],
     )
 
 
@@ -230,11 +238,26 @@ class TestSpecialFlags:
         result = engine.assess_table(table)
         assert result.migration_tier in (MigrationTier.WARNING, MigrationTier.BLOCKER)
 
-    def test_no_identity_column_warns(self):
+    def test_no_primary_key_is_blocker(self):
         engine = AssessmentEngine()
-        table = _make_table(columns=[_make_col("id", "int", is_identity=False)])
+        table = _make_table(
+            name="testtable",
+            columns=[_make_col("id", "int", is_identity=False)],
+            primary_key_columns=[],
+        )
         result = engine.assess_table(table)
-        assert any("IDENTITY" in w or "identity" in w.lower() for w in result.warnings)
+        assert result.migration_tier == MigrationTier.BLOCKER
+        assert any("primary key" in b.lower() for b in result.blockers)
+
+    def test_identity_without_primary_key_is_still_blocker(self):
+        engine = AssessmentEngine()
+        table = _make_table(
+            columns=[_make_col("id", "int", is_identity=True)],
+            primary_key_columns=[],
+        )
+        result = engine.assess_table(table)
+        assert result.migration_tier == MigrationTier.BLOCKER
+        assert any("primary key" in b.lower() for b in result.blockers)
 
     def test_large_table_adds_prerequisite(self):
         engine = AssessmentEngine()

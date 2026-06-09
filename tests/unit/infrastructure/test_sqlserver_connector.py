@@ -49,6 +49,7 @@ def _make_mock_connection(rows: list[tuple] = None, columns: list[str] = None):
         if columns
         else None
     )
+    mock_cursor.nextset.return_value = False
     mock_cursor.fetchall.return_value = rows or []
 
     mock_conn = MagicMock()
@@ -177,11 +178,39 @@ class TestExecutorDispatch:
 
         assert rows == [{"id": 42, "name": "Bob"}]
 
+    async def test_execute_advances_past_declare_to_select_result_set(self):
+        """DECLARE batches expose the SELECT rowset only after nextset()."""
+        config = _make_config()
+        connector = SqlServerConnector(config)
+        mock_conn, mock_cursor = _make_mock_connection(
+            rows=[(1, "Alice")],
+            columns=["id", "name"],
+        )
+        select_description = [(col, None, None, None, None, None, None) for col in ("id", "name")]
+
+        def _advance_to_select() -> bool:
+            mock_cursor.description = select_description
+            return True
+
+        mock_cursor.description = None
+        mock_cursor.nextset.side_effect = _advance_to_select
+        connector._connection = mock_conn
+        connector._cursor = mock_cursor
+
+        rows = await connector.execute(
+            "DECLARE @x int = 1;\nSELECT id, name FROM users",
+            1,
+        )
+
+        mock_cursor.nextset.assert_called_once()
+        assert rows == [{"id": 1, "name": "Alice"}]
+
     async def test_execute_returns_empty_for_non_select(self):
         config = _make_config()
         connector = SqlServerConnector(config)
         mock_conn, mock_cursor = _make_mock_connection(rows=[], columns=[])
         mock_cursor.description = None  # DML statements have no description
+        mock_cursor.nextset.return_value = False
         connector._connection = mock_conn
         connector._cursor = mock_cursor
 
@@ -229,6 +258,9 @@ class TestExecutorDispatch:
 
 class _PyodbcSemanticsCursor(MagicMock):
     """A cursor mock that faithfully reproduces pyodbc's marker/param check."""
+
+    def nextset(self) -> bool:
+        return False
 
     def execute(self, sql, *parameters):  # noqa: D401 - mimics pyodbc signature
         markers = sql.count("?")

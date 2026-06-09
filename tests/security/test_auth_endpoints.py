@@ -315,3 +315,19 @@ class TestRBAC:
         admin_id = next(u["id"] for u in users_resp.json() if u["username"] == "admin")
         resp = await client.delete(f"/api/v1/users/{admin_id}", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 400
+
+    async def test_admin_can_delete_other_user(self, client: AsyncClient):
+        token = await _admin_token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        create = await client.post(
+            "/api/v1/users",
+            json={"username": "doomed", "email": "doomed@test.com", "password": "pw", "role": "viewer"},
+            headers=headers,
+        )
+        assert create.status_code == 201
+        doomed_id = create.json()["id"]
+        delete = await client.delete(f"/api/v1/users/{doomed_id}", headers=headers)
+        assert delete.status_code == 200
+        assert delete.json() == {"deleted": True}
+        users = await client.get("/api/v1/users", headers=headers)
+        assert all(u["id"] != doomed_id for u in users.json())

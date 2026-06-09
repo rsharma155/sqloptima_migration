@@ -25,20 +25,35 @@ from apps.replicator.capture.providers.cdc_provider import SqlServerCdcProvider
 
 
 def _make_lsn_bytes(seg1: int, seg2: int, seg3: int) -> bytes:
-    return struct.pack(">III", seg1, seg2, seg3)
+    return struct.pack(">IIH", seg1, seg2, seg3)
 
 
-def _make_connector(rows: list[dict[str, Any]], min_lsn: bytes = b"", max_lsn: bytes = b"") -> MagicMock:
+def _make_connector(
+    rows: list[dict[str, Any]],
+    min_lsn: bytes | None = b"",
+    max_lsn: bytes | None = b"",
+) -> MagicMock:
     connector = MagicMock()
+    execute_calls: list[tuple[str, tuple[Any, ...]]] = []
 
     async def execute(query: str, *args: Any) -> list[dict[str, Any]]:
+        execute_calls.append((query, args))
         if "fn_cdc_get_min_lsn" in query:
-            return [{"min_lsn": min_lsn}]
+            return [{"min_lsn": min_lsn or None}]
         if "fn_cdc_get_max_lsn" in query:
-            return [{"max_lsn": max_lsn}]
+            return [{"max_lsn": max_lsn if max_lsn is not None else None}]
+        if "cdc.captured_columns" in query:
+            return [
+                {"column_name": "id"},
+                {"column_name": "amount"},
+                {"column_name": "status"},
+            ]
+        if "cdc.change_tables" in query and "capture_instance" in query:
+            return [{"capture_instance": "dbo_orders"}]
         return rows
 
     connector.execute = execute
+    connector.execute_calls = execute_calls
     return connector
 
 
@@ -49,6 +64,7 @@ def table() -> TableInfo:
         table_name="orders",
         columns=["id", "amount", "status"],
         pk_columns=["id"],
+        capture_instance="dbo_orders",
     )
 
 
@@ -181,8 +197,7 @@ class TestSqlServerCdcProviderLsnAdvancement:
 
         batch = await provider.capture_changes(table, last_position=None, batch_size=1000)
 
-        expected_lsn = LsnPosition(*struct.unpack(">III", lsn2))
-        assert batch.new_position == expected_lsn
+        assert batch.new_position == LsnPosition(1, 0, 9)
 
     async def test_lsn_unchanged_when_no_rows(self, table: TableInfo) -> None:
         lsn = _make_lsn_bytes(5, 0, 0)
@@ -202,6 +217,8 @@ class TestSqlServerCdcProviderLsnAdvancement:
 
         async def execute(query: str, *args: Any) -> list[dict[str, Any]]:
             execute_calls.append((query, args))
+            if "fn_cdc_get_min_lsn" in query:
+                return [{"min_lsn": lsn_from}]
             if "fn_cdc_get_max_lsn" in query:
                 return [{"max_lsn": lsn_to}]
             return []
@@ -212,9 +229,81 @@ class TestSqlServerCdcProviderLsnAdvancement:
 
         await provider.capture_changes(table, last_position=lsn_from, batch_size=1000)
 
-        # fn_cdc_get_min_lsn should NOT be called when last_position is provided
-        min_lsn_calls = [c for c in execute_calls if "fn_cdc_get_min_lsn" in c[0]]
-        assert len(min_lsn_calls) == 0
+        ct_calls = [c for c in execute_calls if "_CT" in c[0]]
+        assert len(ct_calls) == 1
+        assert "WHERE __$start_lsn > ?" in ct_calls[0][0]
+        assert ct_calls[0][1] == (lsn_from,)
+
+
+class TestSqlServerCdcProviderQueryShape:
+    async def test_cdc_query_reads_change_table_not_tvf(self, table: TableInfo) -> None:
+        lsn_bytes = _make_lsn_bytes(1, 0, 1)
+        connector = _make_connector([], min_lsn=lsn_bytes, max_lsn=lsn_bytes)
+        provider = SqlServerCdcProvider(connector)
+
+        await provider.capture_changes(table, last_position=None, batch_size=1000)
+
+        cdc_calls = [
+            call for call in connector.execute_calls
+            if "_CT" in call[0]
+        ]
+        assert len(cdc_calls) == 1
+        query, args = cdc_calls[0]
+        assert "FROM cdc.[dbo_orders_CT]" in query
+        assert "WHERE __$start_lsn >= ?" in query
+        assert "fn_cdc_get_all_changes" not in query
+        assert len(args) == 1
+
+    async def test_resume_uses_exclusive_lsn_predicate(self, table: TableInfo) -> None:
+        lsn_from = _make_lsn_bytes(2, 0, 0)
+        lsn_to = _make_lsn_bytes(3, 0, 0)
+        connector = _make_connector([], min_lsn=lsn_from, max_lsn=lsn_to)
+        provider = SqlServerCdcProvider(connector)
+
+        await provider.capture_changes(table, last_position=lsn_from, batch_size=1000)
+
+        cdc_calls = [call for call in connector.execute_calls if "_CT" in call[0]]
+        assert "WHERE __$start_lsn > ?" in cdc_calls[0][0]
+
+    async def test_null_max_lsn_returns_empty_batch(self, table: TableInfo) -> None:
+        connector = _make_connector([], min_lsn=_make_lsn_bytes(1, 0, 1), max_lsn=None)
+        provider = SqlServerCdcProvider(connector)
+
+        batch = await provider.capture_changes(table, last_position=None, batch_size=1000)
+
+        assert batch.changes == []
+        assert batch.new_position == LsnPosition(0, 0, 0)
+        assert not any("_CT" in call[0] for call in connector.execute_calls)
+
+    async def test_lsn_window_already_caught_up_skips_change_table_query(self, table: TableInfo) -> None:
+        lsn = _make_lsn_bytes(5, 0, 0)
+        connector = _make_connector([], min_lsn=lsn, max_lsn=lsn)
+        provider = SqlServerCdcProvider(connector)
+
+        batch = await provider.capture_changes(table, last_position=lsn, batch_size=1000)
+
+        assert batch.changes == []
+        assert batch.new_position == LsnPosition(5, 0, 0)
+        assert not any("_CT" in call[0] for call in connector.execute_calls)
+
+    async def test_wildcard_columns_load_from_cdc_metadata(self) -> None:
+        lsn_bytes = _make_lsn_bytes(1, 0, 1)
+        connector = _make_connector([], min_lsn=lsn_bytes, max_lsn=lsn_bytes)
+        provider = SqlServerCdcProvider(connector)
+        table = TableInfo(
+            schema_name="dbo",
+            table_name="orders",
+            columns=["*"],
+            pk_columns=["id"],
+        )
+
+        await provider.capture_changes(table, last_position=None, batch_size=1000)
+
+        col_calls = [call for call in connector.execute_calls if "cdc.captured_columns" in call[0]]
+        assert len(col_calls) == 1
+        cdc_calls = [call for call in connector.execute_calls if "_CT" in call[0]]
+        assert "[id]" in cdc_calls[0][0]
+        assert "[amount]" in cdc_calls[0][0]
 
 
 class TestSqlServerCdcProviderDiscoverTables:

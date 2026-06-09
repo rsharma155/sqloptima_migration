@@ -30,6 +30,7 @@ import {
   Webhook,
   TriangleAlert,
   Timer,
+  RefreshCw,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -56,10 +57,14 @@ import {
   testAlertChannels,
   getMigrationSettings,
   saveMigrationSettings,
+  getReplicationSettings,
+  saveReplicationSettings,
   type AlertConfigResponse,
   type AlertConfigUpdateRequest,
   type MigrationSettingsResponse,
   type MigrationSettingsUpdateRequest,
+  type ReplicationSettingsResponse,
+  type ReplicationSettingsUpdateRequest,
 } from "@/lib/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -99,6 +104,7 @@ export default function SettingsPage() {
   const { theme: currentTheme, setTheme: setNextTheme } = useTheme();
   const theme = (currentTheme as Theme) ?? "dark";
   const [mounted, setMounted] = useState(false);
+  const [activeTab, setActiveTab] = useState("general");
   const [apiEndpoint, setApiEndpoint] = useState("http://localhost:8508");
   const [migrationEnv, setMigrationEnv] = useState<MigrationEnvironment>("development");
   const [errors, setErrors] = useState<FormErrors>({});
@@ -127,6 +133,7 @@ export default function SettingsPage() {
   const [testingAlerts, setTestingAlerts] = useState(false);
   const [savingAlerts, setSavingAlerts] = useState(false);
   const [savingMigration, setSavingMigration] = useState(false);
+  const [savingReplication, setSavingReplication] = useState(false);
   const [showSmtpPassword, setShowSmtpPassword] = useState(false);
   const [alertForm, setAlertForm] = useState<AlertConfigUpdateRequest>({
     webhook_enabled: false,
@@ -147,6 +154,10 @@ export default function SettingsPage() {
     large_table_size_mb_threshold: 50,
     max_tables_per_job: 25,
   });
+  const [replicationForm, setReplicationForm] = useState<ReplicationSettingsUpdateRequest>({
+    poll_interval_ms: 1000,
+    batch_size: 1000,
+  });
   const dialogRef = useRef<HTMLDivElement>(null);
   const queryClient = useQueryClient();
 
@@ -162,6 +173,12 @@ export default function SettingsPage() {
     staleTime: 60_000,
   });
 
+  const { data: replicationConfig } = useQuery<ReplicationSettingsResponse>({
+    queryKey: ["replication-settings"],
+    queryFn: getReplicationSettings,
+    staleTime: 60_000,
+  });
+
   useEffect(() => {
     if (!migrationConfig) return;
     setMigrationForm({
@@ -173,6 +190,14 @@ export default function SettingsPage() {
       max_tables_per_job: migrationConfig.max_tables_per_job,
     });
   }, [migrationConfig]);
+
+  useEffect(() => {
+    if (!replicationConfig) return;
+    setReplicationForm({
+      poll_interval_ms: replicationConfig.poll_interval_ms,
+      batch_size: replicationConfig.batch_size,
+    });
+  }, [replicationConfig]);
 
   useEffect(() => {
     if (!alertConfig) return;
@@ -208,6 +233,14 @@ export default function SettingsPage() {
     if (storedEndpoint) setApiEndpoint(storedEndpoint);
     setMigrationEnv(loadMigrationEnvironment());
     fetchAndSyncConnections().then(setConnections).catch(() => setConnections(loadConnections()));
+
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const tab = params.get("tab");
+      if (tab && ["general", "connections", "notifications", "migration", "replication"].includes(tab)) {
+        setActiveTab(tab);
+      }
+    }
   }, []);
 
   useEffect(() => {
@@ -325,6 +358,30 @@ export default function SettingsPage() {
     value: MigrationSettingsUpdateRequest[K],
   ) => {
     setMigrationForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const updateReplicationField = <K extends keyof ReplicationSettingsUpdateRequest>(
+    field: K,
+    value: ReplicationSettingsUpdateRequest[K],
+  ) => {
+    setReplicationForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const handleSaveReplicationSettings = async () => {
+    setSavingReplication(true);
+    try {
+      const saved = await saveReplicationSettings(replicationForm);
+      await queryClient.invalidateQueries({ queryKey: ["replication-settings"] });
+      const streamsNote =
+        saved.active_streams_updated && saved.active_streams_updated > 0
+          ? ` Applied to ${saved.active_streams_updated} active stream(s).`
+          : "";
+      toast.success(`Replication settings saved.${streamsNote}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to save replication settings");
+    } finally {
+      setSavingReplication(false);
+    }
   };
 
   const handleSaveMigrationSettings = async () => {
@@ -772,7 +829,7 @@ export default function SettingsPage() {
         </p>
       </div>
 
-      <Tabs defaultValue="general" className="space-y-4">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
         <TabsList aria-label="Settings tabs">
           <TabsTrigger value="general" className="flex items-center gap-2">
             <Cpu className="h-4 w-4" aria-hidden="true" />
@@ -789,6 +846,10 @@ export default function SettingsPage() {
           <TabsTrigger value="migration" className="flex items-center gap-2">
             <Timer className="h-4 w-4" aria-hidden="true" />
             Migration
+          </TabsTrigger>
+          <TabsTrigger value="replication" className="flex items-center gap-2">
+            <RefreshCw className="h-4 w-4" aria-hidden="true" />
+            Replication
           </TabsTrigger>
         </TabsList>
 
@@ -1248,6 +1309,79 @@ export default function SettingsPage() {
                 Requires admin role to save. Settings apply to all new migration jobs immediately.
                 {migrationConfig?.updated_at && (
                   <> Last updated: {new Date(migrationConfig.updated_at).toLocaleString()}.</>
+                )}
+              </p>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="replication" className="space-y-4" role="tabpanel">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <RefreshCw className="h-5 w-5" />
+                CDC capture tuning
+              </CardTitle>
+              <CardDescription>
+                Control how often SQL Server CDC is polled and how many change rows are read per
+                poll. These settings apply to all replication streams.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <div className="grid gap-4 sm:grid-cols-2 max-w-2xl">
+                <div className="space-y-2">
+                  <Label htmlFor="replication-poll-sec">Poll interval (seconds)</Label>
+                  <Input
+                    id="replication-poll-sec"
+                    type="number"
+                    min={0.1}
+                    max={600}
+                    step={0.1}
+                    value={replicationForm.poll_interval_ms / 1000}
+                    onChange={(e) =>
+                      updateReplicationField(
+                        "poll_interval_ms",
+                        Math.round(Number(e.target.value) * 1000),
+                      )
+                    }
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Current: every {(replicationForm.poll_interval_ms / 1000).toFixed(1)}s (
+                    {replicationForm.poll_interval_ms} ms). Minimum 0.1s.
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="replication-batch-size">Rows per CDC chunk</Label>
+                  <Input
+                    id="replication-batch-size"
+                    type="number"
+                    min={1}
+                    max={10000}
+                    value={replicationForm.batch_size}
+                    onChange={(e) =>
+                      updateReplicationField("batch_size", Number(e.target.value))
+                    }
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Maximum change rows fetched from SQL Server per table per poll.
+                  </p>
+                </div>
+              </div>
+
+              <Button onClick={handleSaveReplicationSettings} disabled={savingReplication}>
+                {savingReplication ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <Save className="h-4 w-4 mr-2" />
+                )}
+                {savingReplication ? "Saving…" : "Save replication settings"}
+              </Button>
+
+              <p className="text-xs text-muted-foreground">
+                Requires admin role to save. Active streams pick up changes immediately; new streams
+                use these values on start.
+                {replicationConfig?.updated_at && (
+                  <> Last updated: {new Date(replicationConfig.updated_at).toLocaleString()}.</>
                 )}
               </p>
             </CardContent>

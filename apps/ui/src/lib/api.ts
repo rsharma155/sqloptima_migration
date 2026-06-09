@@ -63,7 +63,10 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     // skipAuthRedirect=true skips this for the login & setup endpoints (401 = wrong password there).
     if (res.status === 401 && typeof window !== "undefined" && !options.skipAuthRedirect) {
       clearAuthCookieAndStorage();
-      window.location.replace("/login");
+      // Avoid reload loop: never hard-redirect to /login when already on a public auth page.
+      if (!isPublicAuthPath()) {
+        window.location.replace("/login");
+      }
       throw new ApiError(401, "Session expired. Please log in again.");
     }
     const error = await res.json().catch(() => ({ detail: res.statusText }));
@@ -76,6 +79,17 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     return res.text() as Promise<T>;
   }
 
+  // DELETE and other endpoints may return 204/205 with an empty body.
+  if (res.status === 204 || res.status === 205) {
+    return undefined as T;
+  }
+
+  const contentType = res.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) {
+    const text = await res.text();
+    return (text || undefined) as T;
+  }
+
   return res.json();
 }
 
@@ -86,10 +100,18 @@ function setAuthCookie(token: string): void {
   document.cookie = `auth_token=${token}; path=/; SameSite=Strict; Max-Age=28800${secure}`;
 }
 
+function isPublicAuthPath(): boolean {
+  if (typeof window === "undefined") return false;
+  const path = window.location.pathname;
+  return path === "/login" || path === "/setup";
+}
+
 function clearAuthCookieAndStorage(): void {
   if (typeof window === "undefined") return;
   localStorage.removeItem("auth_token");
   localStorage.removeItem("refresh_token");
+  localStorage.removeItem("auth_username");
+  localStorage.removeItem("auth_role");
   document.cookie = "auth_token=; path=/; SameSite=Strict; Max-Age=0; expires=Thu, 01 Jan 1970 00:00:01 GMT";
 }
 
@@ -111,19 +133,35 @@ export async function healthCheck(): Promise<{ status: string }> {
 // ---- Auth ----
 
 export async function login(username: string, password: string): Promise<{ access_token: string }> {
+  const { persistAuthRoleFromToken } = await import("@/lib/auth-role");
   const data = await request<{ access_token: string; refresh_token: string }>("/api/v1/auth/login", {
     method: "POST",
     body: { username, password },
     skipAuthRedirect: true, // 401 here means wrong password, not an expired session
   });
   localStorage.setItem("auth_token", data.access_token);
+  localStorage.setItem("auth_username", username);
   if (data.refresh_token) localStorage.setItem("refresh_token", data.refresh_token);
+  persistAuthRoleFromToken(data.access_token);
   setAuthCookie(data.access_token);
   return data;
 }
 
+export function getAuthUsername(): string | null {
+  return typeof window !== "undefined" ? localStorage.getItem("auth_username") : null;
+}
+
 export function logout(): void {
   clearAuthCookieAndStorage();
+}
+
+/** Drop stale localStorage tokens when the session cookie is missing (prevents /login reload loops). */
+export function purgeStaleAuth(): void {
+  if (typeof window === "undefined" || !isPublicAuthPath()) return;
+  const hasCookie = /(?:^|;\s*)auth_token=([^;]+)/.test(document.cookie);
+  if (localStorage.getItem("auth_token") && !hasCookie) {
+    clearAuthCookieAndStorage();
+  }
 }
 
 export function getToken(): string | null {
@@ -1086,6 +1124,29 @@ export async function saveMigrationSettings(
   body: MigrationSettingsUpdateRequest,
 ): Promise<MigrationSettingsResponse> {
   return request("/api/v1/admin/migration-settings", { method: "PUT", body });
+}
+
+export interface ReplicationSettingsResponse {
+  poll_interval_ms: number;
+  poll_interval_sec: number;
+  batch_size: number;
+  updated_at: string | null;
+  active_streams_updated?: number;
+}
+
+export interface ReplicationSettingsUpdateRequest {
+  poll_interval_ms: number;
+  batch_size: number;
+}
+
+export async function getReplicationSettings(): Promise<ReplicationSettingsResponse> {
+  return request("/api/v1/admin/replication-settings");
+}
+
+export async function saveReplicationSettings(
+  body: ReplicationSettingsUpdateRequest,
+): Promise<ReplicationSettingsResponse> {
+  return request("/api/v1/admin/replication-settings", { method: "PUT", body });
 }
 
 export async function testAlertChannels(

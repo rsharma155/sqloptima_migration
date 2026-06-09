@@ -13,7 +13,7 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Layers, Eye, EyeOff, Loader2, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { login, getApiBase } from "@/lib/api";
+import { login, getApiBase, purgeStaleAuth } from "@/lib/api";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -35,6 +35,7 @@ export default function LoginPage() {
   // at least one admin account is created.
   useEffect(() => {
     async function checkSetup() {
+      purgeStaleAuth();
       try {
         const res = await fetch(`${getApiBase()}/api/v1/auth/setup-required`);
         if (res.ok) {

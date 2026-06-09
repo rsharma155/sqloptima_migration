@@ -15,6 +15,7 @@ import math
 from typing import Any
 from uuid import UUID, uuid4
 
+from shared.kernel.ddl_identifier import quote_pg_ident
 from shared.logging.structured_logging import get_logger
 
 logger = get_logger(__name__)
@@ -629,6 +630,9 @@ _NUMERIC_SOURCE_TYPES = frozenset({
     "float", "real", "money", "smallmoney", "bit",
 })
 
+# bit/boolean: SUM works cross-DB but MIN/MAX fail on PostgreSQL booleans.
+_AGGREGATE_NUMERIC_TYPES = _NUMERIC_SOURCE_TYPES - {"bit"}
+
 
 class AggregateValidator:
     async def validate(
@@ -765,7 +769,7 @@ class AggregateValidator:
             return [
                 r["column_name"]
                 for r in rows
-                if str(r.get("type_name", "")).lower() in _NUMERIC_SOURCE_TYPES
+                if str(r.get("type_name", "")).lower() in _AGGREGATE_NUMERIC_TYPES
             ]
         except Exception:
             return []
@@ -799,7 +803,14 @@ class AggregateValidator:
                 f"FROM [{schema}].[{table}]"
             )
             return _normalize_aggregate_row(rows[0]) if rows else None
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "l2_source_aggregate_failed",
+                schema=schema,
+                table=table,
+                column=column,
+                error=str(exc),
+            )
             return None
 
     @staticmethod
@@ -807,14 +818,24 @@ class AggregateValidator:
         connector: Any, schema: str, table: str, column: str,
     ) -> dict[str, Any] | None:
         try:
+            qcol = quote_pg_ident(column)
+            qualified = f"{quote_pg_ident(schema)}.{quote_pg_ident(table)}"
+            # PostgreSQL has no round(double precision, int); cast AVG to numeric first.
             rows = await connector.execute(
-                f'SELECT MIN("{column}") AS min, MAX("{column}") AS max, '
-                f'SUM(CAST("{column}" AS DOUBLE PRECISION)) AS sum, '
-                f'ROUND(AVG(CAST("{column}" AS DOUBLE PRECISION)), 6) AS avg '
-                f'FROM "{schema}"."{table}"'
+                f"SELECT MIN({qcol}) AS min, MAX({qcol}) AS max, "
+                f"SUM(CAST({qcol} AS DOUBLE PRECISION)) AS sum, "
+                f"ROUND(CAST(AVG(CAST({qcol} AS DOUBLE PRECISION)) AS NUMERIC), 6) AS avg "
+                f"FROM {qualified}"
             )
             return _normalize_aggregate_row(rows[0]) if rows else None
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "l2_target_aggregate_failed",
+                schema=schema,
+                table=table,
+                column=column,
+                error=str(exc),
+            )
             return None
 
 

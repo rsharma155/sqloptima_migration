@@ -402,3 +402,28 @@ class TestAggregateValidator:
         col = result.details["column_results"][0]
         assert col["source"] == {"min": 1, "max": 100, "sum": 5050, "avg": 50.5}
         assert col["target"] == {"min": 1, "max": 100, "sum": 5050, "avg": 50.5}
+
+    @pytest.mark.asyncio
+    async def test_target_aggregate_sql_casts_avg_to_numeric_for_round(self):
+        """PostgreSQL rejects round(double precision, int); L2 must cast AVG first."""
+        from domains.validation.validation_engine import AggregateValidator
+
+        source = AsyncMock()
+        target = AsyncMock()
+        source.execute.return_value = [{"min": 1, "max": 10, "sum": 55, "avg": 5.5}]
+        target.execute.return_value = [{"min": 1, "max": 10, "sum": 55, "avg": 5.5}]
+
+        validator = AggregateValidator()
+        result = await validator.validate(
+            source,
+            target,
+            "ProductVendor",
+            "Purchasing",
+            ["ProductID"],
+            target_schema="Purchasing",
+        )
+        assert result.status.name == "PASSED"
+        tgt_sql = target.execute.call_args[0][0]
+        assert "ROUND(CAST(AVG(CAST(" in tgt_sql
+        assert "AS NUMERIC), 6) AS avg" in tgt_sql
+        assert 'FROM "Purchasing"."ProductVendor"' in tgt_sql

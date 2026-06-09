@@ -55,6 +55,28 @@ _ACTIVE_STATES = frozenset({
 })
 
 
+def _build_table_config_rows(
+    table_names: list[str],
+    *,
+    source_snapshots: list[TableSchemaSnapshot],
+    target_snapshots: dict[str, TableSchemaSnapshot],
+    source_schema: str,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for table in table_names:
+        src_snap = next(
+            (s for s in source_snapshots if s.table_name.lower() == table.lower()),
+            TableSchemaSnapshot(source_schema, table, ["id"], ["id"]),
+        )
+        tgt_snap = target_snapshots.get(table.lower())
+        rows.append({
+            "name": table,
+            "pk_columns": src_snap.pk_columns,
+            "target_table_name": tgt_snap.table_name if tgt_snap else table,
+        })
+    return rows
+
+
 def _concern_to_dict(c: StreamConcern) -> dict[str, Any]:
     return {
         "level": c.level,
@@ -266,9 +288,7 @@ async def _fetch_schema_snapshots(
     target_connector = await _open_target_connector(target_connection_id)
     try:
         src_discovery = SqlServerMetadataDiscovery(source_connector)
-        tgt_discovery = PostgresMetadataDiscovery(target_connector)
         database = source_connector._config.database  # type: ignore[attr-defined]
-        tgt_database = target_connector._config.database  # type: ignore[attr-defined]
 
         src_tables = await src_discovery.discover_tables(database, src_schema)
         src_by_name = {t.object_name.lower(): t for t in src_tables}
@@ -338,8 +358,8 @@ async def _fetch_postgres_pk(connector: Any, schema: str, table: str) -> list[st
         JOIN pg_namespace n ON n.oid = c.relnamespace
         JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey)
         WHERE i.indisprimary
-          AND n.nspname = $1
-          AND c.relname = $2
+          AND lower(n.nspname) = lower($1)
+          AND lower(c.relname) = lower($2)
         ORDER BY array_position(i.indkey, a.attnum)
         """,
         schema,
@@ -395,9 +415,9 @@ async def _postgres_actual_table_name(
         SELECT c.relname AS table_name
         FROM pg_class c
         JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = $1
+        WHERE lower(n.nspname) = lower($1)
           AND lower(c.relname) = lower($2)
-          AND c.relkind = 'r'
+          AND c.relkind IN ('r', 'p')
         LIMIT 1
         """,
         schema,
@@ -651,6 +671,12 @@ async def refresh_stream_concerns(stream_id: str) -> list[dict[str, Any]]:
         target_snapshots=target_snapshots,
     )
     concern_dicts = [_concern_to_dict(c) for c in concerns]
+    cfg["tables"] = _build_table_config_rows(
+        tables,
+        source_snapshots=source_snapshots,
+        target_snapshots=target_snapshots,
+        source_schema=src_schema,
+    )
     async with AsyncSessionFactory() as session:
         repo = ReplicationStreamRepository(session)
         await repo.update_record(
@@ -761,7 +787,7 @@ async def _load_checkpoints(
                 if cp is None:
                     continue
                 try:
-                    seg1, seg2, seg3 = struct.unpack(">III", cp.lsn_bytes)
+                    seg1, seg2, seg3 = struct.unpack(">IIH", cp.lsn_bytes)
                     lsn = LsnPosition(seg1, seg2, seg3)
                 except Exception:
                     lsn = LsnPosition(0, 0, 0)
@@ -782,6 +808,9 @@ async def _load_checkpoints(
 
 async def get_stream_details(stream_id: str) -> dict[str, Any] | None:
     """Return a rich live view of one replication stream for the detail page."""
+    from application.replication_settings_config import resolved_replication_capture_settings
+
+    platform_capture = resolved_replication_capture_settings()
     await reconcile_stream_runtime(stream_id)
     try:
         await refresh_stream_concerns(stream_id)
@@ -835,14 +864,24 @@ async def get_stream_details(stream_id: str) -> dict[str, Any] | None:
         "target_connection": _connection_summary(record.target_project_connection_id),
         "target_tables": target_tables,
         "checkpoints": checkpoints,
-        "operations": runtime.get("operations") if runtime else {"insert": 0, "update": 0, "delete": 0},
+        "operations": (
+            runtime.get("operations")
+            if runtime
+            else {"insert": 0, "update": 0, "delete": 0}
+        ),
         "duplicates_skipped": runtime.get("duplicates_skipped", 0) if runtime else 0,
         "apply_failures": runtime.get("apply_failures", 0) if runtime else 0,
         "batches_polled": runtime.get("batches_polled", 0) if runtime else 0,
         "batches_with_changes": runtime.get("batches_with_changes", 0) if runtime else 0,
-        "batch_size": runtime.get("batch_size", cfg.get("batch_size", 1000)) if runtime else 1000,
+        "batch_size": (
+            runtime.get("batch_size", platform_capture.batch_size)
+            if runtime
+            else platform_capture.batch_size
+        ),
         "poll_interval_ms": (
-            runtime.get("poll_interval_ms", 1000) if runtime else 1000
+            runtime.get("poll_interval_ms", platform_capture.poll_interval_ms)
+            if runtime
+            else platform_capture.poll_interval_ms
         ),
         "table_progress": runtime.get("table_progress", []) if runtime else [],
         "capture_errors": runtime.get("capture_errors", []) if runtime else [],
@@ -929,14 +968,12 @@ async def create_stream(
     )
 
     stream_id = str(uuid4())
-    table_configs: list[dict[str, Any]] = []
-    for table in validated_tables:
-        snap = TableSchemaSnapshot(src_schema, table, columns=["id"], pk_columns=["id"])
-        for s in source_snapshots or []:
-            if s.table_name.lower() == table.lower():
-                snap = s
-                break
-        table_configs.append({"name": table, "pk_columns": snap.pk_columns})
+    table_configs = _build_table_config_rows(
+        validated_tables,
+        source_snapshots=source_snapshots or [],
+        target_snapshots=target_snapshots or {},
+        source_schema=src_schema,
+    )
     config_json = {
         "name": name,
         "source_schema": src_schema,
@@ -1035,13 +1072,12 @@ async def update_stream(
         target_snapshots=target_snapshots,
     )
 
-    table_configs: list[dict[str, Any]] = []
-    for table in table_names:
-        src_snap = next(
-            (s for s in source_snapshots if s.table_name.lower() == table.lower()),
-            TableSchemaSnapshot(src_schema, table, ["id"], ["id"]),
-        )
-        table_configs.append({"name": table, "pk_columns": src_snap.pk_columns})
+    table_configs = _build_table_config_rows(
+        table_names,
+        source_snapshots=source_snapshots,
+        target_snapshots=target_snapshots,
+        source_schema=src_schema,
+    )
 
     new_cfg = {
         **cfg,
@@ -1107,12 +1143,15 @@ async def start_stream(stream_id: str) -> dict[str, Any]:
     table_names = [str(t["name"]) for t in cfg.get("tables", [])]
     src_schema = cfg.get("source_schema", "dbo")
     table_rows = cfg.get("tables", [])
+    from application.replication_settings_config import resolved_replication_capture_settings
+
+    capture_settings = resolved_replication_capture_settings()
     stream_config = ReplicationStreamConfig(
         stream_id=stream_id,
         name=record.stream_name or cfg.get("name", stream_id),
         source_connection_id=record.project_connection_id or "",
         target_connection_id=record.target_project_connection_id or "",
-        source_schema=cfg.get("source_schema", "dbo"),
+        source_schema=src_schema,
         target_schema=cfg.get("target_schema", "public"),
         tables=[
             StreamTableConfig(
@@ -1120,10 +1159,13 @@ async def start_stream(stream_id: str) -> dict[str, Any]:
                 pk_columns=list(t.get("pk_columns") or ["id"]),
                 watermark_column=t.get("watermark_column"),
                 soft_delete_column=t.get("soft_delete_column"),
+                target_table_name=str(t.get("target_table_name") or t["name"]),
             )
             for t in table_rows
         ],
         mode=cfg.get("mode", "cdc"),
+        poll_interval_ms=capture_settings.poll_interval_ms,
+        batch_size=capture_settings.batch_size,
     )
 
     target_conn = await _open_target_connection(record.target_project_connection_id)

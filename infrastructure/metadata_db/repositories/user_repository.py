@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from infrastructure.metadata_db.models import SessionRecord, UserRecord
@@ -28,11 +28,15 @@ class UserRepository:
         return list(result.scalars().all())
 
     async def get_by_id(self, user_id: str) -> UserRecord | None:
-        return await self._session.get(UserRecord, user_id)
+        result = await self._session.execute(
+            select(UserRecord).where(UserRecord.auth_user_id == user_id.strip())
+        )
+        return result.scalar_one_or_none()
 
     async def get_by_username(self, username: str) -> UserRecord | None:
+        normalized = username.strip().lower()
         result = await self._session.execute(
-            select(UserRecord).where(UserRecord.username == username)
+            select(UserRecord).where(func.lower(UserRecord.username) == normalized)
         )
         return result.scalar_one_or_none()
 
@@ -58,9 +62,14 @@ class UserRepository:
         return merged
 
     async def delete(self, user_id: str) -> bool:
-        record = await self.get_by_id(user_id)
+        normalized_id = user_id.strip()
+        record = await self.get_by_id(normalized_id)
         if not record:
             return False
+        # Remove refresh-token sessions first (SQLite FK enforcement varies).
+        await self._session.execute(
+            delete(SessionRecord).where(SessionRecord.auth_user_id == normalized_id)
+        )
         await self._session.delete(record)
         await self._session.commit()
         return True

@@ -13,8 +13,11 @@ import csv
 import html
 import io
 import json
-from datetime import UTC, datetime
+import math
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 from domains.validation.validation_engine import (
     ValidationCategory,
@@ -163,9 +166,31 @@ class ValidationReportExporter:
         }
 
 
+def json_safe_value(value: Any) -> Any:
+    """Recursively convert DB driver types (Decimal, datetime, …) for JSON columns."""
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        num = float(value)
+        if math.isfinite(num) and num == int(num) and abs(num) < 1e15:
+            return int(num)
+        return num
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, bytes):
+        return value.hex()
+    if isinstance(value, dict):
+        return {str(k): json_safe_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe_value(v) for v in value]
+    return value
+
+
 def result_to_dict(r: ValidationResult) -> dict[str, Any]:
     vid = r.validation_id
-    return {
+    return json_safe_value({
         "validation_id": str(vid) if vid is not None else None,
         "object_name": r.object_name,
         "category": r.category.value if hasattr(r.category, "value") else r.category,
@@ -187,7 +212,7 @@ def result_to_dict(r: ValidationResult) -> dict[str, Any]:
             for i in r.issues
         ],
         "details": r.details,
-    }
+    })
 
 
 def _dominant_category(report: ValidationReport) -> ValidationCategory:

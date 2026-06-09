@@ -2,7 +2,7 @@
 
 import { useEffect } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { getApiBase, getToken } from "@/lib/api";
+import { getApiBase, getToken, purgeStaleAuth } from "@/lib/api";
 
 /**
  * Runs on every page load to enforce the first-time setup and login flow:
@@ -21,6 +21,7 @@ export function AuthInit() {
     if (pathname === "/setup") return;
 
     async function checkAuth() {
+      purgeStaleAuth();
       try {
         const res = await fetch(`${getApiBase()}/api/v1/auth/setup-required`);
         if (!res.ok) return;

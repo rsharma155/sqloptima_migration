@@ -153,9 +153,22 @@ class SqlServerConnector(DatabaseConnector):
             logger.debug("Disconnecting from SQL Server", database=self._config.database)
             self._connection.close()
 
-    async def execute(self, query: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    async def execute(self, query: str, *args: Any, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         if not self._cursor:
             raise RuntimeError("Not connected. Call connect() first.")
+        
+        # Determine execution parameters. We support:
+        # 1. Positional args: execute(sql, val1, val2)
+        # 2. Dict-based params: execute(sql, {"key": val}) or execute(sql, params={"key": val})
+        final_params: Any = None
+        if params:
+            final_params = tuple(params.values())
+        elif args:
+            if len(args) == 1 and isinstance(args[0], dict):
+                final_params = tuple(args[0].values())
+            else:
+                final_params = args
+
         loop = asyncio.get_running_loop()
         try:
             def _sync_execute() -> list[dict[str, Any]]:
@@ -163,10 +176,14 @@ class SqlServerConnector(DatabaseConnector):
                 # not "no parameters" — which makes a marker-less query raise
                 # "0 parameter markers, but 1 parameters were supplied". Only pass
                 # a parameter sequence when we actually have parameters.
-                if params:
-                    self._cursor.execute(query, tuple(params.values()))
+                if final_params:
+                    self._cursor.execute(query, final_params)
                 else:
                     self._cursor.execute(query)
+                # DECLARE/SET batches expose the SELECT rowset only after nextset().
+                if "DECLARE " in query.upper():
+                    while self._cursor.description is None and self._cursor.nextset():
+                        pass
                 columns = [column[0] for column in self._cursor.description] if self._cursor.description else []
                 return [
                     dict(zip(columns, row, strict=False))
@@ -177,13 +194,22 @@ class SqlServerConnector(DatabaseConnector):
             logger.error("SQL Server query failed", error=str(exc))
             raise
 
-    async def execute_many(self, query: str, params_list: list[dict[str, Any]]) -> None:
+    async def execute_many(self, query: str, params_list: list[Any]) -> None:
         if not self._cursor:
             raise RuntimeError("Not connected. Call connect() first.")
+        if not params_list:
+            return
+
+        # Support both list of dicts and list of tuples/lists
+        if isinstance(params_list[0], dict):
+            final_list = [tuple(p.values()) for p in params_list]
+        else:
+            final_list = [tuple(p) if isinstance(p, (list, tuple)) else (p,) for p in params_list]
+
         loop = asyncio.get_running_loop()
         try:
             def _sync_execute_many() -> None:
-                self._cursor.executemany(query, [tuple(p.values()) for p in params_list])
+                self._cursor.executemany(query, final_list)
                 self._connection.commit()
             await loop.run_in_executor(None, _sync_execute_many)
         except Exception as exc:

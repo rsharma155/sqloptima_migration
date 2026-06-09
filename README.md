@@ -1,9 +1,12 @@
 # SQL Optima — SQL Server → PostgreSQL Migration Platform
 
-[License: MIT](https://opensource.org/licenses/MIT)
-[Python](https://www.python.org/downloads/)
-[Go](https://go.dev/)
-[Next.js](https://nextjs.org/)
+[License: MIT]([https://opensource.org/licenses/MIT](https://opensource.org/licenses/MIT))
+
+[Python]([https://opensource.org/licenses/MIT](https://opensource.org/licenses/MIT))
+
+[Go]([https://opensource.org/licenses/MIT](https://opensource.org/licenses/MIT))
+
+[Next.js]([https://opensource.org/licenses/MIT](https://opensource.org/licenses/MIT))
 [GitHub](https://github.com/rsharma155/sqloptima_migration)
 
 **Repository:** [github.com/rsharma155/sqloptima_migration](https://github.com/rsharma155/sqloptima_migration)
@@ -87,7 +90,7 @@ Migrating from SQL Server to PostgreSQL is hard due to deep differences in proce
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Complex T-SQL logic   | Multi-pass AST transpiler (SQLGlot + ANTLR4 fallback) with T-SQL parse unblockers, pgparse validation, and an auto-repair loop — never regex on full SQL |
 | Bulk data movement    | Go engine: half-open PK chunk boundaries, adaptive chunking, bbolt crash-safe queue, binary `COPY`, parallel workers                                     |
-| PII / compliance      | Column transforms (`mask_hash`, `mask_tokenize`, …) with `masking_policy: auto|strict` discovery via `pii_classifier`                                    |
+| PII / compliance      | Column transforms (`mask_hash`, `mask_tokenize`, …) with `masking_policy: auto                                                                           |
 | Staying in sync       | 9-state CDC finite state machine (snapshot → streaming)                                                                                                  |
 | Trust & correctness   | L1–L4 validation: row counts, aggregates, chunk hashing, statistical sampling; optional procedure/query equivalence harnesses                            |
 | Production cutover    | Snapshot gate (`pg_dump`), cutover checkpoints, write-freeze, rollback window, connection-switch manifest                                                |
@@ -461,14 +464,13 @@ helm install sql-optima ./deploy/helm/sql-optima \
 ### Operator documentation
 
 
-| Document                                 | Contents                                                    |
-| ---------------------------------------- | ----------------------------------------------------------- |
-| [ARCHITECTURE.md](ARCHITECTURE.md)       | Full system design and data flows                           |
-| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Runbooks, SLOs, cutover checklist, live equivalence tests   |
-| [docs/PACKAGING.md](docs/PACKAGING.md)   | Editions, license key generation, Helm deployment           |
-| [docs/SECURITY.md](docs/SECURITY.md)     | Production hardening, JWT rotation, metadata security audit |
-| [SECURITY.md](SECURITY.md)               | How to report security vulnerabilities                      |
-| [CONTRIBUTING.md](CONTRIBUTING.md)       | Development setup, tests, and pull request guidelines       |
+| Document                            | Contents                                                    |
+| ----------------------------------- | ----------------------------------------------------------- |
+| [ARCHITECTURE.md](ARCHITECTURE.md)  | Full system design and data flows                           |
+| [OPERATIONS.md](OPERATIONS.md)      | Runbooks, SLOs, cutover checklist, live equivalence tests   |
+| [PACKAGING.md](PACKAGING.md)        | Editions, license key generation, Helm deployment           |
+| [SECURITY.md](SECURITY.md)          | Production hardening, JWT rotation, metadata security audit |                                 |                                                             |
+| [CONTRIBUTING.md](CONTRIBUTING.md)  | Development setup, tests, and pull request guidelines       |
 
 
 ---

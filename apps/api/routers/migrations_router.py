@@ -422,10 +422,9 @@ async def start_migration(req: MigrationRequest, _: dict = require_role(UserRole
 
 @router.get("/migrations/{job_id}")
 async def get_migration(job_id: UUID):
-    job = svc.get_job(job_id)
+    job = await svc.refresh_job_from_metadata(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    job = await svc.refresh_job_from_metadata(job_id) or job
     source_schema = job.tables[0].schema_name if job.tables else None
     target_schema = job.tables[0].target_schema if job.tables else None
     effective = svc._derive_job_status(job)
@@ -596,10 +595,9 @@ async def stop_migration(job_id: UUID, _: dict = require_role(UserRole.OPERATOR)
 
 @router.get("/migrations/{job_id}/progress", response_model=ProgressResponse)
 async def get_migration_progress(job_id: UUID):
-    job = svc.get_job(job_id)
+    job = await svc.refresh_job_from_metadata(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    job = await svc.refresh_job_from_metadata(job_id) or job
     snapshot = svc.build_progress_snapshot(job)
     return ProgressResponse(job_id=job_id, **snapshot)
 

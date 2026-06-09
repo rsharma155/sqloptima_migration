@@ -77,6 +77,24 @@ WHERE c.object_id = OBJECT_ID(?)
 ORDER BY c.column_id
 """
 
+QUERY_PRIMARY_KEYS_BATCH = """
+SELECT
+    OBJECT_SCHEMA_NAME(i.object_id) AS schema_name,
+    OBJECT_NAME(i.object_id) AS table_name,
+    c.name AS column_name,
+    ic.key_ordinal
+FROM {database}.sys.indexes i
+INNER JOIN {database}.sys.index_columns ic
+    ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+INNER JOIN {database}.sys.columns c
+    ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+INNER JOIN {database}.sys.tables t ON i.object_id = t.object_id
+WHERE i.is_primary_key = 1
+  AND ic.is_included_column = 0
+  AND OBJECT_SCHEMA_NAME(i.object_id) = ?
+ORDER BY t.name, ic.key_ordinal
+"""
+
 QUERY_COLUMNS_BATCH = """
 SELECT
     OBJECT_SCHEMA_NAME(c.object_id) AS schema_name,
@@ -329,6 +347,14 @@ class SqlServerMetadataDiscovery(MetadataDiscoveryPort):
             self._q(QUERY_COLUMNS_BATCH), {"schema": schema}
         )
 
+        pk_results = await self._connector.execute(
+            self._q(QUERY_PRIMARY_KEYS_BATCH), {"schema": schema}
+        )
+        pk_by_table: dict[str, list[str]] = {}
+        for pr in pk_results:
+            tbl = pr["table_name"]
+            pk_by_table.setdefault(tbl, []).append(pr["column_name"])
+
         columns_by_table: dict[str, list[Column]] = {}
         for cr in col_results:
             tbl = cr["table_name"]
@@ -368,6 +394,7 @@ class SqlServerMetadataDiscovery(MetadataDiscoveryPort):
                 is_temporal=bool(r["is_temporal"]),
                 is_memory_optimized=bool(r["is_memory_optimized"]),
                 columns=columns,
+                primary_key_columns=pk_by_table.get(name, []),
                 index_count=len(columns),
             )
             tables.append(table)

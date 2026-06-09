@@ -68,3 +68,17 @@ export function isTerminalMigration(status: string): boolean {
   const s = status.toLowerCase();
   return s === "completed" || s === "partial" || s === "failed" || s === "stopped" || s === "cancelled";
 }
+
+export function canPauseMigration(
+  status: string,
+  tableStatuses: string[] = [],
+): boolean {
+  const s = status.toLowerCase();
+  if (isTerminalMigration(s) || s === "paused") return false;
+  if (["running", "queued", "resumed", "pending", "in_progress", "migrating"].includes(s)) {
+    return true;
+  }
+  return tableStatuses.some((t) =>
+    ["migrating", "running", "in_progress", "queued", "pending"].includes(t.toLowerCase()),
+  );
+}

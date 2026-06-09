@@ -196,11 +196,24 @@ function getGuidance(text: string): Guidance | null {
     };
   }
 
+  if (t.includes("no primary key") || t.includes("primary key on")) {
+    return {
+      title: "How to fix a missing primary key",
+      steps: [
+        "The migration engine chunks data using the table's PRIMARY KEY constraint (sys.indexes.is_primary_key = 1). Tables without a PK cannot be migrated.",
+        "Add a primary key on SQL Server before migrating, for example:",
+        "`ALTER TABLE dbo.YourTable ADD CONSTRAINT PK_YourTable PRIMARY KEY (YourIdColumn);`",
+        "If the table has no natural key, add a surrogate key: `ALTER TABLE dbo.YourTable ADD RowId BIGINT IDENTITY(1,1) NOT NULL;` then `ALTER TABLE … ADD CONSTRAINT PK_… PRIMARY KEY (RowId);`",
+        "Re-run Discover / Assessment after adding the constraint — the table should move from BLOCKER to SAFE or WARNING.",
+      ],
+    };
+  }
+
   if (t.includes("offset") || t.includes("identity column") || t.includes("chunk planning")) {
     return {
       title: "Why OFFSET/FETCH is slower and what to do",
       steps: [
-        "Keyset pagination (fast): SELECT … WHERE id > :last_id ORDER BY id — O(1) per chunk via index seek. Requires an IDENTITY/primary-key column.",
+        "Keyset pagination (fast): SELECT … WHERE id > :last_id ORDER BY id — O(1) per chunk via index seek. Requires a primary-key column.",
         "OFFSET/FETCH (slow): SELECT … ORDER BY (SELECT NULL) OFFSET :n ROWS FETCH NEXT :chunk — re-scans the table from row 1 on every chunk. Cost is O(N²) for N rows.",
         "Example impact: a 5 million-row table takes ~2 min with keyset pagination but can take 30+ min with OFFSET/FETCH.",
         "Fix A (best): Add a surrogate key to the SQL Server table — `ALTER TABLE t ADD _row_id BIGINT IDENTITY(1,1);` — run the migration, then drop the column.",

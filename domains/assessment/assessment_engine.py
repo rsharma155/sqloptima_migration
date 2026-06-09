@@ -248,14 +248,14 @@ class AssessmentEngine:
                 )
 
         # ---- No primary key ----
-        # Table.columns being non-empty doesn't mean there's a PK; check identity as proxy
-        has_identity = any(c.is_identity for c in table.columns)
-        if not has_identity and table.columns:
-            score += 10
-            warnings.append(
-                "No IDENTITY column detected — chunk planning will fall back to "
-                "OFFSET/FETCH which is slower for large tables"
+        # Go migration-engine requires a real PK for chunked extraction (sys.indexes).
+        pk_cols = list(table.primary_key_columns or [])
+        if not pk_cols and table.columns:
+            blockers.append(
+                f"No primary key on {table.schema_name}.{table.object_name} — "
+                "migration requires a PRIMARY KEY constraint for reliable chunked extraction"
             )
+            score += 50
 
         # ---- Temporal tables ----
         if getattr(table, "is_temporal", False):

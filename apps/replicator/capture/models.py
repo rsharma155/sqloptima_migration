@@ -54,7 +54,7 @@ class LsnPosition:
         return f"0x{self.segment1:08X}:{self.segment2:08X}:{self.segment3:04X}"
 
     def serialize(self) -> bytes:
-        return struct.pack(">III", self.segment1, self.segment2, self.segment3)
+        return struct.pack(">IIH", self.segment1, self.segment2, self.segment3)
 
     def __lt__(self, other: object) -> bool:
         if not isinstance(other, LsnPosition):

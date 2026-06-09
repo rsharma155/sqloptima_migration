@@ -14,10 +14,16 @@ from pydantic import BaseModel, Field
 
 from application.audit_service import AuditService
 from application.migration_settings_config import migration_settings_status
+from application.replication_settings_config import replication_settings_status
+from application.replication_runtime import get_runtime_manager
 from apps.api.middleware.auth import UserRole, require_role
 from apps.api.migration_settings_store import (
     save_settings_async as save_migration_settings_async,
     set_settings as set_migration_settings,
+)
+from apps.api.replication_settings_store import (
+    save_settings_async as save_replication_settings_async,
+    set_settings as set_replication_settings,
 )
 from shared.security.audit_log import AuditAction
 from shared.tenancy.project_scope import resolve_project_filter
@@ -62,6 +68,11 @@ class MigrationSettingsUpdate(BaseModel):
     large_table_row_threshold: int = Field(default=100_000, ge=1, le=1_000_000_000)
     large_table_size_mb_threshold: float = Field(default=50.0, ge=0.1, le=1_000_000.0)
     max_tables_per_job: int = Field(default=25, ge=1, le=500)
+
+
+class ReplicationSettingsUpdate(BaseModel):
+    poll_interval_ms: int = Field(default=1000, ge=100, le=600_000)
+    batch_size: int = Field(default=1000, ge=1, le=10_000)
 
 
 # ---------------------------------------------------------------------------
@@ -309,3 +320,31 @@ async def update_migration_settings_config(
     )
     await save_migration_settings_async()
     return migration_settings_status()
+
+
+@router.get("/replication-settings")
+async def get_replication_settings_config(_: dict = require_role(UserRole.VIEWER)) -> dict:
+    """Platform CDC poll interval and batch size (readable by all roles)."""
+    return replication_settings_status()
+
+
+@router.put("/replication-settings")
+async def update_replication_settings_config(
+    req: ReplicationSettingsUpdate,
+    _: dict = require_role(UserRole.ADMIN),
+) -> dict:
+    """Update platform replication capture settings and apply to active streams."""
+    set_replication_settings(
+        {
+            "poll_interval_ms": req.poll_interval_ms,
+            "batch_size": req.batch_size,
+        }
+    )
+    await save_replication_settings_async()
+    active_streams_updated = get_runtime_manager().apply_capture_settings(
+        req.poll_interval_ms,
+        req.batch_size,
+    )
+    status = replication_settings_status()
+    status["active_streams_updated"] = active_streams_updated
+    return status

@@ -97,6 +97,20 @@ export function parseApiError(body: unknown, status: number): PlatformErrorPaylo
       }
     }
     if (typeof o.detail === "string") {
+      if (status === 401 && /invalid credentials/i.test(o.detail)) {
+        return {
+          title: "Invalid username or password",
+          detail: o.detail,
+          remediation: "Check the username and password, then try again.",
+        };
+      }
+      if (status === 404 && /user not found/i.test(o.detail)) {
+        return {
+          title: "User not found",
+          detail: o.detail,
+          remediation: "Refresh the user list — this account may already have been deleted.",
+        };
+      }
       return classifyDetailMessage(o.detail, status);
     }
   }

@@ -8,12 +8,11 @@
  * SPDX-License-Identifier: MIT
  */
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Layers, Eye, EyeOff, CheckCircle, XCircle, AlertTriangle, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { setupAdmin } from "@/lib/api";
-import { ApiError } from "@/lib/api";
+import { setupAdmin, ApiError, purgeStaleAuth } from "@/lib/api";
 import { toast } from "sonner";
 
 // ---------------------------------------------------------------------------
@@ -79,6 +78,10 @@ export default function SetupPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    purgeStaleAuth();
+  }, []);
 
   const strength = getPasswordStrength(form.password);
   const usernameError = touched.username ? validateUsername(form.username) : null;
