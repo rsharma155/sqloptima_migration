@@ -25,11 +25,28 @@ func quoteIdentMSSQL(ident string) string {
 //	WHERE __$start_lsn > @P1
 //	ORDER BY __$start_lsn, __$seqval
 func BuildCaptureReadQuery(captureInstance string) string {
+	return BuildCaptureReadQueryWithColumns(captureInstance, nil, 0)
+}
+
+// BuildCaptureReadQueryWithColumns returns a parameterised CT read that also
+// projects the named data columns (in addition to CDC metadata columns).
+// When limit > 0, a TOP (n) clause is included. Column identifiers are bracket-quoted.
+func BuildCaptureReadQueryWithColumns(captureInstance string, columns []string, limit int) string {
 	ct := quoteIdentMSSQL(captureInstance + "_CT")
+	var colList strings.Builder
+	colList.WriteString("__$start_lsn, __$seqval, __$operation")
+	for _, c := range columns {
+		colList.WriteString(", ")
+		colList.WriteString(quoteIdentMSSQL(c))
+	}
+	top := ""
+	if limit > 0 {
+		top = fmt.Sprintf("TOP (%d) ", limit)
+	}
 	return fmt.Sprintf(
-		"SELECT __$start_lsn, __$seqval, __$operation "+
-			"FROM cdc.%s WHERE __$start_lsn > @P1 "+
-			"ORDER BY __$start_lsn, __$seqval",
+		"SELECT %s%s FROM cdc.%s WHERE __$start_lsn > @P1 ORDER BY __$start_lsn, __$seqval",
+		top,
+		colList.String(),
 		ct,
 	)
 }

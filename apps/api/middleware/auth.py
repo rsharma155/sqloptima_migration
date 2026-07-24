@@ -28,7 +28,22 @@ if not JWT_SECRET:
         "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(32))\""
     )
 JWT_SECRET_PREVIOUS = os.environ.get("MIGRATION_JWT_SECRET_PREVIOUS")
-JWT_ALGORITHM = "HS256"
+
+# Optional RS256 (§12.5): when both PEM keys are set, issue/verify with RS256.
+# HS256 + dual-secret rotation remains the default for single-node deployments.
+JWT_PRIVATE_KEY = os.environ.get("MIGRATION_JWT_PRIVATE_KEY", "").replace("\\n", "\n").strip() or None
+JWT_PUBLIC_KEY = os.environ.get("MIGRATION_JWT_PUBLIC_KEY", "").replace("\\n", "\n").strip() or None
+JWT_PUBLIC_KEY_PREVIOUS = (
+    os.environ.get("MIGRATION_JWT_PUBLIC_KEY_PREVIOUS", "").replace("\\n", "\n").strip() or None
+)
+
+if bool(JWT_PRIVATE_KEY) != bool(JWT_PUBLIC_KEY):
+    raise RuntimeError(
+        "Set both MIGRATION_JWT_PRIVATE_KEY and MIGRATION_JWT_PUBLIC_KEY for RS256, "
+        "or neither to keep HS256."
+    )
+
+JWT_ALGORITHM = "RS256" if JWT_PRIVATE_KEY and JWT_PUBLIC_KEY else "HS256"
 ACCESS_TOKEN_EXPIRY_HOURS = 8
 REFRESH_TOKEN_EXPIRY_DAYS = 7
 
@@ -38,22 +53,56 @@ JWT_EXPIRY_HOURS = ACCESS_TOKEN_EXPIRY_HOURS
 security_scheme = HTTPBearer(auto_error=False)
 
 
+def _signing_key() -> str:
+    if JWT_ALGORITHM == "RS256":
+        assert JWT_PRIVATE_KEY is not None
+        return JWT_PRIVATE_KEY
+    return JWT_SECRET
+
+
 def _encode(payload: dict[str, Any]) -> str:
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    return jwt.encode(payload, _signing_key(), algorithm=JWT_ALGORITHM)
 
 
-def _verification_secrets() -> list[str]:
+def _hs_secrets() -> list[str]:
     secrets: list[str] = [JWT_SECRET]
     if JWT_SECRET_PREVIOUS and JWT_SECRET_PREVIOUS != JWT_SECRET:
         secrets.append(JWT_SECRET_PREVIOUS)
     return secrets
 
 
+def _verification_keys() -> list[str]:
+    """Primary verification material for the active algorithm (current, then previous)."""
+    if JWT_ALGORITHM == "RS256":
+        keys: list[str] = []
+        if JWT_PUBLIC_KEY:
+            keys.append(JWT_PUBLIC_KEY)
+        if JWT_PUBLIC_KEY_PREVIOUS and JWT_PUBLIC_KEY_PREVIOUS != JWT_PUBLIC_KEY:
+            keys.append(JWT_PUBLIC_KEY_PREVIOUS)
+        return keys
+    return _hs_secrets()
+
+
+def _verification_secrets() -> list[str]:
+    """Backward-compat alias used by HS256 rotation tests."""
+    return _hs_secrets()
+
+
+def _decode_attempts() -> list[tuple[str, str]]:
+    """(key, algorithm) pairs tried in order when verifying a token."""
+    if JWT_ALGORITHM == "RS256":
+        attempts = [(key, "RS256") for key in _verification_keys()]
+        # Accept HS256 tokens during RS256 rollout so existing sessions keep working.
+        attempts.extend((secret, "HS256") for secret in _hs_secrets())
+        return attempts
+    return [(secret, "HS256") for secret in _hs_secrets()]
+
+
 def _decode(token: str) -> dict[str, Any]:
     expired = False
-    for secret in _verification_secrets():
+    for key, alg in _decode_attempts():
         try:
-            return jwt.decode(token, secret, algorithms=[JWT_ALGORITHM])
+            return jwt.decode(token, key, algorithms=[alg])
         except jwt.ExpiredSignatureError:
             expired = True
         except jwt.InvalidTokenError:

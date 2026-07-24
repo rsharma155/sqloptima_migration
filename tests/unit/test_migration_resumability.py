@@ -91,3 +91,48 @@ async def test_get_stale_chunks_detects_expired_lease():
     stale = await store.get_stale_chunks()
     assert len(stale) == 1
     assert stale[0].status == ChunkStatus.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_chaos_mid_failure_resume_skips_completed_via_chunk_store(tmp_path):
+    """Simulate worker crash mid-table: completed chunks stay done; pending are claimed (§11.3)."""
+    from domains.chunking.chunk_planner import ChunkBoundary, ChunkPlan, ChunkStatus as CS
+
+    mock_conn = AsyncMock()
+    # First call: reset stale; second: claim returns remaining pending chunk only
+    pending = ChunkPlan(
+        chunk_id=__import__("uuid").UUID("00000000-0000-0000-0000-000000000002"),
+        table_schema="dbo",
+        table_name="orders",
+        column_name="id",
+        boundary=ChunkBoundary(start=1001, end=2000),
+        status=CS.PENDING,
+    )
+    store = ChunkStore(mock_conn)
+    mock_conn.execute.return_value = [{"chunk_id": "c-stale"}]
+    reset = await store.reset_stale_running_chunks()
+    assert reset == 1
+
+    store.claim_chunk = AsyncMock(side_effect=[pending, None])  # type: ignore[method-assign]
+    claimed = await store.claim_chunk("worker-b", "dbo", "orders")
+    assert claimed is not None
+    assert claimed.boundary.start == 1001
+    assert await store.claim_chunk("worker-b", "dbo", "orders") is None
+
+    db_path = str(tmp_path / "cp.db")
+    cps = MigrationCheckpointStore(db_path)
+    await cps.initialize()
+    await cps.save_checkpoint(
+        MigrationCheckpoint(
+            table_name="orders",
+            last_chunk_id=1,
+            last_offset=1000,
+            total_rows_migrated=1000,
+            status=MigrationStatus.RUNNING,
+            adapted_chunk_size=2500,
+        )
+    )
+    resumed = await cps.load_checkpoint("orders")
+    assert resumed is not None
+    assert resumed.last_chunk_id == 1
+    assert resumed.adapted_chunk_size == 2500

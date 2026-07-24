@@ -183,16 +183,30 @@ class CutoverWorkflowInput:
 
 # ── Workflow Implementations ─────────────────────────────────────────
 
+def _workflow_now() -> datetime:
+    """Return workflow-safe time, falling back for direct unit-test invocation."""
+    try:
+        return workflow.now()
+    except Exception:
+        return datetime.now(UTC)
+
+
 @workflow.defn
 class FullMigrationWorkflow:
     """Orchestrates the entire migration: discover → convert → migrate → validate."""
 
     def __init__(self) -> None:
-        self._result = WorkflowResult(job_id=uuid4())
+        # Do not call uuid4()/datetime.now() here — Temporal sandbox forbids
+        # non-deterministic APIs during workflow construction.
+        self._result: WorkflowResult | None = None
 
     @workflow.run
     async def run(self, inp: MigrationWorkflowInput) -> WorkflowResult:
-        self._result.job_id = inp.job_id
+        self._result = WorkflowResult(
+            job_id=inp.job_id,
+            started_at=_workflow_now(),
+        )
+        result = self._result
 
         try:
             # Step 1: Discover objects
@@ -200,21 +214,20 @@ class FullMigrationWorkflow:
             all_objects = []
             for schema in inp.schemas:
                 objects = await workflow.execute_activity(
-                    MigrationActivity.discover_objects,
-                    inp.source_connection_id,
-                    schema,
+                    "discover_objects",
+                    args=[inp.source_connection_id, schema],
                     start_to_close_timeout=timedelta(minutes=30),
                     retry_policy=RetryPolicy(maximum_attempts=3),
                 )
                 all_objects.extend(objects)
-            self._result.objects_discovered = len(all_objects)
+            result.objects_discovered = len(all_objects)
             workflow.logger.info(f"Discovered {len(all_objects)} objects")
 
             # Step 2: Analyze compatibility
             workflow.logger.info("Analyzing compatibility")
             await workflow.execute_activity(
-                MigrationActivity.analyze_compatibility,
-                all_objects,
+                "analyze_compatibility",
+                args=[all_objects],
                 start_to_close_timeout=timedelta(minutes=10),
             )
 
@@ -224,14 +237,13 @@ class FullMigrationWorkflow:
             for obj in all_objects:
                 if obj.get("object_type") in ("TABLE", "VIEW", "PROCEDURE", "FUNCTION"):
                     await workflow.execute_activity(
-                        MigrationActivity.convert_schema,
-                        obj.get("object_id", ""),
-                        obj.get("source_definition", ""),
+                        "convert_schema",
+                        args=[obj.get("object_id", ""), obj.get("source_definition", "")],
                         start_to_close_timeout=timedelta(minutes=5),
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )
                     converted_count += 1
-            self._result.objects_converted = converted_count
+            result.objects_converted = converted_count
 
             # Step 4: Migrate tables
             workflow.logger.info("Starting data migration")
@@ -240,62 +252,62 @@ class FullMigrationWorkflow:
             ]
             migrated_count = 0
             for table in table_list:
-                result = await workflow.execute_activity(
-                    MigrationActivity.migrate_table,
-                    "dbo",
-                    table,
-                    ["*"],
-                    inp.chunk_size,
-                    inp.parallel_workers,
+                mig = await workflow.execute_activity(
+                    "migrate_table",
+                    args=["dbo", table, ["*"], inp.chunk_size, inp.parallel_workers],
                     start_to_close_timeout=timedelta(hours=4),
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
-                if result.get("status") == "completed":
+                if mig.get("status") == "completed":
                     migrated_count += 1
                 else:
-                    self._result.errors.append(f"Migration failed for {table}: {result.get('error')}")
-            self._result.tables_migrated = migrated_count
+                    result.errors.append(f"Migration failed for {table}: {mig.get('error')}")
+            result.tables_migrated = migrated_count
 
             # Step 5: Validate
+            validated_count = 0
             if inp.validate_after_migration:
                 workflow.logger.info("Starting validation")
-                validated_count = 0
                 for table in table_list:
-                    result = await workflow.execute_activity(
-                        MigrationActivity.validate_table,
-                        inp.source_connection_id,
-                        inp.target_connection_id,
-                        "dbo",
-                        table,
+                    val = await workflow.execute_activity(
+                        "validate_table",
+                        args=[
+                            inp.source_connection_id,
+                            inp.target_connection_id,
+                            "dbo",
+                            table,
+                        ],
                         start_to_close_timeout=timedelta(minutes=30),
                     )
-                    if result.get("status") == "passed":
+                    if val.get("status") == "passed":
                         validated_count += 1
-                self._result.tables_validated = validated_count
+                result.tables_validated = validated_count
 
             # Step 6: Notify
             if inp.notify_on_completion:
                 for channel in inp.notification_channels:
                     await workflow.execute_activity(
-                        MigrationActivity.send_notification,
-                        channel,
-                        f"Migration job {inp.job_id} completed: "
-                        f"{migrated_count} tables migrated, {validated_count} validated",
+                        "send_notification",
+                        args=[
+                            channel,
+                            f"Migration job {inp.job_id} completed: "
+                            f"{migrated_count} tables migrated, {validated_count} validated",
+                        ],
                         start_to_close_timeout=timedelta(seconds=30),
                     )
 
-            self._result.success = True
-            self._result.completed_at = datetime.now(UTC)
-            duration = (self._result.completed_at - self._result.started_at).total_seconds()
-            self._result.total_duration_seconds = duration
+            result.success = True
+            result.completed_at = _workflow_now()
+            duration = (result.completed_at - result.started_at).total_seconds()
+            result.total_duration_seconds = duration
 
         except Exception as e:
             workflow.logger.error(f"Workflow failed: {e}")
-            self._result.success = False
-            self._result.errors.append(str(e))
-            self._result.completed_at = datetime.now(UTC)
+            result.success = False
+            result.errors.append(str(e))
+            result.completed_at = _workflow_now()
 
-        return self._result
+        return result
 
 
 @workflow.defn

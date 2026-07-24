@@ -18,6 +18,25 @@ See `GET /api/v1/admin/slos` for published SLO targets.
 - Metrics: `GET /metrics` (Prometheus)
 - Diagnostics: `GET /api/v1/admin/diagnostics` (ADMIN)
 
+## Go engine OTLP metrics
+
+The migration-engine binary exports OpenTelemetry metrics over **OTLP gRPC** (port **4317**).
+
+| Setting | Where | Notes |
+|---------|-------|-------|
+| `[metrics] otlp_endpoint` | `engine-go/config/default.toml` | Empty = no-op exporter |
+| `MIGRATION_METRICS_OTLP_ENDPOINT` | env override | e.g. `otel-collector:4317` or `http://localhost:4317` |
+
+Docker Compose exposes collector ports `4317` (gRPC) and `4318` (HTTP). Point the Go engine at gRPC:
+
+```bash
+export MIGRATION_METRICS_OTLP_ENDPOINT=localhost:4317
+```
+
+Grafana loads the **Migration Engine** dashboard from `deployments/grafana-dashboards/migration-engine.json` (rows extracted/loaded, chunk duration, CDC lag, queue depth).
+
+Optional CDC live I/O worker (same binary): set `MIGRATION_CDC_ENABLED=1` plus `MIGRATION_CDC_TABLE`, `MIGRATION_CDC_TARGET_URL`, and source connection env vars.
+
 ## Snapshot gate
 
 Before destructive loads, migration start verifies a target backup unless disabled:

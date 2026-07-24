@@ -22,6 +22,7 @@ from apps.replicator.capture.models import (
     LsnPosition,
     TableInfo,
 )
+from apps.replicator.capture.providers.base import AbstractCaptureProvider
 from shared.logging.structured_logging import get_logger
 
 logger = get_logger(__name__)
@@ -67,12 +68,10 @@ def _parse_lsn(raw: bytes) -> LsnPosition:
     return LsnPosition(seg1, seg2, seg3)
 
 
-class SqlServerCdcProvider:
+class SqlServerCdcProvider(AbstractCaptureProvider):
     """Polls SQL Server CDC change tables and yields ChangeEvent batches.
 
-    Fix F.1: CDC events were not wired up. This class bridges the gap between
-    the polling loop in CaptureAgent and the raw CDC tables exposed by
-    sys.fn_cdc_get_all_changes_<capture_instance>.
+    Bridges CaptureAgent and SQL Server ``cdc.<capture_instance>_CT`` tables.
 
     LSN advancement contract:
     - Reads directly from ``cdc.<capture_instance>_CT`` (avoids the misleading TVF

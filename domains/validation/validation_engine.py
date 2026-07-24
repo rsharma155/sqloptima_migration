@@ -461,7 +461,12 @@ class PreMigrationValidator:
         return all_issues
 
     async def validate_privileges(self) -> list[CompatibilityIssue]:
-        """Warn when migration connectors use elevated database principals (§12.6)."""
+        """Block migration when connectors use elevated database principals (§12.6).
+
+        Returns BLOCKER issues for SQL Server sysadmin/db_owner and PostgreSQL
+        superuser. Callers must refuse to start migration when any blocker is present
+        unless ``MIGRATION_ALLOW_ELEVATED_PRIVILEGES=1`` is set (dev override).
+        """
         issues: list[CompatibilityIssue] = []
         issues.extend(await self._check_sqlserver_privileges())
         issues.extend(await self._check_postgres_privileges())
@@ -478,7 +483,7 @@ class PreMigrationValidator:
             row = rows[0]
             if row.get("is_sysadmin") == 1:
                 return [CompatibilityIssue(
-                    severity=ValidationSeverity.WARNING,
+                    severity=ValidationSeverity.BLOCKER,
                     category="privilege",
                     message=(
                         "Source connection uses sysadmin — use a least-privilege "
@@ -487,7 +492,7 @@ class PreMigrationValidator:
                 )]
             if row.get("is_db_owner") == 1:
                 return [CompatibilityIssue(
-                    severity=ValidationSeverity.WARNING,
+                    severity=ValidationSeverity.BLOCKER,
                     category="privilege",
                     message=(
                         "Source connection is db_owner — prefer db_datareader "
@@ -507,7 +512,7 @@ class PreMigrationValidator:
             """)
             if rows and rows[0].get("is_superuser"):
                 return [CompatibilityIssue(
-                    severity=ValidationSeverity.WARNING,
+                    severity=ValidationSeverity.BLOCKER,
                     category="privilege",
                     message=(
                         "Target connection uses PostgreSQL superuser — use a scoped "

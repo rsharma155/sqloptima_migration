@@ -85,6 +85,8 @@ class MigrationProgramRepository:
         *,
         wave_number: int | None = None,
         schema_name: str = "dbo",
+        cutover_window_start: datetime | None = None,
+        cutover_window_end: datetime | None = None,
     ) -> MigrationWaveRecord:
         result = await self._session.execute(
             select(MigrationProgramRecord).where(MigrationProgramRecord.migration_program_id == program_id)
@@ -108,10 +110,31 @@ class MigrationProgramRepository:
             tables=tables,
             schema_name=schema_name,
             status="pending",
+            cutover_window_start=cutover_window_start,
+            cutover_window_end=cutover_window_end,
             created_at=now,
             updated_at=now,
         )
         self._session.add(wave)
+        await self._session.flush()
+        return wave
+
+    async def set_cutover_window(
+        self,
+        wave_id: str,
+        *,
+        cutover_window_start: datetime | None,
+        cutover_window_end: datetime | None,
+    ) -> MigrationWaveRecord | None:
+        result = await self._session.execute(
+            select(MigrationWaveRecord).where(MigrationWaveRecord.migration_wave_id == wave_id)
+        )
+        wave = result.scalar_one_or_none()
+        if not wave:
+            return None
+        wave.cutover_window_start = cutover_window_start
+        wave.cutover_window_end = cutover_window_end
+        wave.updated_at = datetime.now(UTC)
         await self._session.flush()
         return wave
 

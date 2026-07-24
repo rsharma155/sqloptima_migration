@@ -72,7 +72,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     const error = await res.json().catch(() => ({ detail: res.statusText }));
     const { parseApiError, formatUserMessage } = await import("./platform-errors");
     const parsed = parseApiError(error, res.status);
-    throw new ApiError(res.status, formatUserMessage(parsed));
+    throw new ApiError(res.status, formatUserMessage(parsed), parsed);
   }
 
   if (options.responseType === "text") {
@@ -116,7 +116,11 @@ function clearAuthCookieAndStorage(): void {
 }
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(
+    public status: number,
+    message: string,
+    public payload?: import("./platform-errors").PlatformErrorPayload,
+  ) {
     super(message);
     this.name = "ApiError";
   }
@@ -750,6 +754,77 @@ export async function updateProject(id: string, req: Partial<ProjectCreateReques
 
 export async function deleteProject(id: string): Promise<void> {
   return request(`/api/v1/projects/${id}`, { method: "DELETE" });
+}
+
+// ---- Migration programs / waves (§13.1) ----
+
+export interface MigrationWave {
+  id: string;
+  wave_number: number;
+  name: string;
+  tables: string[];
+  schema_name: string;
+  status: string;
+  cutover_window_start: string | null;
+  cutover_window_end: string | null;
+  approver: string | null;
+  signed_off_at: string | null;
+  job_id: string | null;
+}
+
+export interface MigrationProgram {
+  id: string;
+  project_id: string;
+  name: string;
+  status: string;
+  owner: string | null;
+  notes: string | null;
+  waves: MigrationWave[];
+}
+
+export async function listPrograms(projectId?: string): Promise<MigrationProgram[]> {
+  const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+  return request(`/api/v1/programs${qs}`);
+}
+
+export async function getProgram(programId: string): Promise<MigrationProgram> {
+  return request(`/api/v1/programs/${programId}`);
+}
+
+export async function createProgram(body: {
+  project_id: string;
+  name: string;
+  owner?: string;
+  notes?: string;
+}): Promise<MigrationProgram> {
+  return request("/api/v1/programs", { method: "POST", body });
+}
+
+export async function addProgramWave(
+  programId: string,
+  body: {
+    name: string;
+    tables: string[];
+    schema_name?: string;
+    wave_number?: number;
+    cutover_window_start?: string | null;
+    cutover_window_end?: string | null;
+  },
+): Promise<MigrationWave> {
+  return request(`/api/v1/programs/${programId}/waves`, { method: "POST", body });
+}
+
+export async function scheduleProgramWave(
+  waveId: string,
+  body: {
+    cutover_window_start?: string | null;
+    cutover_window_end?: string | null;
+  },
+): Promise<Pick<MigrationWave, "id" | "cutover_window_start" | "cutover_window_end">> {
+  return request(`/api/v1/programs/waves/${waveId}/schedule`, {
+    method: "PATCH",
+    body,
+  });
 }
 
 // ---- Assessment ----

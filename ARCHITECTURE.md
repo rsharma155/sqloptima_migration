@@ -1218,11 +1218,15 @@ CDC_STREAMING → PAUSED/STOPPING/FAILED/COMPLETED`) rejects illegal transitions
 | Migration programs / waves API with sign-off | ✅ Done |
 | Licensing & editions (HMAC keys, feature gates, Helm chart, usage metering) | 🟡 Partial — signed images + license server pending |
 | Observability (`/metrics`, SLO API, alert webhooks) | ✅ Done |
-| Next.js UI (full dashboard; Playwright smoke + jest-axe a11y CI) | 🟡 Partial — full core-flow Playwright suite pending |
-| SQL Server native CDC provider wired to CaptureAgent (`SqlServerCdcProvider`) | 🔲 Pending |
-| CDC live I/O in Go data plane (`go-mssqldb` read + `pgx/v5` apply around `cdc` package) | 🔲 Pending |
-| Grafana dashboards + OTLP provider init in the Go binary | 🔲 Pending |
-| Expanded live integration tests (full docker-compose stack; golden e2e in weekly CI) | 🟡 Partial |
+| Next.js UI (full dashboard; Playwright smoke + core-flow + jest-axe a11y + Lighthouse CI; Programs Gantt) | ✅ Done — Lighthouse CI on `/login`; Programs wave Gantt at `/programs` |
+| SQL Server native CDC provider wired to CaptureAgent (`SqlServerCdcProvider`) | ✅ Done — ABC + checkpoint resume + snapshot FSM |
+| CDC live I/O in Go data plane (`go-mssqldb` read + `pgx/v5` apply around `cdc` package) | ✅ Done — `internal/cdc/io` CaptureReader/ApplyWriter + env worker |
+| Grafana dashboards + OTLP provider init in the Go binary | ✅ Done — OTLP gRPC `:4317`, metrics wired to workers, Migration Engine dashboard |
+| Expanded live integration tests (full docker-compose stack; golden e2e in weekly CI) | 🟡 Partial — API discover→migrate→validate + Playwright core flows; live dual-DB optional |
+| Privilege hard-fail on elevated DB principals (§12.6) | ✅ Done — BLOCKER + `assert_least_privilege` gate (`MIGRATION_ALLOW_ELEVATED_PRIVILEGES` override) |
+| JWT RS256 dual-mode (§12.5) | ✅ Done — optional `MIGRATION_JWT_PRIVATE_KEY` / `PUBLIC_KEY`; HS256 default + legacy accept |
+| Platform error UI (§13.11) | ✅ Done — `PlatformError` + `ApiError.payload` + ErrorBoundary |
+| Chaos / resumability + idempotent double-run tests (§11.3–11.4) | ✅ Done — mid-failure resume + ChunkedMigration double-run |
 
 ---
 

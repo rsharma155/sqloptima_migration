@@ -57,6 +57,7 @@ const navSections = [
       { href: "/projects", label: "Projects", icon: FolderOpen },
       { href: "/assessment", label: "Assessment", icon: ShieldCheck },
       { href: "/migrations", label: "Migrations", icon: Database },
+      { href: "/programs", label: "Programs", icon: Layers },
       { href: "/replication", label: "Replication", icon: Repeat },
     ],
   },

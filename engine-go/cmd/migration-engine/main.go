@@ -28,6 +28,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/ravisharma/sql-optima/engine-go/internal/cdc"
+	cdcio "github.com/ravisharma/sql-optima/engine-go/internal/cdc/io"
 	"github.com/ravisharma/sql-optima/engine-go/internal/config"
 	"github.com/ravisharma/sql-optima/engine-go/internal/metadata"
 	"github.com/ravisharma/sql-optima/engine-go/internal/metrics"
@@ -87,7 +88,6 @@ func main() {
 	if err != nil {
 		log.Fatal("create engine metrics", zap.Error(err))
 	}
-	_ = engineMetrics // handed to worker pools in Phase 10 full integration
 
 	// -------------------------------------------------------------------------
 	// 4. bbolt queue (replaces RocksDB)
@@ -127,11 +127,19 @@ func main() {
 		zap.Int64("initial_chunk_size", sizer.CurrentSize()))
 
 	// -------------------------------------------------------------------------
-	// 7. CDC state machine
+	// 7. CDC state machine + optional live I/O worker
 	// -------------------------------------------------------------------------
 	cdcMachine := cdc.NewCDCStateMachine()
 	log.Info("CDC state machine initialised",
 		zap.String("cdc_state", cdcMachine.State().String()))
+
+	cdcCancel, err := cdcio.StartEnvWorker(ctx, log, engineMetrics)
+	if err != nil {
+		log.Fatal("start CDC live I/O worker", zap.Error(err))
+	}
+	if cdcCancel != nil {
+		defer cdcCancel()
+	}
 
 	// -------------------------------------------------------------------------
 	// 8. Migration worker loop
@@ -147,6 +155,7 @@ func main() {
 		ChunkCfg: cfg.Chunks,
 		WorkerID: workerID,
 		Sizer:    sizer,
+		Metrics:  engineMetrics,
 	}
 	workerLoop := worker.NewMigrationEngineWorkerLoop(
 		workerID, metaAdapter, masterKey, cfg.Database.MetadataURL, poller, engineRuntime,

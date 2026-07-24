@@ -1,6 +1,7 @@
 """
 Module: apps/replicator/apply/checkpoint.py
-Purpose: Last-applied-LSN store backed by PostgreSQL metadata table
+Purpose: Last-applied-LSN store backed by PostgreSQL metadata table;
+         load_all() supports stream resume across restarts.
 Author: Migration Platform Team
 Created: 2026-05-22
 Domain: Replication / Apply
@@ -124,6 +125,41 @@ class CheckpointStore:
             rows_applied=row["rows_applied"],
             updated_at=row["updated_at"],
         )
+
+    async def load_all(self, schema: str | None = None) -> list[CheckpointEntry]:
+        """Load all checkpoints, optionally filtered by target schema.
+
+        Args:
+            schema: When set, only return rows for this ``table_schema``.
+
+        Returns:
+            List of CheckpointEntry rows (may be empty).
+        """
+        if schema is None:
+            sql = """
+            SELECT table_schema, table_name, lsn_bytes, rows_applied, updated_at
+            FROM _replication_checkpoint
+            ORDER BY table_schema, table_name;
+            """
+            rows = await self._conn.fetch(sql)
+        else:
+            sql = """
+            SELECT table_schema, table_name, lsn_bytes, rows_applied, updated_at
+            FROM _replication_checkpoint
+            WHERE table_schema = $1
+            ORDER BY table_name;
+            """
+            rows = await self._conn.fetch(sql, schema)
+        return [
+            CheckpointEntry(
+                table_schema=row["table_schema"],
+                table_name=row["table_name"],
+                lsn_bytes=bytes(row["lsn_bytes"]),
+                rows_applied=row["rows_applied"],
+                updated_at=row["updated_at"],
+            )
+            for row in rows
+        ]
 
     async def delete(self, schema: str, table: str) -> None:
         """Remove the checkpoint for a given table.
