@@ -1,6 +1,8 @@
 FROM node:22-alpine AS deps
 WORKDIR /app
+# Alpine is musl; postinstall must not demand glibc (-gnu) optional bindings.
 ENV NATIVE_DEPS_CURRENT_ONLY=1
+RUN apk add --no-cache libc6-compat
 COPY package.json package-lock.json ./
 COPY scripts ./scripts
 RUN npm ci
@@ -13,6 +15,7 @@ RUN npm run build
 
 FROM node:22-alpine AS runner
 WORKDIR /app
+RUN apk add --no-cache libc6-compat
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3508
