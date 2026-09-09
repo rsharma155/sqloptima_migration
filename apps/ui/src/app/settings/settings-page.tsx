@@ -1626,13 +1626,6 @@ export default function SettingsPage() {
                   Used by Transfer. Migrations still treat Source as SQL Server and Target as PostgreSQL.
                 </p>
               </div>
-                {formErrors.type && (
-                  <p id="conn-type-error" className="text-xs text-destructive flex items-center gap-1">
-                    <AlertCircle className="h-3 w-3" />
-                    {formErrors.type}
-                  </p>
-                )}
-              </div>
 
               <div className="grid grid-cols-3 gap-4">
                 <div className="col-span-2 space-y-2">
