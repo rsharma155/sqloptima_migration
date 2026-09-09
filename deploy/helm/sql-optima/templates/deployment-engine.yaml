@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sql-optima.fullname" . }}-engine
+  labels:
+    {{- include "sql-optima.labels" . | nindent 4 }}
+    app.kubernetes.io/component: engine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "sql-optima.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: engine
+  template:
+    metadata:
+      labels:
+        {{- include "sql-optima.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: engine
+    spec:
+      containers:
+        - name: engine
+          image: "{{ .Values.image.engine.repository }}:{{ .Values.image.engine.tag }}"
+          imagePullPolicy: {{ .Values.image.engine.pullPolicy }}
+          env:
+            - name: MIGRATION_DATABASE_METADATA_URL
+              value: {{ .Values.env.MIGRATION_DATABASE_METADATA_URL | quote }}
+            - name: MIGRATION_QUEUE_PATH
+              value: /var/lib/sqloptima/migration_queue.bbolt
+            - name: MIGRATION_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "sql-optima.fullname" . }}-secrets
+                  key: master-key
+                  optional: true
+          volumeMounts:
+            - name: queue
+              mountPath: /var/lib/sqloptima
+          resources:
+            {{- toYaml .Values.resources.engine | nindent 12 }}
+      volumes:
+        - name: queue
+          emptyDir: {}

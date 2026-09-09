@@ -42,10 +42,19 @@ Out of scope (unless they enable the above):
 
 ## Production hardening
 
-For deployment checklists (encryption at rest, JWT rotation, least-privilege DB grants, supply-chain audits), see [docs/SECURITY.md](docs/SECURITY.md).
+For deployment checklists (encryption at rest, JWT rotation, least-privilege DB grants, supply-chain audits), see [docs/SECURITY.md](docs/SECURITY.md) when the local `docs/` tree is present, and follow [OPERATIONS.md](OPERATIONS.md) / [PACKAGING.md](PACKAGING.md) for runtime controls.
+
+Key platform controls already in the product:
+
+- SecretsManager Fernet + per-encrypt PBKDF2 salt (`MIGRATION_MASTER_KEY` required)
+- JWT HS256 (default) or optional RS256; dual-secret rotation via `MIGRATION_JWT_SECRET_PREVIOUS`
+- Role hierarchy `viewer` < `operator` < `admin`; project scoping for non-admin JWTs
+- Parameterized SQL in validation and replication apply paths
+- Elevated DB principal hard-fail unless `MIGRATION_ALLOW_ELEVATED_PRIVILEGES=1`
 
 ## Security-related CI
 
 - `.github/workflows/security-audit.yml` — weekly `pip-audit` and `npm audit`
 - `.github/dependabot.yml` — dependency update PRs
 - `scripts/generate_sbom.py` — SBOM generation for release artifacts
+- `.github/workflows/publish-images.yml` — GHCR images + `sql-optima-install.zip`

@@ -77,6 +77,7 @@ func Load() (*EngineConfig, error) {
 	// Explicit binds so start.py overrides always win over default.toml (esp. on Windows).
 	_ = v.BindEnv("database.metadata_url", "MIGRATION_DATABASE_METADATA_URL")
 	_ = v.BindEnv("queue.path", "MIGRATION_QUEUE_PATH")
+	_ = v.BindEnv("metrics.otlp_endpoint", "MIGRATION_METRICS_OTLP_ENDPOINT")
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("read config: %w", err)

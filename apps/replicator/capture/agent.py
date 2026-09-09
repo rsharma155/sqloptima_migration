@@ -1,6 +1,7 @@
 """
 Module: apps/replicator/capture/agent.py
-Purpose: CaptureAgent orchestrates the capture loop — poll, normalize, publish
+Purpose: CaptureAgent orchestrates the capture loop — poll, normalize, publish;
+         supports checkpoint resume via seed_positions (source-qualified keys).
 Author: Migration Platform Team
 Created: 2026-05-22
 Domain: Replication / Capture
@@ -74,6 +75,20 @@ class CaptureAgent:
     def set_batch_size(self, batch_size: int) -> None:
         """Update maximum rows fetched per CDC poll."""
         self._batch_size = max(1, min(batch_size, 10_000))
+
+    def seed_positions(self, positions: dict[str, bytes | None]) -> None:
+        """Seed last-known capture positions before starting poll loops.
+
+        Keys must be source-qualified table names (``schema.table``), matching
+        ``TableInfo.qualified_name``. Values are serialized LSN bytes (or None).
+        """
+        for key, value in positions.items():
+            self._last_positions[key] = value
+
+    @property
+    def last_positions(self) -> dict[str, bytes | None]:
+        """Copy of seeded/advanced capture positions keyed by ``schema.table``."""
+        return dict(self._last_positions)
 
     async def start(
         self,

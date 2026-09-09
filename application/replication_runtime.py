@@ -1,6 +1,7 @@
 """
 Module: replication_runtime.py
-Purpose: In-process replication runtime — capture, queue, apply, pause/resume/stop
+Purpose: In-process replication runtime — capture, queue, apply, pause/resume/stop;
+         seeds CaptureAgent from checkpoints and runs snapshot→catch-up→streaming FSM.
 Author: Ravi Sharma
 Copyright (c) 2026 Ravi Sharma
 SPDX-License-Identifier: MIT
@@ -15,8 +16,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from apps.replicator.apply.checkpoint import CheckpointStore
 from apps.replicator.capture.agent import CaptureAgent
-from apps.replicator.capture.models import TableInfo
+from apps.replicator.capture.models import ChangeEvent, TableInfo
 from apps.replicator.capture.providers.base import AbstractCaptureProvider
 from apps.replicator.orchestrator.state_machine import ReplicationEvent, StateMachine
 from domains.replication.entities import ReplicationStreamConfig
@@ -47,6 +49,46 @@ class ActiveStreamRuntime:
     concerns: list[dict[str, Any]] = field(default_factory=list)
 
 
+def _target_checkpoint_table_name(
+    source_table: str,
+    target_name_map: dict[str, str],
+) -> str:
+    """Resolve the checkpoint table name as ChangeConsumer would persist it."""
+    mapped = target_name_map.get(source_table.lower())
+    if mapped:
+        return mapped
+    return source_table.lower()
+
+
+def _source_positions_from_checkpoints(
+    config: ReplicationStreamConfig,
+    checkpoints: list[Any],
+) -> dict[str, bytes | None]:
+    """Map target-schema checkpoint rows to source-qualified capture keys."""
+    target_name_map = {
+        t.name.lower(): (t.target_table_name or t.name)
+        for t in config.tables
+    }
+    by_target: dict[tuple[str, str], bytes] = {
+        (cp.table_schema, cp.table_name): cp.lsn_bytes for cp in checkpoints
+    }
+    # Also index lowercased table names — ChangeConsumer may persist mixed-case
+    # mapped names or lowercased defaults depending on target_table_name.
+    by_target_lower: dict[tuple[str, str], bytes] = {
+        (schema, table.lower()): lsn for (schema, table), lsn in by_target.items()
+    }
+    positions: dict[str, bytes | None] = {}
+    for t in config.tables:
+        source_key = f"{config.source_schema}.{t.name}"
+        tgt_table = _target_checkpoint_table_name(t.name, target_name_map)
+        lsn = by_target.get((config.target_schema, tgt_table))
+        if lsn is None:
+            lsn = by_target_lower.get((config.target_schema, tgt_table.lower()))
+        if lsn is not None:
+            positions[source_key] = lsn
+    return positions
+
+
 class ReplicationRuntimeManager:
     """Manages active replication streams in the API process."""
 
@@ -72,7 +114,6 @@ class ReplicationRuntimeManager:
 
         sm = StateMachine()
         sm.transition(ReplicationEvent.START)
-        sm.transition(ReplicationEvent.CATCHUP_DONE)
 
         runtime = ActiveStreamRuntime(
             stream_id=config.stream_id,
@@ -83,6 +124,7 @@ class ReplicationRuntimeManager:
         self._streams[config.stream_id] = runtime
 
         if target_connection is None:
+            sm.transition(ReplicationEvent.CATCHUP_DONE)
             runtime.errors.append("target connection unavailable — stream registered only")
             logger.warning("replication_start_degraded", stream_id=config.stream_id)
             return runtime
@@ -124,6 +166,20 @@ class ReplicationRuntimeManager:
             poll_interval_ms=config.poll_interval_ms,
             batch_size=config.batch_size,
         )
+
+        # Resume capture from last-applied LSNs (target checkpoint → source keys).
+        store = CheckpointStore(target_connection)
+        await store.ensure_table()
+        checkpoints = await store.load_all(config.target_schema)
+        seed = _source_positions_from_checkpoints(config, checkpoints)
+        if seed:
+            agent.seed_positions(seed)
+            logger.info(
+                "replication_positions_seeded",
+                stream_id=config.stream_id,
+                tables=list(seed.keys()),
+            )
+
         runtime.capture_agent = agent
         runtime.bus = bus
         runtime.consumer = consumer
@@ -139,12 +195,61 @@ class ReplicationRuntimeManager:
             runtime.rabbit_consumer = rabbit
 
         table_names = [t.name for t in config.tables]
+        infos_for_snapshot = table_infos or [
+            TableInfo(
+                schema_name=config.source_schema,
+                table_name=t.name,
+                columns=["*"],
+                pk_columns=t.pk_columns or ["id"],
+                watermark_column=t.watermark_column or "modified",
+                soft_delete_column=t.soft_delete_column,
+            )
+            for t in config.tables
+        ]
+        need_snapshot = [
+            info
+            for info in infos_for_snapshot
+            if info.qualified_name not in seed
+        ]
+
+        try:
+            if need_snapshot:
+                sm.transition(ReplicationEvent.SNAPSHOT_BEGIN)
+                logger.info(
+                    "replication_snapshot_begin",
+                    stream_id=config.stream_id,
+                    tables=[t.qualified_name for t in need_snapshot],
+                )
+
+                async def _publish_chunk(events: list[ChangeEvent]) -> None:
+                    for event in events:
+                        await publisher.publish(event)
+
+                for info in need_snapshot:
+                    await provider.take_snapshot(info, _publish_chunk)
+
+                sm.transition(ReplicationEvent.SNAPSHOT_DONE)
+                sm.transition(ReplicationEvent.CATCHUP_DONE)
+            else:
+                # All tables have checkpoints — skip snapshot, go straight to streaming.
+                sm.transition(ReplicationEvent.CATCHUP_DONE)
+        except Exception as exc:
+            with contextlib.suppress(ValueError):
+                sm.transition(ReplicationEvent.FAIL)
+            runtime.errors.append(f"snapshot/catch-up failed: {exc}")
+            logger.exception(
+                "replication_snapshot_failed",
+                stream_id=config.stream_id,
+            )
+            raise
+
         await agent.start(config.source_schema, table_names=table_names)
         logger.info(
             "replication_stream_started",
             stream_id=config.stream_id,
             tables=table_names,
             target_schema=config.target_schema,
+            state=sm.current_state.value,
         )
         return runtime
 

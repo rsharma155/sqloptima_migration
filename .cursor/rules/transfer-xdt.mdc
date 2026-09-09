@@ -1,0 +1,30 @@
+---
+description: Cross-Database Transfer (XDT) isolation, naming, and TDD
+globs: domains/transfer/**,application/transfer*.py,apps/api/routers/transfers_router.py,infrastructure/transfer/**,infrastructure/metadata_db/repositories/transfer_*.py,engine-go/internal/transfer/**,engine-go/internal/extractport/**,apps/ui/src/app/transfers/**,tests/unit/test_transfer*.py
+alwaysApply: false
+---
+
+# Transfer (XDT) conventions
+
+## Isolation
+
+- Persist only to `transfer_*` tables. Never `migration_jobs` or `migration_commands`.
+- Do not call `GoMigrationJobDispatcher`, `make_connector`, target provisioner, or post-migration finalizer.
+- Open databases with `make_transfer_connector` / Go `engine` field, not connection role (`source`/`target`).
+- Go: new code lives in `internal/transfer` and `internal/extractport`. Do not extend `MigrationGoJobHandler` with Transfer paths.
+
+## Naming
+
+- Python: `transfer_dispatch_config.py`, `TransferDispatchConfig`, `TransferPath`, `transfer_service.py`.
+- Go: `transfer_dispatch_config.go`, `ParseTransferDispatchConfig`, `TransferEngineWorkerLoop`.
+- JSON contract: `"kind": "transfer"`. Commands channel: `transfer_commands`.
+
+## TDD and SQL
+
+- Add or update a failing test before production code for new behavior.
+- All extract/load SQL is parameterized. Quote identifiers; never interpolate user values into SQL.
+- Domain packages must not import FastAPI or SQLAlchemy.
+
+## Tracker
+
+Update `TRANSFER_TRACKER.md` when a slice is started, completed, or blocked.

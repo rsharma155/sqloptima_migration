@@ -300,6 +300,7 @@ class PostgresMetadataDiscovery(MetadataDiscoveryPort):
                     "is_unique": bool(r["is_unique"]),
                     "is_primary_key": bool(r["is_primary_key"]),
                     "columns": r.get("column_names") or "",
+                    "index_definition": r.get("index_definition") or "",
                 },
             )
             for r in results

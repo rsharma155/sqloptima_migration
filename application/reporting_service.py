@@ -76,6 +76,7 @@ class ReportingService:
             "report_type": "migration_summary",
             "generated_at": datetime.now(UTC).isoformat(),
             "job_id": job_id,
+            "project_id": getattr(job, "project_id", None),
             "status": job.status,
             "tables_total": job.tables_total,
             "tables_done": job.tables_done,
@@ -100,6 +101,7 @@ class ReportingService:
                 f"No validation runs found for job {job_id!r}"
             )
 
+        job = await self._job_repo.get_by_id(job_id)
         levels_summary: list[dict[str, Any]] = []
         overall_passed = True
 
@@ -125,6 +127,7 @@ class ReportingService:
             "report_type": "validation_summary",
             "generated_at": datetime.now(UTC).isoformat(),
             "job_id": job_id,
+            "project_id": getattr(job, "project_id", None) if job else None,
             "overall_passed": overall_passed,
             "total_runs": len(runs),
             "levels": levels_summary,

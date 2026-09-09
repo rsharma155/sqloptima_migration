@@ -1,0 +1,103 @@
+name: Publish install images
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Image tag (for example 0.2.0)"
+        required: true
+        default: "0.2.0"
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Image namespace
+        id: ns
+        run: echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push API
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.ns.outputs.owner }}/sqloptima-api:${{ steps.ver.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ steps.ns.outputs.owner }}/sqloptima-api:latest
+
+      - name: Build and push engine
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.migration-engine
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.ns.outputs.owner }}/sqloptima-engine:${{ steps.ver.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ steps.ns.outputs.owner }}/sqloptima-engine:latest
+
+      - name: Build and push UI
+        uses: docker/build-push-action@v6
+        with:
+          context: ./apps/ui
+          file: apps/ui/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.ns.outputs.owner }}/sqloptima-ui:${{ steps.ver.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ steps.ns.outputs.owner }}/sqloptima-ui:latest
+
+      - name: Pack website install zip
+        run: |
+          mkdir -p dist
+          python - <<'PY'
+          import pathlib
+          import zipfile
+          root = pathlib.Path("deploy/install")
+          out = pathlib.Path("dist/sql-optima-install.zip")
+          with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+              for path in sorted(root.iterdir()):
+                  if path.is_file() and path.name != ".env":
+                      zf.write(path, path.name)
+          print("wrote", out)
+          PY
+
+      - name: Upload install zip
+        uses: actions/upload-artifact@v7
+        with:
+          name: sql-optima-install
+          path: dist/sql-optima-install.zip
+
+      - name: Attach zip to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/sql-optima-install.zip

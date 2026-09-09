@@ -131,6 +131,13 @@ func (m *MigrationTableDataMover) recordChunkSuccess(
 		_, _ = m.runtime.Queue.UpdateStatus(jobID, chunk.ID, core.ChunkStatusClaimed, core.ChunkStatusLoaded)
 		_ = m.runtime.Queue.SetCheckpoint(jobID, tableCheckpointKey(table.SourceSchema, table.TableName), chunk.ID)
 	}
+	if m.runtime.Metrics != nil {
+		ctx := context.Background()
+		qualified := table.SourceSchema + "." + table.TableName
+		m.runtime.Metrics.RecordRowsExtracted(ctx, jobID, qualified, outcome.rows)
+		m.runtime.Metrics.RecordRowsLoaded(ctx, jobID, qualified, outcome.rows)
+		m.runtime.Metrics.RecordChunkDuration(ctx, jobID, "extract_load", float64(outcome.durMs)/1000.0)
+	}
 }
 
 func (m *MigrationTableDataMover) claimNextTableChunk(

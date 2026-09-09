@@ -2,7 +2,8 @@
 # Copyright (c) 2026 Ravi Sharma
 # SPDX-License-Identifier: MIT
 #
-# Docker Compose stack for the Migration Platform.
+# Docker Compose stack for the Migration Platform (developer / lab).
+# End users: use deploy/install/ instead — pre-built images, no bind-mount, no compile.
 # All services have healthchecks and restart:unless-stopped (L-10).
 
 version: "3.9"
@@ -201,6 +202,7 @@ services:
   otel-collector:
     image: otel/opentelemetry-collector-contrib:latest
     ports:
+      - "4317:4317"
       - "4318:4318"
       - "8889:8889"
     volumes:

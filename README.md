@@ -12,53 +12,46 @@
 
 ---
 
-## One-Command Quickstart
+## Install (Docker only)
 
-> **Prerequisites:** Python 3.11+, Node.js 18+, npm, Go 1.23+ (for data migration), Docker (recommended — metadata PostgreSQL). Missing toolchains can be auto-installed via `scripts/bootstrap_prereqs.sh` / `bootstrap_prereqs.ps1` when you use `./start.sh` or `.\start.ps1`.
+End users do **not** compile the app and do **not** install Python, Node, or Go.
 
-Copy and paste this into a terminal — it clones the repo and starts the full stack (API + UI + Go migration-engine):
+**Only prerequisite:** [Docker Desktop](https://docs.docker.com/get-docker/) (Windows / macOS) or Docker Engine (Linux). Start Docker and wait until it is running.
 
-```bash
-git clone https://github.com/rsharma155/sqloptima_migration.git && cd sqloptima_migration && python3 start.py --all
-```
+Host the files in `deploy/install/` on **your website** (zip or individual scripts). Customers never need GitHub.
 
-On Windows, use `python` instead of `python3` if needed:
+### Windows
+
+1. Install Docker Desktop and wait until it is running.
+2. Download `sql-optima.zip` from your website and unzip it.
+3. Double-click `sql-optima.cmd`.
+
+The dashboard opens at **http://localhost:3508**. Create the first admin account.
 
 ```powershell
-git clone https://github.com/rsharma155/sqloptima_migration.git; cd sqloptima_migration; python start.py --all
+.\sql-optima.ps1
 ```
 
-Platform-specific wrappers (after clone, create `.venv` first if you prefer, then delegate to `start.py`):
+### macOS / Linux
 
 ```bash
-./start.sh --all          # Linux / macOS
-.\start.ps1 -all          # Windows PowerShell
+chmod +x sql-optima.sh
+./sql-optima.sh
 ```
 
-`start.py --all` will:
+### Website one-liners (replace with your domain)
 
-1. Check Python, Node.js, and Go toolchains
-2. Generate a `.env` file with secure random keys (first run only)
-3. Install Python and npm dependencies
-4. Start the metadata database container (`postgres_checklist`, Docker if available)
-5. Apply metadata DB migrations
-6. Launch the **FastAPI** control plane on **port 8508**
-7. Launch the **Go migration-engine** data plane (polls metadata, runs extract→load)
-8. Launch the **Next.js** frontend on **port 3508**
-9. **Open `http://localhost:3508` in your default browser**
+```powershell
+irm https://your-domain.example/sql-optima/sql-optima.ps1 | iex
+```
 
-On first launch you will be redirected to the **Setup** page to create an admin account. After that, you land on the **Dashboard** every time.
+```bash
+curl -fsSL https://your-domain.example/sql-optima/sql-optima.sh | bash
+```
 
-> **Tip — skip the interactive menu:**
->
-> ```bash
-> python start.py --all       # API + UI + Go engine (recommended)
-> python start.py --api       # Control plane only (migrations won't run without the engine)
-> python start.py --engine    # Go migration-engine only
-> python start.py --ui        # Frontend only
-> python start.py --setup     # Install deps, do not start servers
-> python start.py --test      # Run the test suite
-> ```
+Full customer copy and zip layout: [deploy/install/INSTALL.md](deploy/install/INSTALL.md).
+
+Publish images with `.github/workflows/publish-images.yml` (git tag `v*` or **workflow_dispatch**) and mark the GHCR packages **public** so `docker pull` does not require a GitHub login.
 
 ---
 
@@ -196,7 +189,7 @@ The default landing page. Shows a live overview that auto-refreshes every 10 sec
 
 #### Projects — `/projects`
 
-Create and manage migration projects. Each project pairs a SQL Server source connection with a PostgreSQL target connection. Projects are the top-level organisational unit — assessments, migrations, and schema comparisons all hang off a project.
+Create and manage migration projects. Each project pairs a SQL Server source connection with a PostgreSQL target connection. Projects are the top-level organisational unit — assessments, migrations, programs, and schema comparisons all hang off a project. Non-admin JWT tokens may carry a `project_id` claim so list/detail APIs stay scoped (`shared/tenancy/project_scope.py`); admins remain unscoped.
 
 #### Assessment — `/assessment`
 
@@ -217,6 +210,14 @@ Migration job management in two views:
 - **Job list** — filterable by status (running / completed / failed), derived status consistent with job detail
 - **Job detail** — per-table progress bars, phase timeline (extract → transform → load), error log, pause/resume/cancel controls, and a link to the validation report once the job finishes
 
+#### Programs — `/programs` (Enterprise)
+
+Migration programs and waves for phased cutovers (`require_feature("programs")`):
+
+- Create a program under a project, then add waves with table lists and schema
+- Wave schedule and approver **sign-off** before cutover
+- Gantt-style view of wave progress in the UI
+
 #### Validation — `/validation/[jobId]`
 
 Per-job validation results for L1–L4 with pass/fail hero cards, aggregate-type grid for L2, error summaries, downloadable reports, and **Compare Sample Rows** (top 10 by PK).
@@ -231,6 +232,14 @@ CDC stream management backed by `/api/v1/replication/`*:
 - Live metrics: events captured, events applied, in-memory queue depth
 - **Pause / resume / stop** without losing checkpoint position
 - Stream list polls status every 5 s while active
+
+#### Alerts — `/alerts`
+
+Platform alert inbox (also badge on the nav item):
+
+- Aggregates migration, replication, and system alerts from `GET /api/v1/alerts`
+- Critical vs actionable counts; links into the affected job or stream
+- Webhook / SMTP delivery configured under **Settings → Notifications**
 
 ---
 
@@ -329,7 +338,7 @@ Go migration-engine (engine-go/) — data plane ─┘
 | Replication         | `CaptureAgent` → `InMemoryChangeBus` (default) or aio-pika/RabbitMQ; `ChangeApplier` + optional Redis dedup |
 | Orchestration       | Temporal.io (optional — `/api/v1/workflows` for full migration + cutover)                                   |
 | Observability       | Prometheus `/metrics`, `GET /admin/slos`, alert webhooks                                                    |
-| Packaging           | Helm chart (`deploy/helm/sql-optima/`), product editions + HMAC license keys                                |
+| Packaging           | Docker install zip (`deploy/install/`), GHCR images, Helm chart, product editions + HMAC license keys |
 | Metadata store      | PostgreSQL (`postgres_checklist` container or `METADATA_DB_URL`)                                            |
 
 
@@ -337,7 +346,7 @@ Go migration-engine (engine-go/) — data plane ─┘
 
 ## Configuration
 
-`python start.py` auto-generates `.env` on first run. Edit it to point at your databases:
+The Docker installer writes `.env` on first run (encryption keys and metadata DB password). For a **source checkout**, `python start.py` also auto-generates `.env`. Edit it to point at your databases:
 
 ```ini
 # Encryption & auth (auto-generated — do not share)
@@ -441,6 +450,18 @@ curl -X POST -H "Authorization: Bearer $TOKEN" http://localhost:8508/api/v1/repl
 
 ## Development
 
+Contributors compile from source. End users should use [Install (Docker only)](#install-docker-only) instead.
+
+```bash
+# From a clone — API + UI + Go engine (Python 3.11+, Node, Go, Docker)
+python start.py --all
+python start.py --api
+python start.py --engine
+python start.py --ui
+python start.py --setup
+python start.py --test
+```
+
 ```bash
 # Run Python tests
 python -m pytest tests/ -v
@@ -458,10 +479,18 @@ ruff format .
 # Type checking
 mypy .
 
-# Full Docker stack (SQL Server, PostgreSQL, Redis, RabbitMQ, Temporal, migration-engine, …)
-docker compose up
+# Product install (pre-built images — no compile)
+# See deploy/install/INSTALL.md
+#   Windows: sql-optima.cmd
+#   macOS/Linux: ./sql-optima.sh
 
-# Kubernetes (Helm)
+# Full developer Docker stack (builds from source; Grafana occupies host :3508)
+docker compose up
+# Optional sample SQL Server + target Postgres:
+docker compose --profile sample-dbs up
+# Prefer `python start.py --all` for local UI development, or change the Grafana port.
+
+# Kubernetes (Helm) — same published images
 helm install sql-optima ./deploy/helm/sql-optima \
   --set env.MIGRATION_EDITION=enterprise
 ```
@@ -473,9 +502,9 @@ helm install sql-optima ./deploy/helm/sql-optima \
 | ----------------------------------- | ----------------------------------------------------------- |
 | [ARCHITECTURE.md](ARCHITECTURE.md)  | Full system design and data flows                           |
 | [OPERATIONS.md](OPERATIONS.md)      | Runbooks, SLOs, cutover checklist, live equivalence tests   |
-| [PACKAGING.md](PACKAGING.md)        | Editions, license key generation, Helm deployment           |
+| [PACKAGING.md](PACKAGING.md)        | Editions, license keys, Docker install, Helm              |
 | [RELEASE.md](RELEASE.md)            | Version history, upgrade notes, and release highlights      |
-| [SECURITY.md](SECURITY.md)          | Production hardening, JWT rotation, metadata security audit |
+| [SECURITY.md](SECURITY.md)          | Vulnerability reporting; production hardening checklist   |
 | [CONTRIBUTING.md](CONTRIBUTING.md)  | Development setup, tests, and pull request guidelines       |
 
 

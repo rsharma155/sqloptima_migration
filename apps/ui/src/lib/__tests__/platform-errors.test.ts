@@ -16,7 +16,7 @@ describe("platform-errors", () => {
   });
 
   it("falls back for plain detail string", () => {
-    const err = parseApiError({ detail: "pyodbc error" }, 500);
+    const err = parseApiError({ detail: "unexpected boom from service" }, 500);
     expect(err.error_code).toBe("INTERNAL_ERROR");
   });
 });

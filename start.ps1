@@ -1,7 +1,7 @@
-#!/usr/bin/env pwsh
+﻿#!/usr/bin/env pwsh
 <#
 .SYNOPSIS
-  Migration Platform — one-command launcher for Windows.
+  Migration Platform - one-command launcher for Windows.
 .DESCRIPTION
   Auto-installs prerequisites (Python, Node.js, Go), creates a virtual
   environment, installs project dependencies, and starts the platform.
@@ -32,14 +32,14 @@ param(
     [Parameter(Position=0)][ValidateRange(1,5)][int]$option = 0
 )
 
-# ── Helpers ────────────────────────────────────────────────────────────
+# -- Helpers ------------------------------------------------------------
 function Write-Ok   { param($m) Write-Host "  v $m" -ForegroundColor Green }
 function Write-Warn { param($m) Write-Host "  ! $m" -ForegroundColor Yellow }
 function Write-Err  { param($m) Write-Host "  x $m" -ForegroundColor Red }
 function Write-Info { param($m) Write-Host "  > $m" -ForegroundColor Cyan }
 function Write-Step { param($m) Write-Host "`n$m" -ForegroundColor White }
 
-# ── Execution-policy fix ───────────────────────────────────────────────
+# -- Execution-policy fix -----------------------------------------------
 try {
     $pol = Get-ExecutionPolicy -Scope CurrentUser -ErrorAction Stop
 } catch {
@@ -54,13 +54,13 @@ if ($pol -in @('Restricted', 'Undefined', 'AllSigned')) {
     catch {}
 }
 
-# ── Navigate to the script's directory ────────────────────────────────
+# -- Navigate to the script's directory --------------------------------
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ScriptDir
 
-# ══════════════════════════════════════════════════════════════════════
-# STEP 1 — Bootstrap prerequisites (Python, Node, Go)
-# ══════════════════════════════════════════════════════════════════════
+# ======================================================================
+# STEP 1 - Bootstrap prerequisites (Python, Node, Go)
+# ======================================================================
 Write-Step "[1/4] Bootstrapping prerequisites..."
 
 $Bootstrap = Join-Path $ScriptDir "scripts\bootstrap_prereqs.ps1"
@@ -71,7 +71,7 @@ if (Test-Path $Bootstrap) {
         Write-Warn "Some prerequisites could not be auto-installed: $_"
     }
 } else {
-    Write-Warn "bootstrap_prereqs.ps1 not found — skipping auto-install"
+    Write-Warn "bootstrap_prereqs.ps1 not found - skipping auto-install"
 }
 
 $PathEnvFile = Join-Path $env:LOCALAPPDATA "sqloptima\path.env"
@@ -82,9 +82,9 @@ if (Test-Path $PathEnvFile) {
     }
 }
 
-# ══════════════════════════════════════════════════════════════════════
-# STEP 2 — Locate Python 3.11+
-# ══════════════════════════════════════════════════════════════════════
+# ======================================================================
+# STEP 2 - Locate Python 3.11+
+# ======================================================================
 Write-Step "[2/4] Checking prerequisites..."
 
 function Find-Python {
@@ -128,19 +128,19 @@ $NpmCmd = Get-Command npm -ErrorAction SilentlyContinue
 if ($null -ne $NpmCmd) {
     Write-Ok "npm $(npm --version 2>$null)"
 } else {
-    Write-Warn "Node.js / npm still not available — UI will be skipped"
+    Write-Warn "Node.js / npm still not available - UI will be skipped"
 }
 
 $GoCmd = Get-Command go -ErrorAction SilentlyContinue
 if ($null -ne $GoCmd) {
     Write-Ok "$(go version 2>$null)"
 } else {
-    Write-Warn "Go still not available — migration-engine will be skipped"
+    Write-Warn "Go still not available - migration-engine will be skipped"
 }
 
-# ══════════════════════════════════════════════════════════════════════
-# STEP 3 — Create / reuse virtual environment
-# ══════════════════════════════════════════════════════════════════════
+# ======================================================================
+# STEP 3 - Create / reuse virtual environment
+# ======================================================================
 Write-Step "[3/4] Setting up Python virtual environment..."
 
 $VenvDir    = Join-Path $ScriptDir ".venv"
@@ -167,9 +167,9 @@ if (-not (Test-Path $VenvPython)) {
 
 & $VenvPip install --quiet --upgrade pip 2>$null | Out-Null
 
-# ══════════════════════════════════════════════════════════════════════
-# STEP 4 — Hand off to start.py
-# ══════════════════════════════════════════════════════════════════════
+# ======================================================================
+# STEP 4 - Hand off to start.py
+# ======================================================================
 Write-Step "[4/4] Launching..."
 Write-Host ""
 

@@ -28,11 +28,13 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/ravisharma/sql-optima/engine-go/internal/cdc"
+	cdcio "github.com/ravisharma/sql-optima/engine-go/internal/cdc/io"
 	"github.com/ravisharma/sql-optima/engine-go/internal/config"
 	"github.com/ravisharma/sql-optima/engine-go/internal/metadata"
 	"github.com/ravisharma/sql-optima/engine-go/internal/metrics"
 	"github.com/ravisharma/sql-optima/engine-go/internal/planner"
 	"github.com/ravisharma/sql-optima/engine-go/internal/queue"
+	"github.com/ravisharma/sql-optima/engine-go/internal/transfer"
 	"github.com/ravisharma/sql-optima/engine-go/internal/worker"
 )
 
@@ -87,7 +89,6 @@ func main() {
 	if err != nil {
 		log.Fatal("create engine metrics", zap.Error(err))
 	}
-	_ = engineMetrics // handed to worker pools in Phase 10 full integration
 
 	// -------------------------------------------------------------------------
 	// 4. bbolt queue (replaces RocksDB)
@@ -127,11 +128,19 @@ func main() {
 		zap.Int64("initial_chunk_size", sizer.CurrentSize()))
 
 	// -------------------------------------------------------------------------
-	// 7. CDC state machine
+	// 7. CDC state machine + optional live I/O worker
 	// -------------------------------------------------------------------------
 	cdcMachine := cdc.NewCDCStateMachine()
 	log.Info("CDC state machine initialised",
 		zap.String("cdc_state", cdcMachine.State().String()))
+
+	cdcCancel, err := cdcio.StartEnvWorker(ctx, log, engineMetrics)
+	if err != nil {
+		log.Fatal("start CDC live I/O worker", zap.Error(err))
+	}
+	if cdcCancel != nil {
+		defer cdcCancel()
+	}
 
 	// -------------------------------------------------------------------------
 	// 8. Migration worker loop
@@ -147,6 +156,7 @@ func main() {
 		ChunkCfg: cfg.Chunks,
 		WorkerID: workerID,
 		Sizer:    sizer,
+		Metrics:  engineMetrics,
 	}
 	workerLoop := worker.NewMigrationEngineWorkerLoop(
 		workerID, metaAdapter, masterKey, cfg.Database.MetadataURL, poller, engineRuntime,
@@ -159,6 +169,26 @@ func main() {
 	}()
 
 	log.Info("migration worker loop started", zap.String("worker_id", workerID))
+
+	// -------------------------------------------------------------------------
+	// 8b. Transfer worker loop (claims transfer_jobs only)
+	// -------------------------------------------------------------------------
+	transferWorkerID := fmt.Sprintf("go-transfer-worker-%d", os.Getpid())
+	transferMeta := transfer.NewTransferMetadataAdapter(meta)
+	transferHandler := transfer.NewTransferGoJobHandler(
+		transferMeta,
+		transfer.NewLiveTransferTableMover(masterKey),
+		poller,
+	).WithMetadataURL(cfg.Database.MetadataURL).WithConstraintApplier(
+		transfer.NewLiveTransferConstraintApplier(masterKey),
+	)
+	transferLoop := transfer.NewTransferEngineWorkerLoop(transferWorkerID, transferMeta, transferHandler)
+	go func() {
+		if err := transferLoop.Run(ctx); err != nil && ctx.Err() == nil {
+			log.Error("transfer worker loop exited", zap.Error(err))
+		}
+	}()
+	log.Info("transfer worker loop started", zap.String("worker_id", transferWorkerID))
 
 	// -------------------------------------------------------------------------
 	// 9. Graceful shutdown on SIGINT / SIGTERM

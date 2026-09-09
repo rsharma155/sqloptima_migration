@@ -4,7 +4,11 @@ Thank you for your interest in contributing to [SQL Optima](https://github.com/r
 
 ## Getting started
 
-### One-command local setup
+### End users
+
+Do not clone this repository. Follow [deploy/install/INSTALL.md](deploy/install/INSTALL.md): Docker Desktop only, then the zip or scripts hosted on the product website.
+
+### One-command local setup (contributors)
 
 From a clean machine (Python 3.11+, Node.js 18+, Go 1.23+ recommended):
 
@@ -29,6 +33,20 @@ pip install -e ".[dev,full]"
 cd apps/ui && npm install && cd ../..
 ```
 
+> **Mac ↔ Windows shared folders:** `node_modules` is not portable by default
+> (native binaries for rolldown / lightningcss / Next SWC). This repo's
+> `apps/ui` postinstall runs `ensure-native-bindings.mjs`, which force-installs
+> Mac + Windows + Linux optional bindings into the same tree.
+>
+> After copying a repo between Mac and Windows (or if vitest fails with
+> `Cannot find native binding`), run:
+>
+> ```bash
+> cd apps/ui && npm ci && npm run deps:native:all
+> ```
+>
+> Prefer not syncing `node_modules` across OSes; commit only `package-lock.json`.
+
 ## Development workflow
 
 1. **Fork** the repository and create a feature branch from `main`.
@@ -40,17 +58,28 @@ cd apps/ui && npm install && cd ../..
 
 ```bash
 # Python unit + integration tests
+pip install -e ".[dev]"
 python -m pytest tests/ -v
 
 # With coverage
 python -m pytest --cov=. --cov-report=term-missing
 
 # Go data plane (no live DB required)
+# Windows: ensure "C:\Program Files\Go\bin" is on PATH
 cd engine-go && go test ./...
 
 # UI lint
 cd apps/ui && npm run lint
+
+# UI unit tests (vitest) — run npm ci / npm run deps:native first on this OS
+cd apps/ui && npm test
 ```
+
+### Windows Go PATH tip
+
+If `go` is not found after installing Go, add `C:\Program Files\Go\bin` to your
+user PATH (or run `$env:PATH = "C:\Program Files\Go\bin;$env:PATH"` in the
+current PowerShell session).
 
 ## Code style
 
@@ -72,6 +101,8 @@ Guidelines:
 ## Architecture
 
 Read [ARCHITECTURE.md](ARCHITECTURE.md) before touching cross-layer code. The dependency rule is: API → application services → domain + infrastructure ports → shared kernel. Domain code must not import FastAPI or SQLAlchemy models.
+
+For an agent-oriented quick map of commands and invariants, see [CLAUDE.md](CLAUDE.md) (may be gitignored locally).
 
 ## Pull request checklist
 

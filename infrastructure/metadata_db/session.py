@@ -26,6 +26,7 @@ from shared.logging.structured_logging import get_logger
 from infrastructure.metadata_db.schema_repair import (
     repair_go_engine_metadata,
     repair_replication_stream_metadata,
+    repair_transfer_metadata,
 )
 
 _DEFAULT_DB_URL = "sqlite+aiosqlite:///migration_platform.db"
@@ -226,6 +227,7 @@ async def init_db() -> None:
     async with _engine.begin() as conn:
         await conn.run_sync(repair_go_engine_metadata)
         await conn.run_sync(repair_replication_stream_metadata)
+        await conn.run_sync(repair_transfer_metadata)
 
 
 async def get_session() -> AsyncGenerator[AsyncSession, None]:

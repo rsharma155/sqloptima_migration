@@ -1,8 +1,8 @@
 # Architecture — SQL Server → PostgreSQL Migration Platform
 
 **Repository:** [github.com/rsharma155/sqloptima_migration](https://github.com/rsharma155/sqloptima_migration)  
-**Version:** Go data plane complete (phases 0–15) + DBA-feedback GA polish pass (2026-06-05) + L-series hardening + replication control plane  
-**Last updated:** 2026-06-07  
+**Version:** 0.2.0 — Go data plane + control plane (programs, reports, project scoping, replication settings)  
+**Last updated:** 2026-09-09  
 **Author:** Ravi Sharma  
 **License:** MIT — © 2026 Ravi Sharma
 
@@ -48,7 +48,7 @@ All SQL transformations operate on **AST nodes** — never on raw strings or reg
 
 The system is split into two planes:
 
-- **Python Control Plane** — auth, project management, discovery, assessment, schema conversion (with parse unblockers + pgparse repair), validation, **replication (CDC)**, cutover/programs, schema comparison, observability (`/metrics`, SLOs), licensing, REST API, Next.js UI
+- **Python Control Plane** — auth (incl. first-run `/auth/setup`), project management + **JWT project scoping**, discovery, assessment, schema conversion (parse unblockers + pgparse repair), validation, reporting, **replication (CDC)**, cutover/programs/waves, schema comparison, observability (`/metrics`, SLOs), licensing, REST API, Next.js UI
 - **Go Data Plane** — chunk planner, bulk data extraction (`go-mssqldb` driver), bbolt persistent queue, PostgreSQL binary `COPY` loader, and CDC change-parsing/apply logic. All packages compile and test with no live database required.
 
 Both planes communicate exclusively via the **PostgreSQL Metadata Repository** — no direct function calls, no REST calls between Go and Python.
@@ -146,7 +146,7 @@ Deliberately thin. Each router calls an application service — no business logi
 | `discovery_router.py` | `/api/v1/discover`, `/api/v1/mapping` | Schema discovery, column type mapping |
 | `assessment_router.py` | `/api/v1/assess` | SAFE/WARNING/BLOCKER assessment |
 | `projects_router.py` | `/api/v1/projects` | Migration project CRUD |
-| `reports_router.py` | `/api/v1/reports` | Migration + validation report downloads |
+| `reports_router.py` | `/api/v1/reports` | Migration + validation report downloads; executive summary |
 | `admin_router.py` | `/api/v1/admin` | Job retention, ODBC check, diagnostics, audit log, metadata security, edition/usage/SLOs, Go engine health |
 | `comparison_router.py` | `/api/comparison` | Side-by-side schema comparison (own prefix) |
 | `replication_router.py` | `/api/v1/replication/streams/**` | Stream CRUD, start/stop/pause/resume, live status |
@@ -185,9 +185,10 @@ Two checks run inside `startup()` immediately after `init_db()`:
 #### Middleware (`apps/api/middleware/auth.py`)
 
 - JWT verification on every request (except `PUBLIC_PATHS`)
-- `PUBLIC_PATHS` = `/health`, `/metrics`, `/docs`, `/openapi.json`, `/redoc`, `/api/v1/auth/login|token|refresh` (plus legacy flat equivalents during deprecation window)
+- `PUBLIC_PATHS` = `/health`, `/health/deep`, `/metrics`, `/docs`, `/openapi.json`, `/redoc`, `/api/v1/auth/login|token|refresh|setup|setup-required` (plus legacy flat equivalents during deprecation window)
 - `UserRole` enum: `VIEWER < OPERATOR < ADMIN`
 - `require_role(minimum_role)` FastAPI dependency — reads role from JWT payload (no DB call)
+- JWT may carry optional `project_id` for non-admin scoping (`shared/tenancy/project_scope.py`)
 - `create_access_token` (8 h, `jti` claim) and `create_refresh_token` (7 d)
 
 ### 3.2 Domain Layer (`domains/`)
@@ -225,6 +226,8 @@ Pure Python — no I/O, no async, no database calls.
 | `ai/` | OpenAI / Anthropic / local LLMs | Advisory analysis only — never executes migration |
 | `temporal/` | Temporal.io SDK | Durable workflow execution |
 | `replication/` | `InMemoryChangeBus`, `LoopbackPublisher`, `ReplicationChangeConsumer`, `SqlServerWatermarkAdapter` | Capture → queue → apply pipeline |
+| `redis/` | Redis client | Optional replication dedup backend (scoped `SCAN`/`DEL`, never `flushdb`) |
+| `sql_scripts/` | Privilege / script catalog | Least-privilege grant scripts and related SQL assets |
 | `metadata_db/repositories/replication_stream_repository.py` | SQLAlchemy async | `replication_streams` CRUD + status/metrics updates |
 
 ### 3.4 Shared Kernel (`shared/`)
@@ -239,6 +242,8 @@ Zero dependencies on outer layers.
 | `logging/structured_logging.py` | structlog + OpenTelemetry configuration |
 | `contracts/base_connector.py` | Port interfaces for DB connectors and discovery |
 | `contracts/replication_ports.py` | `ChangePublisherPort`, `ChangeConsumerPort`, `ReplicationStreamRepositoryPort` |
+| `tenancy/project_scope.py` | `resolve_project_filter`, `assert_resource_project_access`, `connection_in_project` — pin non-admin JWTs to a project; admins remain unscoped |
+| `errors/`, `events/`, `utils/` | Platform error catalog, migration events, shared helpers |
 
 ---
 
@@ -944,7 +949,7 @@ Bulk data migration deliberately splits **load-time DDL** from **post-load DDL**
 
 Triggers are **discovered and displayed** in the finalize inventory but **not auto-applied by default** (`finalize_triggers=false`). T-SQL → PL/pgSQL trigger conversion remains in the transpilation pipeline; operators enable trigger finalize only after manual review.
 
-**Local dev:** `python start.py --all` starts API + Go engine + UI. **Docker:** `docker compose up` includes the `migration-engine` service.
+**Local product install:** `deploy/install/sql-optima.sh` (pre-built images). **Local dev:** `python start.py --all` starts API + Go engine + UI. **Developer Docker:** `docker compose up` includes the `migration-engine` service (lab stack; Grafana uses host 3508).
 
 ---
 
@@ -1216,13 +1221,18 @@ CDC_STREAMING → PAUSED/STOPPING/FAILED/COMPLETED`) rejects illegal transitions
 | Replication control plane (API, service, runtime, UI, CDC preflight, schema drift) | ✅ Done |
 | Cutover workflow (checkpoints, rollback, connection-switch manifest, write-freeze) | ✅ Done |
 | Migration programs / waves API with sign-off | ✅ Done |
+| Project / JWT scoping (`shared/tenancy/project_scope.py`, Alembic 006) | ✅ Done — admins unscoped; legacy rows without `project_id` remain visible |
 | Licensing & editions (HMAC keys, feature gates, Helm chart, usage metering) | 🟡 Partial — signed images + license server pending |
 | Observability (`/metrics`, SLO API, alert webhooks) | ✅ Done |
-| Next.js UI (full dashboard; Playwright smoke + jest-axe a11y CI) | 🟡 Partial — full core-flow Playwright suite pending |
-| SQL Server native CDC provider wired to CaptureAgent (`SqlServerCdcProvider`) | 🔲 Pending |
-| CDC live I/O in Go data plane (`go-mssqldb` read + `pgx/v5` apply around `cdc` package) | 🔲 Pending |
-| Grafana dashboards + OTLP provider init in the Go binary | 🔲 Pending |
-| Expanded live integration tests (full docker-compose stack; golden e2e in weekly CI) | 🟡 Partial |
+| Next.js UI (full dashboard; Playwright smoke + core-flow + jest-axe a11y + Lighthouse CI; Programs Gantt) | ✅ Done — Lighthouse CI on `/login`; Programs wave Gantt at `/programs` |
+| SQL Server native CDC provider wired to CaptureAgent (`SqlServerCdcProvider`) | ✅ Done — ABC + checkpoint resume + snapshot FSM |
+| CDC live I/O in Go data plane (`go-mssqldb` read + `pgx/v5` apply around `cdc` package) | ✅ Done — `internal/cdc/io` CaptureReader/ApplyWriter + env worker |
+| Grafana dashboards + OTLP provider init in the Go binary | ✅ Done — OTLP gRPC `:4317`, metrics wired to workers, Migration Engine dashboard |
+| Expanded live integration tests (full docker-compose stack; golden e2e in weekly CI) | 🟡 Partial — API discover→migrate→validate + Playwright core flows; live dual-DB optional |
+| Privilege hard-fail on elevated DB principals (§12.6) | ✅ Done — BLOCKER + `assert_least_privilege` gate (`MIGRATION_ALLOW_ELEVATED_PRIVILEGES` override) |
+| JWT RS256 dual-mode (§12.5) | ✅ Done — optional `MIGRATION_JWT_PRIVATE_KEY` / `PUBLIC_KEY`; HS256 default + legacy accept |
+| Platform error UI (§13.11) | ✅ Done — `PlatformError` + `ApiError.payload` + ErrorBoundary |
+| Chaos / resumability + idempotent double-run tests (§11.3–11.4) | ✅ Done — mid-failure resume + ChunkedMigration double-run |
 
 ---
 
@@ -1230,9 +1240,12 @@ CDC_STREAMING → PAUSED/STOPPING/FAILED/COMPLETED`) rejects illegal transitions
 
 | Document | Purpose |
 |---|---|
-| [README.md](README.md) | Quickstart, service URLs, configuration |
+| [README.md](README.md) | Docker install + developer quickstart |
+| [deploy/install/INSTALL.md](deploy/install/INSTALL.md) | Website / Docker-only customer install |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup and pull request guidelines |
-| [SECURITY.md](SECURITY.md) | Vulnerability reporting |
-| [docs/SECURITY.md](docs/SECURITY.md) | Production hardening and compliance |
-| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Runbooks and SLOs |
-| [docs/PACKAGING.md](docs/PACKAGING.md) | Editions, licensing, Helm |
+| [SECURITY.md](SECURITY.md) | Vulnerability reporting + pointer to production hardening |
+| [OPERATIONS.md](OPERATIONS.md) | Runbooks, SLOs, cutover, programs |
+| [PACKAGING.md](PACKAGING.md) | Editions, licensing, Docker install, Helm, metering |
+| [RELEASE.md](RELEASE.md) | Version history and upgrade notes |
+| [CLAUDE.md](CLAUDE.md) | Agent/contributor quick reference (local; may be gitignored) |
+| `docs/SECURITY.md` | Extra production-hardening notes (local `docs/` tree; gitignored) |

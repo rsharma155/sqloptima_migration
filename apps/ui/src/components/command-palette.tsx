@@ -29,6 +29,7 @@ import {
   Clock,
   SlidersHorizontal,
   ArrowRight,
+  ArrowLeftRight,
 } from "lucide-react";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import {
@@ -52,6 +53,7 @@ const NAV_ITEMS = [
   { label: "Projects", href: "/projects", icon: FolderOpen, section: "Core Workflow" },
   { label: "Assessment", href: "/assessment", icon: ShieldCheck, section: "Core Workflow" },
   { label: "Migrations", href: "/migrations", icon: Database, section: "Core Workflow" },
+  { label: "Transfer", href: "/transfers", icon: ArrowLeftRight, section: "Core Workflow" },
   { label: "Replication", href: "/replication", icon: Repeat, section: "Core Workflow" },
   { label: "Comparison", href: "/comparison", icon: GitCompare, section: "Analysis & Tools" },
   { label: "Objects", href: "/objects", icon: GitBranch, section: "Analysis & Tools" },
@@ -63,6 +65,7 @@ const NAV_ITEMS = [
 
 const QUICK_ACTIONS = [
   { label: "Start New Migration", href: "/migrations", icon: ArrowRight, hint: "Opens migration wizard" },
+  { label: "Start Transfer", href: "/transfers", icon: ArrowLeftRight, hint: "Cross-database bulk copy" },
   { label: "Run Assessment", href: "/assessment", icon: ShieldCheck, hint: "Assess migration readiness" },
   { label: "Convert SQL", href: "/sql", icon: Code, hint: "T-SQL → PL/pgSQL converter" },
 ];

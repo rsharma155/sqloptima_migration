@@ -94,6 +94,7 @@ class ConnectionRecord(Base):
     project_connection_id = Column(String(36), primary_key=True)
     name = Column(String(255), nullable=False)
     db_type = Column(String(20), nullable=False)
+    engine = Column(String(20), nullable=True)
     host = Column(String(255), nullable=False)
     port = Column(Integer, nullable=False)
     database_name = Column(String(255), nullable=False)
@@ -119,6 +120,16 @@ class ConnectionRecord(Base):
     target_jobs = relationship(
         "MigrationJobRecord",
         foreign_keys="MigrationJobRecord.target_project_connection_id",
+        back_populates="target_connection",
+    )
+    transfer_source_jobs = relationship(
+        "TransferJobRecord",
+        foreign_keys="TransferJobRecord.source_project_connection_id",
+        back_populates="source_connection",
+    )
+    transfer_target_jobs = relationship(
+        "TransferJobRecord",
+        foreign_keys="TransferJobRecord.target_project_connection_id",
         back_populates="target_connection",
     )
 
@@ -489,6 +500,17 @@ class PlatformReplicationSettingsRecord(Base):
     updated_at = Column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now)
 
 
+class PlatformTransferSettingsRecord(Base):
+    __tablename__ = "platform_transfer_settings"
+
+    settings_id = Column(String(36), primary_key=True, default="platform-default")
+    file_offload_enabled = Column(Boolean, nullable=False, default=True)
+    file_offload_min_rows = Column(BigInteger, nullable=False, default=2_000_000)
+    file_offload_min_mb = Column(Float, nullable=False, default=256.0)
+    staging_path = Column(String(1024), nullable=False, default="")
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now)
+
+
 class PlatformNotificationSettingsRecord(Base):
     __tablename__ = "platform_notification_settings"
 
@@ -528,3 +550,178 @@ class ReplicationStreamRecord(Base):
     stopped_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_now)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now)
+
+
+class TransferJobRecord(Base):
+    __tablename__ = "transfer_jobs"
+
+    transfer_job_id = Column(String(36), primary_key=True)
+    path = Column(String(32), nullable=False)
+    source_project_connection_id = Column(
+        String(36),
+        ForeignKey("project_connections.project_connection_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    target_project_connection_id = Column(
+        String(36),
+        ForeignKey("project_connections.project_connection_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    status = Column(String(32), nullable=False, default="queued", index=True)
+    phase = Column(String(32), nullable=False, default="idle")
+    tables_total = Column(Integer, nullable=False, default=0)
+    tables_done = Column(Integer, nullable=False, default=0)
+    rows_total = Column(BigInteger, nullable=False, default=0)
+    rows_copied = Column(BigInteger, nullable=False, default=0)
+    error = Column(Text, nullable=True)
+    preflight_json = Column(JSON, nullable=True)
+    constraint_plan = Column(JSON, nullable=True)
+    config = Column(JSON, nullable=True)
+    project_id = Column(String(36), nullable=True, index=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now)
+
+    source_connection = relationship(
+        "ConnectionRecord",
+        foreign_keys=[source_project_connection_id],
+        back_populates="transfer_source_jobs",
+    )
+    target_connection = relationship(
+        "ConnectionRecord",
+        foreign_keys=[target_project_connection_id],
+        back_populates="transfer_target_jobs",
+    )
+    table_plans = relationship(
+        "TransferTablePlanRecord",
+        back_populates="job",
+        cascade="all, delete-orphan",
+        order_by="TransferTablePlanRecord.transfer_table_plan_id",
+    )
+    command = relationship(
+        "TransferCommandRecord",
+        back_populates="job",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+    logs = relationship(
+        "TransferJobLogRecord",
+        back_populates="job",
+        cascade="all, delete-orphan",
+        order_by="TransferJobLogRecord.logged_at",
+    )
+    runtime_settings = relationship(
+        "TransferRuntimeSettingsRecord",
+        back_populates="job",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+
+class TransferTablePlanRecord(Base):
+    __tablename__ = "transfer_table_plans"
+
+    transfer_table_plan_id = Column(Integer, primary_key=True, autoincrement=True)
+    transfer_job_id = Column(
+        String(36),
+        ForeignKey("transfer_jobs.transfer_job_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    source_schema = Column(String(255), nullable=False)
+    source_table = Column(String(255), nullable=False)
+    target_schema = Column(String(255), nullable=False)
+    target_table = Column(String(255), nullable=False)
+    chunk_size = Column(Integer, nullable=False, default=10000)
+    status = Column(String(50), nullable=False, default="pending")
+    rows_copied = Column(BigInteger, nullable=False, default=0)
+    row_count_estimate = Column(BigInteger, nullable=False, default=0)
+    columns = Column(JSON, nullable=True)
+    error = Column(Text, nullable=True)
+    error_at = Column(DateTime(timezone=True), nullable=True)
+    error_count = Column(Integer, nullable=False, default=0)
+
+    job = relationship("TransferJobRecord", back_populates="table_plans")
+
+    __table_args__ = (
+        Index("ix_transfer_plans_job_table", "transfer_job_id", "source_table"),
+    )
+
+
+class TransferCommandRecord(Base):
+    __tablename__ = "transfer_commands"
+
+    transfer_job_id = Column(
+        String(36),
+        ForeignKey("transfer_jobs.transfer_job_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    command = Column(String(20), nullable=False)
+    issued_at = Column(DateTime(timezone=True), nullable=False, default=_now)
+    acked_at = Column(DateTime(timezone=True), nullable=True)
+
+    job = relationship("TransferJobRecord", back_populates="command")
+
+
+class TransferRuntimeSettingsRecord(Base):
+    __tablename__ = "transfer_runtime_settings"
+
+    transfer_job_id = Column(
+        String(36),
+        ForeignKey("transfer_jobs.transfer_job_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    chunk_size = Column(Integer, nullable=False, default=10000)
+    min_chunk_size = Column(Integer, nullable=False, default=1000)
+    max_chunk_size = Column(Integer, nullable=False, default=100000)
+    max_rows_per_sec = Column(Integer, nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now)
+
+    job = relationship("TransferJobRecord", back_populates="runtime_settings")
+
+
+class TransferJobLogRecord(Base):
+    __tablename__ = "transfer_job_logs"
+
+    transfer_job_log_id = Column(Integer, primary_key=True, autoincrement=True)
+    transfer_job_id = Column(
+        String(36),
+        ForeignKey("transfer_jobs.transfer_job_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    logged_at = Column(DateTime(timezone=True), nullable=False, default=_now)
+    level = Column(String(20), nullable=False, default="info")
+    phase = Column(String(32), nullable=True)
+    table_name = Column(String(255), nullable=True)
+    message = Column(Text, nullable=False)
+
+    job = relationship("TransferJobRecord", back_populates="logs")
+
+    __table_args__ = (
+        Index("ix_transfer_job_logs_job_time", "transfer_job_id", "logged_at"),
+        Index("ix_transfer_job_logs_job_table", "transfer_job_id", "table_name", "logged_at"),
+    )
+
+
+class TransferConstraintActionRecord(Base):
+    __tablename__ = "transfer_constraint_actions"
+
+    transfer_constraint_action_id = Column(Integer, primary_key=True, autoincrement=True)
+    transfer_job_id = Column(
+        String(36),
+        ForeignKey("transfer_jobs.transfer_job_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    table_name = Column(String(255), nullable=False)
+    object_id = Column(String(255), nullable=False)
+    object_kind = Column(String(50), nullable=False)
+    planned_action = Column(String(32), nullable=False)
+    executed_at = Column(DateTime(timezone=True), nullable=True)
+    restored_at = Column(DateTime(timezone=True), nullable=True)
+    status = Column(String(32), nullable=False, default="planned")
+    message = Column(Text, nullable=True)

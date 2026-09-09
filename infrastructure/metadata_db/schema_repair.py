@@ -65,3 +65,56 @@ def repair_replication_stream_metadata(conn: sa.Connection) -> None:
     for column, ddl in additions:
         if not _column_exists(conn, "replication_streams", column):
             conn.execute(sa.text(f"ALTER TABLE replication_streams ADD COLUMN {column} {ddl}"))
+
+
+def repair_transfer_metadata(conn: sa.Connection) -> None:
+    """Add connection engine + transfer tables when Alembic did not apply 013/014."""
+    if _table_exists(conn, "project_connections") and not _column_exists(
+        conn, "project_connections", "engine"
+    ):
+        conn.execute(sa.text("ALTER TABLE project_connections ADD COLUMN engine VARCHAR(20)"))
+        conn.execute(
+            sa.text(
+                "UPDATE project_connections SET engine = CASE "
+                "WHEN db_type = 'target' THEN 'postgres' "
+                "ELSE 'sqlserver' END "
+                "WHERE engine IS NULL"
+            )
+        )
+
+    if not _table_exists(conn, "platform_transfer_settings"):
+        conn.execute(
+            sa.text(
+                "CREATE TABLE platform_transfer_settings ("
+                "settings_id VARCHAR(36) PRIMARY KEY, "
+                "file_offload_enabled BOOLEAN NOT NULL DEFAULT 1, "
+                "file_offload_min_rows BIGINT NOT NULL DEFAULT 2000000, "
+                "file_offload_min_mb FLOAT NOT NULL DEFAULT 256.0, "
+                "staging_path VARCHAR(1024) NOT NULL DEFAULT '', "
+                "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"
+                ")"
+            )
+        )
+
+    if _table_exists(conn, "transfer_table_plans"):
+        if not _column_exists(conn, "transfer_table_plans", "error"):
+            conn.execute(sa.text("ALTER TABLE transfer_table_plans ADD COLUMN error TEXT"))
+        if not _column_exists(conn, "transfer_table_plans", "error_at"):
+            conn.execute(sa.text("ALTER TABLE transfer_table_plans ADD COLUMN error_at TIMESTAMP"))
+        if not _column_exists(conn, "transfer_table_plans", "error_count"):
+            conn.execute(
+                sa.text(
+                    "ALTER TABLE transfer_table_plans "
+                    "ADD COLUMN error_count INTEGER NOT NULL DEFAULT 0"
+                )
+            )
+
+    if _table_exists(conn, "transfer_job_logs"):
+        indexes = {idx["name"] for idx in inspect(conn).get_indexes("transfer_job_logs")}
+        if "ix_transfer_job_logs_job_table" not in indexes:
+            conn.execute(
+                sa.text(
+                    "CREATE INDEX ix_transfer_job_logs_job_table "
+                    "ON transfer_job_logs (transfer_job_id, table_name, logged_at)"
+                )
+            )

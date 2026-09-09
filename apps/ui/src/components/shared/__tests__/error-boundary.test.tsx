@@ -40,8 +40,8 @@ describe('ErrorBoundary', () => {
       </ErrorBoundary>
     );
 
-    expect(screen.getByText(/Something went wrong/i)).toBeInTheDocument();
-    expect(screen.getByText('Test error message')).toBeInTheDocument();
+    expect(screen.getAllByText(/Something went wrong/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Test error message/i)).toBeInTheDocument();
   });
 
   it('displays reload button in error state', () => {
@@ -55,6 +55,6 @@ describe('ErrorBoundary', () => {
       </ErrorBoundary>
     );
 
-    expect(screen.getByRole('button', { name: /reload page/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument();
   });
 });

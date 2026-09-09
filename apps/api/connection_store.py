@@ -56,6 +56,7 @@ def _record_to_dict(r: ConnectionRecord) -> dict:
     return {
         "name": r.name,
         "type": r.db_type,
+        "engine": r.engine,
         "host": r.host,
         "port": r.port,
         "database": r.database_name,
@@ -75,6 +76,7 @@ def _dict_to_record(connection_id: str, entry: dict) -> ConnectionRecord:
         project_connection_id=connection_id,
         name=entry.get("name", ""),
         db_type=entry.get("type", ""),
+        engine=entry.get("engine"),
         host=entry.get("host", ""),
         port=int(entry.get("port", 5432)),
         database_name=entry.get("database", ""),
@@ -173,7 +175,10 @@ def get_decrypted_password(entry: dict) -> str:
         try:
             return _secrets_instance.decrypt(pw)
         except Exception:
-            logger.warning("Failed to decrypt password, returning as-is")
+            logger.warning("Failed to decrypt connection password")
+            raise ValueError(
+                "Unable to decrypt connection password — rotate credentials or check MIGRATION_MASTER_KEY"
+            ) from None
     return pw
 
 

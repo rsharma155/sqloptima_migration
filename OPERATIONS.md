@@ -2,6 +2,24 @@
 
 Day-2 runbook for operating the SQL Server → PostgreSQL migration platform.
 
+## Start / stop (product Docker install)
+
+Customers use `deploy/install/` (see [INSTALL.md](deploy/install/INSTALL.md)). Operators on the same package:
+
+```bash
+./sql-optima.sh          # pull + start
+./sql-optima.sh status
+./sql-optima.sh stop     # volumes kept
+```
+
+```powershell
+.\sql-optima.ps1
+.\sql-optima.ps1 -Status
+.\sql-optima.ps1 -Stop
+```
+
+Logs: `docker compose -f docker-compose.yml logs -f` from the install directory (`~/sql-optima` for one-liner installs).
+
 ## Sizing
 
 | Table size | Workers | Chunk size | Expected duration |
@@ -14,9 +32,30 @@ See `GET /api/v1/admin/slos` for published SLO targets.
 
 ## Health checks
 
-- API: `GET /health` (unauthenticated)
+- API liveness: `GET /health` (unauthenticated)
+- API deep: `GET /health/deep` (unauthenticated — metadata DB reachability)
 - Metrics: `GET /metrics` (Prometheus)
 - Diagnostics: `GET /api/v1/admin/diagnostics` (ADMIN)
+- Go engine heartbeat: `GET /api/v1/admin/go-engine/health` (ADMIN)
+
+## Go engine OTLP metrics
+
+The migration-engine binary exports OpenTelemetry metrics over **OTLP gRPC** (port **4317**).
+
+| Setting | Where | Notes |
+|---------|-------|-------|
+| `[metrics] otlp_endpoint` | `engine-go/config/default.toml` | Empty = no-op exporter |
+| `MIGRATION_METRICS_OTLP_ENDPOINT` | env override | e.g. `otel-collector:4317` or `http://localhost:4317` |
+
+Docker Compose exposes collector ports `4317` (gRPC) and `4318` (HTTP). Point the Go engine at gRPC:
+
+```bash
+export MIGRATION_METRICS_OTLP_ENDPOINT=localhost:4317
+```
+
+Grafana loads the **Migration Engine** dashboard from `deployments/grafana-dashboards/migration-engine.json` (rows extracted/loaded, chunk duration, CDC lag, queue depth).
+
+Optional CDC live I/O worker (same binary): set `MIGRATION_CDC_ENABLED=1` plus `MIGRATION_CDC_TABLE`, `MIGRATION_CDC_TARGET_URL`, and source connection env vars.
 
 ## Snapshot gate
 
@@ -66,11 +105,14 @@ Apply scripts in `docs/sql/least_privilege_grants.sql` before production migrati
 
 ## Programs and waves
 
-Group tables into phased cutovers:
+Group tables into phased cutovers (Enterprise edition — `require_feature("programs")`):
 
 - `POST /api/v1/programs` — create program under a project
 - `POST /api/v1/programs/{id}/waves` — add table wave
 - `POST /api/v1/programs/waves/{id}/sign-off` — approver sign-off
+- UI: `/programs` (wave Gantt)
+
+Non-admin tokens with a JWT `project_id` only see programs in that project.
 
 ## Notifications
 

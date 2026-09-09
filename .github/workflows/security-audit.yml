@@ -17,7 +17,7 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies + pip-audit
         run: |
-          pip install --upgrade pip
+          pip install --upgrade pip "setuptools>=83.0.0"
           pip install pip-audit
           python <<'EOF'
           import subprocess
@@ -44,6 +44,7 @@ jobs:
           python-version: "3.11"
       - name: Generate Python SBOM
         run: |
+          pip install --upgrade pip "setuptools>=83.0.0"
           pip install -e .
           python scripts/generate_sbom.py
       - uses: actions/upload-artifact@v7

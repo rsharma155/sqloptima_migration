@@ -105,6 +105,7 @@ dist/
 # ── Local Development ─────────────────────────────────────────────────────────
 .claude/
 docs/
+docs/to_delete.md
 SP_test/
 CLAUDE.md
 
@@ -118,7 +119,6 @@ SP_test/phase*_*.py
 htmlcov/
 
 # ── Docker & Deployment ───────────────────────────────────────────────────────
-.dockerignore
 docker-compose.override.yml
 
 # ── Alembic ───────────────────────────────────────────────────────────────────

@@ -532,7 +532,10 @@ def _decrypt_password(entry: dict) -> str:
         try:
             return secrets.decrypt(pw)
         except Exception:
-            logger.warning("Failed to decrypt password, returning as-is")
+            logger.warning("Failed to decrypt connection password")
+            raise ValueError(
+                "Unable to decrypt connection password — rotate credentials or check MIGRATION_MASTER_KEY"
+            ) from None
     return pw
 
 
@@ -553,6 +556,40 @@ async def make_connector(entry: dict) -> tuple[Any, Any]:
         )
         config = postgres_config_from_entry(entry, password=password)
         return PostgresConnector(config), config
+
+
+async def assert_least_privilege(src_entry: dict, tgt_entry: dict) -> None:
+    """Refuse migration when source/target use elevated principals (§12.6).
+
+    Override for local/dev with ``MIGRATION_ALLOW_ELEVATED_PRIVILEGES=1``.
+    """
+    import os
+
+    from domains.validation.validation_engine import (
+        PreMigrationValidator,
+        ValidationSeverity,
+    )
+
+    if os.environ.get("MIGRATION_ALLOW_ELEVATED_PRIVILEGES", "").strip() in {
+        "1",
+        "true",
+        "TRUE",
+    }:
+        logger.warning("privilege_check_skipped", reason="MIGRATION_ALLOW_ELEVATED_PRIVILEGES")
+        return
+
+    src_conn, _ = await make_connector(src_entry)
+    tgt_conn, _ = await make_connector(tgt_entry)
+    await src_conn.connect()
+    await tgt_conn.connect()
+    try:
+        issues = await PreMigrationValidator(src_conn, tgt_conn).validate_privileges()
+        blockers = [i for i in issues if i.severity == ValidationSeverity.BLOCKER]
+        if blockers:
+            raise ValueError(blockers[0].message)
+    finally:
+        await src_conn.disconnect()
+        await tgt_conn.disconnect()
 
 
 # ---------------------------------------------------------------------------
@@ -822,6 +859,10 @@ async def start_migration(
     procedural_only = not tables and procedural_state.has_selection()
 
     src_entry = get_entry(str(source_connection_id))
+    tgt_entry = get_entry(str(target_connection_id))
+    if src_entry and tgt_entry:
+        await assert_least_privilege(src_entry, tgt_entry)
+
     masking_by_table = await _resolve_masking_for_tables(
         src_entry,
         tables=tables,

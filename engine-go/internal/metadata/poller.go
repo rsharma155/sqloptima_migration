@@ -5,6 +5,7 @@ package metadata
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -45,21 +46,36 @@ func (p *CommandPoller) Ack(ctx context.Context, jobID uuid.UUID) error {
 	return p.client.AckCommand(ctx, jobID)
 }
 
+// ListenSQL returns a LISTEN statement for a known metadata channel.
+// Channel names are allow-listed so they are never interpolated from user input.
+func ListenSQL(channel string) (string, error) {
+	switch channel {
+	case "migration_commands", "transfer_commands":
+		return "LISTEN " + channel, nil
+	default:
+		return "", fmt.Errorf("unsupported listen channel %q", channel)
+	}
+}
+
 // ListenLoop starts a PostgreSQL LISTEN loop on the "migration_commands" channel
 // and calls onNotify each time a notification arrives. It runs until ctx is
 // cancelled. Reconnects automatically on transient errors.
 //
 // This is the real-time delivery path; PollOnce is the authoritative fallback.
 func (p *CommandPoller) ListenLoop(ctx context.Context, connStr string, onNotify func()) error {
+	return p.ListenLoopOn(ctx, connStr, "migration_commands", onNotify)
+}
+
+// ListenLoopOn LISTENs on a named PostgreSQL channel (migration_commands or transfer_commands).
+func (p *CommandPoller) ListenLoopOn(ctx context.Context, connStr, channel string, onNotify func()) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil
 		}
-		if err := p.listenOnce(ctx, connStr, onNotify); err != nil {
+		if err := p.listenOnce(ctx, connStr, channel, onNotify); err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
-			// Back off briefly before reconnecting on error.
 			select {
 			case <-time.After(p.fallbackInterval):
 			case <-ctx.Done():
@@ -69,14 +85,19 @@ func (p *CommandPoller) ListenLoop(ctx context.Context, connStr string, onNotify
 	}
 }
 
-func (p *CommandPoller) listenOnce(ctx context.Context, connStr string, onNotify func()) error {
+func (p *CommandPoller) listenOnce(ctx context.Context, connStr, channel string, onNotify func()) error {
+	listenSQL, err := ListenSQL(channel)
+	if err != nil {
+		return err
+	}
+
 	conn, err := pgx.Connect(ctx, connStr)
 	if err != nil {
 		return err
 	}
 	defer conn.Close(ctx)
 
-	if _, err = conn.Exec(ctx, "LISTEN migration_commands"); err != nil {
+	if _, err = conn.Exec(ctx, listenSQL); err != nil {
 		return err
 	}
 

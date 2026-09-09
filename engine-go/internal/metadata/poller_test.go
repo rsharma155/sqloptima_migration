@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/ravisharma/sql-optima/engine-go/internal/core"
+	"github.com/ravisharma/sql-optima/engine-go/internal/metadata"
 )
 
 // These tests verify command semantics without requiring a live database.
@@ -35,5 +36,19 @@ func TestCommandCancelIsStop(t *testing.T) {
 func TestCommandResumeIsNeither(t *testing.T) {
 	if core.CommandResume.IsPause() || core.CommandResume.IsStop() {
 		t.Error("RESUME must be neither pause nor stop")
+	}
+}
+
+func TestListenSQLAllowList(t *testing.T) {
+	sql, err := metadata.ListenSQL("transfer_commands")
+	if err != nil || sql != "LISTEN transfer_commands" {
+		t.Fatalf("transfer_commands: %q %v", sql, err)
+	}
+	sql, err = metadata.ListenSQL("migration_commands")
+	if err != nil || sql != "LISTEN migration_commands" {
+		t.Fatalf("migration_commands: %q %v", sql, err)
+	}
+	if _, err = metadata.ListenSQL("drop_table"); err == nil {
+		t.Fatal("unknown channel must be rejected")
 	}
 }

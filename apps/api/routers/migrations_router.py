@@ -20,9 +20,24 @@ from domains.licensing.editions import require_feature
 from domains.licensing.license_enforcement import require_valid_license
 from domains.migration.migration_engine import MigrationStatus, MigrationStrategy
 from shared.errors.error_catalog import format_connection_error, format_error_response
-from shared.tenancy.project_scope import resolve_project_filter
+from shared.tenancy.project_scope import (
+    assert_resource_project_access,
+    resolve_project_filter,
+)
 
 router = APIRouter(tags=["migrations"])
+
+
+def _is_admin(user: dict) -> bool:
+    return user.get("role") == UserRole.ADMIN.value
+
+
+def _assert_job_access(job: object, user: dict) -> None:
+    assert_resource_project_access(
+        getattr(job, "project_id", None),
+        user_project_id=user.get("project_id"),
+        is_admin=_is_admin(user),
+    )
 
 
 # ---- Models ----
@@ -421,10 +436,11 @@ async def start_migration(req: MigrationRequest, _: dict = require_role(UserRole
 
 
 @router.get("/migrations/{job_id}")
-async def get_migration(job_id: UUID):
+async def get_migration(job_id: UUID, user: dict = require_role(UserRole.VIEWER)):
     job = await svc.refresh_job_from_metadata(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    _assert_job_access(job, user)
     source_schema = job.tables[0].schema_name if job.tables else None
     target_schema = job.tables[0].target_schema if job.tables else None
     effective = svc._derive_job_status(job)
@@ -451,6 +467,7 @@ async def get_migration(job_id: UUID):
         "target_schema": target_schema,
         "source_connection_id": str(job.source_connection_id),
         "target_connection_id": str(job.target_connection_id),
+        "project_id": getattr(job, "project_id", None),
         "created_at": job.created_at,
         "updated_at": job.updated_at,
         "table_count": len(job.tables),
@@ -550,7 +567,7 @@ async def run_procedural_migration(
 
 
 @router.get("/migrations/{job_id}/logs")
-async def get_migration_logs(job_id: UUID):
+async def get_migration_logs(job_id: UUID, user: dict = require_role(UserRole.VIEWER)):
     from application.go_engine_migration.migration_job_log_reader import (
         load_durable_migration_job_logs,
     )
@@ -558,12 +575,16 @@ async def get_migration_logs(job_id: UUID):
     job = svc.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    _assert_job_access(job, user)
     logs = await load_durable_migration_job_logs(str(job_id))
     return {"job_id": str(job_id), "logs": logs}
 
 
 @router.post("/migrations/{job_id}/pause")
-async def pause_migration(job_id: UUID, _: dict = require_role(UserRole.OPERATOR)):
+async def pause_migration(job_id: UUID, user: dict = require_role(UserRole.OPERATOR)):
+    job = svc.get_job(job_id)
+    if job:
+        _assert_job_access(job, user)
     try:
         job = await svc.pause_job(job_id)
     except KeyError:
@@ -574,7 +595,10 @@ async def pause_migration(job_id: UUID, _: dict = require_role(UserRole.OPERATOR
 
 
 @router.post("/migrations/{job_id}/resume")
-async def resume_migration(job_id: UUID, _: dict = require_role(UserRole.OPERATOR)):
+async def resume_migration(job_id: UUID, user: dict = require_role(UserRole.OPERATOR)):
+    job = svc.get_job(job_id)
+    if job:
+        _assert_job_access(job, user)
     try:
         job = await svc.resume_job(job_id)
     except KeyError:
@@ -585,7 +609,10 @@ async def resume_migration(job_id: UUID, _: dict = require_role(UserRole.OPERATO
 
 
 @router.post("/migrations/{job_id}/stop")
-async def stop_migration(job_id: UUID, _: dict = require_role(UserRole.OPERATOR)):
+async def stop_migration(job_id: UUID, user: dict = require_role(UserRole.OPERATOR)):
+    job = svc.get_job(job_id)
+    if job:
+        _assert_job_access(job, user)
     try:
         job = await svc.stop_job(job_id)
     except KeyError:
@@ -594,19 +621,23 @@ async def stop_migration(job_id: UUID, _: dict = require_role(UserRole.OPERATOR)
 
 
 @router.get("/migrations/{job_id}/progress", response_model=ProgressResponse)
-async def get_migration_progress(job_id: UUID):
+async def get_migration_progress(job_id: UUID, user: dict = require_role(UserRole.VIEWER)):
     job = await svc.refresh_job_from_metadata(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    _assert_job_access(job, user)
     snapshot = svc.build_progress_snapshot(job)
     return ProgressResponse(job_id=job_id, **snapshot)
 
 
 @router.post("/migrations/{job_id}/provision-tables")
-async def provision_migration_tables(job_id: UUID, _: dict = require_role(UserRole.OPERATOR)):
+async def provision_migration_tables(job_id: UUID, user: dict = require_role(UserRole.OPERATOR)):
     """Create missing PostgreSQL target tables for an existing job (recovery helper)."""
     from application.go_engine_migration.provision_job_tables import provision_tables_for_job_id
 
+    job = svc.get_job(job_id)
+    if job:
+        _assert_job_access(job, user)
     try:
         created = await provision_tables_for_job_id(job_id)
     except KeyError:
@@ -625,10 +656,15 @@ async def provision_migration_tables(job_id: UUID, _: dict = require_role(UserRo
 
 
 @router.get("/migrations/{job_id}/tables/{table_name}/progress")
-async def get_table_progress(job_id: UUID, table_name: str):
+async def get_table_progress(
+    job_id: UUID,
+    table_name: str,
+    user: dict = require_role(UserRole.VIEWER),
+):
     job = svc.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    _assert_job_access(job, user)
     job = await svc.refresh_job_from_metadata(job_id) or job
     snapshot = svc.build_progress_snapshot(job)
     entry = snapshot["tables_progress"].get(table_name)

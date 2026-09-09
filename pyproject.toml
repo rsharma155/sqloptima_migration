@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=83.0.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "migration-platform"
 version = "0.2.0"
@@ -54,6 +58,7 @@ dev = [
     "mypy>=1.8",
     "pre-commit>=3.6",
     "httpx>=0.26",
+    "temporalio>=1.7",
 ]
 
 [tool.setuptools.packages.find]

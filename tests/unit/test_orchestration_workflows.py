@@ -42,21 +42,23 @@ class TestFullMigrationWorkflow:
         execute_calls = []
 
         async def fake_execute_activity(activity, *args, **kwargs):
-            execute_calls.append((activity.__name__, args))
-            if activity.__name__ == "discover_objects" and args[1] == "dbo":
+            name = activity if isinstance(activity, str) else activity.__name__
+            call_args = tuple(kwargs.get("args") or args)
+            execute_calls.append((name, call_args))
+            if name == "discover_objects" and call_args[1] == "dbo":
                 return [
                     {"object_id": "1", "object_type": "TABLE", "name": "users", "schema": "dbo"},
                     {"object_id": "2", "object_type": "TABLE", "name": "orders", "schema": "dbo"},
                 ]
-            if activity.__name__ == "analyze_compatibility":
+            if name == "analyze_compatibility":
                 return None
-            if activity.__name__ == "convert_schema":
-                return {"object_id": args[0], "success": True}
-            if activity.__name__ == "migrate_table":
+            if name == "convert_schema":
+                return {"object_id": call_args[0], "success": True}
+            if name == "migrate_table":
                 return {"status": "completed", "rows_migrated": 100}
-            if activity.__name__ == "validate_table":
+            if name == "validate_table":
                 return {"status": "passed"}
-            if activity.__name__ == "send_notification":
+            if name == "send_notification":
                 return None
             return None
 
@@ -88,17 +90,18 @@ class TestFullMigrationWorkflow:
         notify_called = [False]
 
         async def fake_execute(activity, *args, **kwargs):
-            if activity.__name__ == "discover_objects":
+            name = activity if isinstance(activity, str) else activity.__name__
+            if name == "discover_objects":
                 return [{"object_id": "1", "object_type": "TABLE", "name": "users", "schema": "dbo"}]
-            if activity.__name__ == "analyze_compatibility":
+            if name == "analyze_compatibility":
                 return None
-            if activity.__name__ == "convert_schema":
+            if name == "convert_schema":
                 return {"success": True}
-            if activity.__name__ == "migrate_table":
+            if name == "migrate_table":
                 return {"status": "completed"}
-            if activity.__name__ == "validate_table":
+            if name == "validate_table":
                 validate_called[0] = True
-            if activity.__name__ == "send_notification":
+            if name == "send_notification":
                 notify_called[0] = True
             return None
 
@@ -118,7 +121,8 @@ class TestFullMigrationWorkflow:
         inp = MigrationWorkflowInput(job_id=uuid4(), schemas=["dbo"], tables=["users"])
 
         async def fake_execute(activity, *args, **kwargs):
-            raise Exception("Discovery crashed")
+            name = activity if isinstance(activity, str) else getattr(activity, "__name__", activity)
+            raise Exception("Discovery crashed") if name == "discover_objects" else None
 
         with (
             patch(f"{_workflow_module}.workflow.execute_activity", fake_execute),
@@ -143,16 +147,17 @@ class TestFullMigrationWorkflow:
         migrate_results = iter([{"status": "completed"}, {"status": "failed", "error": "Timeout"}])
 
         async def fake_execute(activity, *args, **kwargs):
-            if activity.__name__ == "discover_objects":
+            name = activity if isinstance(activity, str) else activity.__name__
+            if name == "discover_objects":
                 return [
                     {"object_id": "1", "object_type": "TABLE", "name": "good", "schema": "dbo"},
                     {"object_id": "2", "object_type": "TABLE", "name": "bad", "schema": "dbo"},
                 ]
-            if activity.__name__ == "analyze_compatibility":
+            if name == "analyze_compatibility":
                 return None
-            if activity.__name__ == "convert_schema":
+            if name == "convert_schema":
                 return {"success": True}
-            if activity.__name__ == "migrate_table":
+            if name == "migrate_table":
                 return next(migrate_results)
             return None
 

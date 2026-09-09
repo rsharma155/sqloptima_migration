@@ -27,4 +27,9 @@ jobs:
         run: npm ci
 
       - name: Run axe accessibility tests
-        run: npm run test -- src/components/ui/__tests__/login-form-a11y.test.tsx
+        run: |
+          npm run test -- \
+            src/components/ui/__tests__/login-form-a11y.test.tsx \
+            src/components/ui/__tests__/button-a11y.test.tsx \
+            src/components/shared/__tests__/platform-error.test.tsx \
+            src/components/shared/__tests__/error-boundary.test.tsx

@@ -24,6 +24,13 @@ from infrastructure.metadata_db.repositories.replication_settings_repository imp
 )
 from infrastructure.metadata_db.repositories.validation_repository import ValidationRepository
 
+from infrastructure.metadata_db.repositories.transfer_job_repository import (
+    TransferJobRepository,
+)
+from infrastructure.metadata_db.repositories.transfer_settings_repository import (
+    TransferSettingsRepository,
+)
+
 __all__ = [
     "ChunkRepository",
     "CommandRepository",
@@ -34,6 +41,8 @@ __all__ = [
     "ProjectRepository",
     "ReplicationSettingsRepository",
     "ReplicationStreamRepository",
+    "TransferJobRepository",
+    "TransferSettingsRepository",
     "UserRepository",
     "ValidationRepository",
 ]

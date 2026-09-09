@@ -61,6 +61,7 @@ from apps.api.routers import (
     projects_router,
     reports_router,
     replication_router,
+    transfers_router,
     validation_router,
     workflow_router,
 )
@@ -145,20 +146,24 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(LoggingMiddleware)
 
-# CORS — default allows any HTTP/HTTPS origin so the UI is reachable via IP address,
-# hostname, or localhost without extra configuration.  JWT authentication still
-# protects every non-public endpoint regardless of origin.
-# To restrict: set MIGRATION_ALLOWED_ORIGINS to a comma-separated list of origins.
+# CORS — JWT still protects non-public endpoints. Prefer an explicit allowlist.
+# Development default: any http(s) origin (IP / hostname / localhost).
+# Production: require MIGRATION_ALLOWED_ORIGINS (comma-separated); otherwise only local UI.
 _CORS_ORIGINS_RAW = os.environ.get("MIGRATION_ALLOWED_ORIGINS", "").strip()
+_ENV = os.environ.get("ENVIRONMENT", "development").strip().lower()
 
 if _CORS_ORIGINS_RAW and _CORS_ORIGINS_RAW != "*":
-    # Explicit allowlist provided — use it (with_credentials=True requires echoing origin)
     _cors_kwargs: dict = {
         "allow_origins": [o.strip() for o in _CORS_ORIGINS_RAW.split(",") if o.strip()],
     }
+elif _ENV in {"production", "prod"}:
+    _cors_kwargs = {
+        "allow_origins": [
+            "http://localhost:3508",
+            "http://127.0.0.1:3508",
+        ],
+    }
 else:
-    # Default / wildcard: accept any HTTP or HTTPS origin via regex so that
-    # IP addresses, hostnames, and localhost all work out of the box.
     _cors_kwargs = {"allow_origin_regex": r"https?://.*"}
 
 app.add_middleware(
@@ -190,6 +195,7 @@ app.include_router(reports_router.router, prefix=_V1)
 app.include_router(admin_router.router, prefix=_V1)
 app.include_router(workflow_router.router, prefix=_V1)
 app.include_router(replication_router.router, prefix=_V1)
+app.include_router(transfers_router.router, prefix=_V1)
 app.include_router(comparison_router)  # already prefixed with /api/comparison
 
 # ---------------------------------------------------------------------------
@@ -250,6 +256,7 @@ async def startup() -> None:
     )
     from apps.api.migration_settings_store import load_migration_settings
     from apps.api.replication_settings_store import load_replication_settings
+    from apps.api.transfer_settings_store import load_transfer_settings
     from apps.api.dependencies import set_secret_provider as dep_set_secret_provider
     from apps.api.dependencies import set_secrets
     from infrastructure.metadata_db.session import AsyncSessionFactory, init_db
@@ -280,6 +287,7 @@ async def startup() -> None:
     await load_notification_settings()
     await load_migration_settings()
     await load_replication_settings()
+    await load_transfer_settings()
     await migration_svc.load_jobs()
     try:
         from application.audit_service import AuditService
