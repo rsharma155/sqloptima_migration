@@ -37,7 +37,6 @@ function New-AlnumPassword {
 }
 
 function Write-ComposeFile {
-    if (Test-Path "docker-compose.yml") { return }
     $compose = @'
 name: sqloptima
 
@@ -62,11 +61,16 @@ services:
     image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima-api:${SQLOPTIMA_VERSION:-0.2.0}
     ports:
       - "8508:8508"
+    env_file:
+      - .env
     environment:
       METADATA_DB_HOST: postgres
       METADATA_DB_PORT: "5432"
-      METADATA_DB_URL: postgresql+asyncpg://postgres:${METADATA_DB_PASSWORD}@postgres:5432/migration_checklist
-      MIGRATION_DATABASE_METADATA_URL: postgresql://postgres:${METADATA_DB_PASSWORD}@postgres:5432/migration_checklist
+      METADATA_DB_USER: postgres
+      METADATA_DB_NAME: migration_checklist
+      METADATA_DB_PASSWORD: ${METADATA_DB_PASSWORD:?Set METADATA_DB_PASSWORD in .env}
+      METADATA_DB_URL: "postgresql+asyncpg://postgres:${METADATA_DB_PASSWORD}@postgres:5432/migration_checklist"
+      MIGRATION_DATABASE_METADATA_URL: "postgresql://postgres:${METADATA_DB_PASSWORD}@postgres:5432/migration_checklist"
       MIGRATION_MASTER_KEY: ${MIGRATION_MASTER_KEY:?Set MIGRATION_MASTER_KEY in .env}
       MIGRATION_JWT_SECRET: ${MIGRATION_JWT_SECRET:?Set MIGRATION_JWT_SECRET in .env}
       MIGRATION_EDITION: ${MIGRATION_EDITION:-enterprise}
@@ -75,21 +79,16 @@ services:
       MIGRATION_DEPLOYMENT: on-prem
       ENVIRONMENT: ${ENVIRONMENT:-development}
       MIGRATION_ALLOWED_ORIGINS: ${MIGRATION_ALLOWED_ORIGINS:-}
+      MIGRATION_LOG_FILE: "0"
     depends_on:
       postgres:
         condition: service_healthy
     healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8508/health', timeout=5)",
-        ]
-      interval: 10s
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8508/health || exit 1"]
+      interval: 5s
       timeout: 5s
-      retries: 12
-      start_period: 40s
+      retries: 24
+      start_period: 90s
     restart: unless-stopped
 
   ui:
@@ -100,14 +99,19 @@ services:
       NEXT_PUBLIC_API_URL: http://localhost:8508
     depends_on:
       api:
-        condition: service_healthy
+        condition: service_started
     restart: unless-stopped
 
   migration-engine:
     image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima-engine:${SQLOPTIMA_VERSION:-0.2.0}
     environment:
       MIGRATION_MASTER_KEY: ${MIGRATION_MASTER_KEY}
-      MIGRATION_DATABASE_METADATA_URL: postgresql://postgres:${METADATA_DB_PASSWORD}@postgres:5432/migration_checklist
+      METADATA_DB_HOST: postgres
+      METADATA_DB_PORT: "5432"
+      METADATA_DB_USER: postgres
+      METADATA_DB_NAME: migration_checklist
+      METADATA_DB_PASSWORD: ${METADATA_DB_PASSWORD:?Set METADATA_DB_PASSWORD in .env}
+      MIGRATION_DATABASE_METADATA_URL: "postgresql://postgres:${METADATA_DB_PASSWORD}@postgres:5432/migration_checklist"
       MIGRATION_QUEUE_PATH: /var/lib/sqloptima/migration_queue.bbolt
       MIGRATION_LOGGING_FORMAT: text
     volumes:
@@ -116,7 +120,7 @@ services:
       postgres:
         condition: service_healthy
       api:
-        condition: service_healthy
+        condition: service_started
     restart: unless-stopped
 
 volumes:
@@ -153,7 +157,7 @@ function Invoke-Compose {
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
         throw "Docker is required and is the only tool you need to install. See https://docs.docker.com/get-docker/"
     }
-    docker compose @ComposeArgs
+    docker compose --project-directory $Root --env-file (Join-Path $Root ".env") -f (Join-Path $Root "docker-compose.yml") @ComposeArgs
 }
 
 function Require-Docker {
@@ -176,7 +180,8 @@ function Wait-Healthy {
             Start-Sleep -Seconds 2
         }
     }
-    Write-Warning "SQL Optima started but the API is not healthy yet. Run: docker compose logs"
+    Write-Warning "SQL Optima started but the API is not healthy yet. API logs:"
+    Invoke-Compose logs api --tail 80
 }
 
 Require-Docker
@@ -196,7 +201,13 @@ if ($Status) {
 
 Write-Host "Pulling SQL Optima images (no compile on this machine)..."
 Invoke-Compose pull
-Invoke-Compose up -d
+try {
+    Invoke-Compose up -d
+} catch {
+    Write-Warning "Failed to start containers. API logs:"
+    Invoke-Compose logs api --tail 80
+    throw
+}
 Write-Host "Waiting for the app..."
 Wait-Healthy
 Write-Host ""

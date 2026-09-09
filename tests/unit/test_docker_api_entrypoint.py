@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,7 @@ def test_wait_skipped_without_metadata_host(monkeypatch):
 
     monkeypatch.setattr(mod, "_wait_for_tcp", _boom)
     monkeypatch.delenv("METADATA_DB_HOST", raising=False)
+    monkeypatch.delenv("METADATA_DB_PASSWORD", raising=False)
     monkeypatch.setattr(mod.sys, "argv", ["docker_api_entrypoint.py"])
 
     def fake_execvp(file, args):
@@ -42,6 +44,7 @@ def test_wait_skipped_without_metadata_host(monkeypatch):
 def test_extra_args_override_uvicorn(monkeypatch):
     mod = _load()
     monkeypatch.delenv("METADATA_DB_HOST", raising=False)
+    monkeypatch.delenv("METADATA_DB_PASSWORD", raising=False)
     monkeypatch.setattr(
         mod.sys,
         "argv",
@@ -54,3 +57,16 @@ def test_extra_args_override_uvicorn(monkeypatch):
     monkeypatch.setattr(mod.os, "execvp", fake_execvp)
     with pytest.raises(RuntimeError, match="--reload"):
         mod.main()
+
+
+def test_ensure_metadata_urls_encodes_password(monkeypatch):
+    mod = _load()
+    monkeypatch.setenv("METADATA_DB_HOST", "postgres")
+    monkeypatch.setenv("METADATA_DB_PASSWORD", "p@ss/word:x")
+    monkeypatch.setenv("METADATA_DB_USER", "postgres")
+    monkeypatch.setenv("METADATA_DB_PORT", "5432")
+    monkeypatch.setenv("METADATA_DB_NAME", "migration_checklist")
+    mod.ensure_metadata_urls()
+    assert "p%40ss%2Fword%3Ax" in os.environ["METADATA_DB_URL"]
+    assert os.environ["METADATA_DB_URL"].startswith("postgresql+asyncpg://")
+    assert os.environ["MIGRATION_DATABASE_METADATA_URL"].startswith("postgresql://")
