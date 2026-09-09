@@ -81,9 +81,9 @@ test.describe("UI core flows", () => {
   test("setup page is reachable without auth", async ({ page }) => {
     await page.goto("/setup");
     await expect(page).toHaveURL(/\/setup/);
-    // Connection wizard / setup content should render something meaningful
-    await expect(page.locator("body")).toContainText(/connection|setup|sql server|postgres/i, {
-      timeout: 20_000,
-    });
+    await expect(
+      page.getByRole("heading", { name: /let'?s get you set up/i }),
+    ).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByRole("button", { name: /create admin account/i })).toBeVisible();
   });
 });
