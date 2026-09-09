@@ -35,8 +35,10 @@ const ROLLDOWN_BY_PLATFORM = {
   "darwin-x64": "@rolldown/binding-darwin-x64",
   "win32-arm64": "@rolldown/binding-win32-arm64-msvc",
   "win32-x64": "@rolldown/binding-win32-x64-msvc",
-  "linux-arm64": "@rolldown/binding-linux-arm64-gnu",
-  "linux-x64": "@rolldown/binding-linux-x64-gnu",
+  "linux-arm64-gnu": "@rolldown/binding-linux-arm64-gnu",
+  "linux-arm64-musl": "@rolldown/binding-linux-arm64-musl",
+  "linux-x64-gnu": "@rolldown/binding-linux-x64-gnu",
+  "linux-x64-musl": "@rolldown/binding-linux-x64-musl",
 };
 
 /** @type {Record<string, string>} */
@@ -45,8 +47,10 @@ const LIGHTNING_BY_PLATFORM = {
   "darwin-x64": "lightningcss-darwin-x64",
   "win32-arm64": "lightningcss-win32-arm64-msvc",
   "win32-x64": "lightningcss-win32-x64-msvc",
-  "linux-arm64": "lightningcss-linux-arm64-gnu",
-  "linux-x64": "lightningcss-linux-x64-gnu",
+  "linux-arm64-gnu": "lightningcss-linux-arm64-gnu",
+  "linux-arm64-musl": "lightningcss-linux-arm64-musl",
+  "linux-x64-gnu": "lightningcss-linux-x64-gnu",
+  "linux-x64-musl": "lightningcss-linux-x64-musl",
 };
 
 /** @type {Record<string, string>} */
@@ -55,8 +59,10 @@ const NEXT_SWC_BY_PLATFORM = {
   "darwin-x64": "@next/swc-darwin-x64",
   "win32-arm64": "@next/swc-win32-arm64-msvc",
   "win32-x64": "@next/swc-win32-x64-msvc",
-  "linux-arm64": "@next/swc-linux-arm64-gnu",
-  "linux-x64": "@next/swc-linux-x64-gnu",
+  "linux-arm64-gnu": "@next/swc-linux-arm64-gnu",
+  "linux-arm64-musl": "@next/swc-linux-arm64-musl",
+  "linux-x64-gnu": "@next/swc-linux-x64-gnu",
+  "linux-x64-musl": "@next/swc-linux-x64-musl",
 };
 
 const DESKTOP_KEYS = [
@@ -64,11 +70,34 @@ const DESKTOP_KEYS = [
   "darwin-x64",
   "win32-arm64",
   "win32-x64",
-  "linux-x64",
-  "linux-arm64",
+  "linux-x64-gnu",
+  "linux-arm64-gnu",
 ];
 
+function isMuslLinux() {
+  if (process.platform !== "linux") return false;
+  try {
+    const report = process.report?.getReport?.();
+    if (report?.header?.glibcVersionRuntime) return false;
+    const shared = report?.sharedObjects;
+    if (Array.isArray(shared) && shared.some((s) => String(s).includes("musl"))) {
+      return true;
+    }
+  } catch {
+    // fall through to filesystem checks
+  }
+  try {
+    if (readFileSync("/usr/bin/ldd", "utf8").includes("musl")) return true;
+  } catch {
+    // ignore
+  }
+  return existsSync("/etc/alpine-release");
+}
+
 function platformKey(platform = process.platform, arch = process.arch) {
+  if (platform === "linux") {
+    return `${platform}-${arch}-${isMuslLinux() ? "musl" : "gnu"}`;
+  }
   return `${platform}-${arch}`;
 }
 
@@ -216,7 +245,9 @@ function main() {
   }
 
   // Nested npm install during an active lifecycle often deadlocks; defer with a clear hint.
-  if (process.env.npm_lifecycle_event === "postinstall" && WANT_ALL) {
+  // CURRENT_ONLY Docker/Alpine installs already have the matching musl/gnu optional
+  // packages from npm ci — do not fail the parent install if a nested npm is refused.
+  if (process.env.npm_lifecycle_event === "postinstall") {
     const specs = targetsToInstall();
     if (specs.length === 0) {
       console.log(
