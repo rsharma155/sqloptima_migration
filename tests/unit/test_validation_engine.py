@@ -341,6 +341,20 @@ class TestPreMigrationValidator:
         assert any(i.category == "privilege" for i in issues)
         assert any(i.severity == ValidationSeverity.BLOCKER for i in issues)
 
+    @pytest.mark.asyncio
+    async def test_validate_privileges_fails_closed_on_query_error(self):
+        from domains.validation.validation_engine import PreMigrationValidator, ValidationSeverity
+
+        source = AsyncMock()
+        target = AsyncMock()
+        source.execute = AsyncMock(side_effect=RuntimeError("timeout"))
+        target.execute = AsyncMock(side_effect=RuntimeError("timeout"))
+        validator = PreMigrationValidator(source, target)
+        issues = await validator.validate_privileges()
+        assert len(issues) >= 2
+        assert all(i.severity == ValidationSeverity.BLOCKER for i in issues)
+        assert all("Could not verify" in i.message for i in issues)
+
 
 class TestAggregateValidator:
     @pytest.mark.asyncio

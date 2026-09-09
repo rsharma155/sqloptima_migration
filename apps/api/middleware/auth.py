@@ -170,6 +170,7 @@ def create_token(user_id: str, role: str = UserRole.VIEWER.value, claims: dict[s
         "sub": user_id,
         "role": role,
         "typ": "access",
+        "jti": str(uuid.uuid4()),
         "iat": datetime.now(UTC),
         "exp": datetime.now(UTC) + timedelta(hours=ACCESS_TOKEN_EXPIRY_HOURS),
         **(claims or {}),

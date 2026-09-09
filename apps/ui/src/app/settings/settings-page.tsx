@@ -32,6 +32,7 @@ import {
   TriangleAlert,
   Timer,
   RefreshCw,
+  ArrowLeftRight,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -60,11 +61,14 @@ import {
   saveMigrationSettings,
   getReplicationSettings,
   saveReplicationSettings,
+  getTransferSettings,
+  saveTransferSettings,
   type AlertConfigUpdateRequest,
   type MigrationSettingsResponse,
   type MigrationSettingsUpdateRequest,
   type ReplicationSettingsResponse,
   type ReplicationSettingsUpdateRequest,
+  type TransferSettingsUpdateRequest,
 } from "@/lib/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -136,6 +140,7 @@ export default function SettingsPage() {
   const [savingAlerts, setSavingAlerts] = useState(false);
   const [savingMigration, setSavingMigration] = useState(false);
   const [savingReplication, setSavingReplication] = useState(false);
+  const [savingTransfer, setSavingTransfer] = useState(false);
 
   // Fetch settings
   const { data: alertConfig, refetch: refetchAlerts } = useQuery({
@@ -151,6 +156,11 @@ export default function SettingsPage() {
   const { data: replicationConfig, refetch: refetchReplication } = useQuery({
     queryKey: ["replicationSettings"],
     queryFn: getReplicationSettings,
+  });
+
+  const { data: transferConfig, refetch: refetchTransfer } = useQuery({
+    queryKey: ["transferSettings"],
+    queryFn: getTransferSettings,
   });
 
   const [alertForm, setAlertForm] = useState<AlertConfigUpdateRequest>({
@@ -178,6 +188,13 @@ export default function SettingsPage() {
   const [replicationForm, setReplicationForm] = useState<ReplicationSettingsUpdateRequest>({
     poll_interval_ms: 1000,
     batch_size: 1000,
+  });
+
+  const [transferForm, setTransferForm] = useState<TransferSettingsUpdateRequest>({
+    file_offload_enabled: true,
+    file_offload_min_rows: 2_000_000,
+    file_offload_min_mb: 256,
+    staging_path: "",
   });
 
   useEffect(() => {
@@ -217,6 +234,17 @@ export default function SettingsPage() {
       });
     }
   }, [replicationConfig]);
+
+  useEffect(() => {
+    if (transferConfig) {
+      setTransferForm({
+        file_offload_enabled: transferConfig.file_offload_enabled,
+        file_offload_min_rows: transferConfig.file_offload_min_rows,
+        file_offload_min_mb: transferConfig.file_offload_min_mb,
+        staging_path: transferConfig.staging_path || "",
+      });
+    }
+  }, [transferConfig]);
 
   // Connections
   const [connections, setConnections] = useState<Connection[]>([]);
@@ -323,6 +351,13 @@ export default function SettingsPage() {
     setReplicationForm((prev) => ({ ...prev, [field]: value }));
   };
 
+  const updateTransferField = <K extends keyof TransferSettingsUpdateRequest>(
+    field: K,
+    value: TransferSettingsUpdateRequest[K],
+  ) => {
+    setTransferForm((prev) => ({ ...prev, [field]: value }));
+  };
+
   const handleSaveAlerts = async () => {
     setSavingAlerts(true);
     try {
@@ -423,6 +458,19 @@ export default function SettingsPage() {
     }
   };
 
+  const handleSaveTransferSettings = async () => {
+    setSavingTransfer(true);
+    try {
+      await saveTransferSettings(transferForm);
+      toast.success("Transfer platform settings saved");
+      void refetchTransfer();
+    } catch (err: any) {
+      toast.error(err.message || "Failed to save transfer settings");
+    } finally {
+      setSavingTransfer(false);
+    }
+  };
+
   const validateConnectionForm = (data: Partial<Connection>): FormErrors => {
     const errs: FormErrors = {};
 
@@ -489,6 +537,7 @@ export default function SettingsPage() {
         await apiUpdateConnection(editingId, {
           name: trimmed.name,
           type: trimmed.type,
+          engine: trimmed.engine,
           host: trimmed.host,
           port: trimmed.port,
           database: trimmed.database,
@@ -500,6 +549,7 @@ export default function SettingsPage() {
         const resp = await apiCreateConnection({
           name: trimmed.name,
           type: trimmed.type,
+          engine: trimmed.engine,
           host: trimmed.host,
           port: trimmed.port,
           database: trimmed.database,
@@ -542,6 +592,7 @@ export default function SettingsPage() {
       id: editingId || generateId(),
       name: form.name!.trim(),
       type: form.type as "source" | "target",
+      engine: (form.engine as "sqlserver" | "postgres") || (form.type === "target" ? "postgres" : "sqlserver"),
       host: form.host!.trim(),
       port: Number(form.port),
       database: form.database!.trim(),
@@ -557,6 +608,7 @@ export default function SettingsPage() {
         const testResp = await apiTestRawConnection({
           name: trimmed.name,
           type: trimmed.type,
+          engine: trimmed.engine,
           host: trimmed.host,
           port: trimmed.port,
           database: trimmed.database,
@@ -595,6 +647,7 @@ export default function SettingsPage() {
       const resp = await apiTestRawConnection({
         name: form.name!.trim(),
         type: form.type as "source" | "target",
+        engine: (form.engine as "sqlserver" | "postgres") || (form.type === "target" ? "postgres" : "sqlserver"),
         host: form.host!.trim(),
         port: Number(form.port),
         database: form.database!.trim(),
@@ -648,6 +701,7 @@ export default function SettingsPage() {
     setEditingId(null);
     setForm({
       type: "source",
+      engine: "sqlserver",
       host: "localhost",
       port: 1433,
       trust_server_certificate: true,
@@ -730,6 +784,10 @@ export default function SettingsPage() {
           <TabsTrigger value="replication" className="flex items-center gap-2">
             <RefreshCw className="h-4 w-4" aria-hidden="true" />
             Replication
+          </TabsTrigger>
+          <TabsTrigger value="transfer" className="flex items-center gap-2">
+            <ArrowLeftRight className="h-4 w-4" aria-hidden="true" />
+            Transfer
           </TabsTrigger>
         </TabsList>
 
@@ -1236,6 +1294,97 @@ export default function SettingsPage() {
           </Card>
         </TabsContent>
 
+        <TabsContent value="transfer" className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>Transfer file offload</CardTitle>
+              <CardDescription>
+                Cross-server SQL Server copies can stage native BCP files when a table is large
+                enough. Same-server copies never use files. New transfer jobs snapshot these values.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <div className="flex items-center space-x-2">
+                <input
+                  type="checkbox"
+                  id="file-offload-enabled"
+                  checked={transferForm.file_offload_enabled}
+                  onChange={(e) =>
+                    updateTransferField("file_offload_enabled", e.target.checked)
+                  }
+                  className="h-4 w-4 rounded border-gray-300"
+                />
+                <Label htmlFor="file-offload-enabled" className="cursor-pointer">
+                  Enable file offload for large cross-server tables
+                </Label>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="space-y-2">
+                  <Label htmlFor="file-offload-min-rows">Minimum rows</Label>
+                  <Input
+                    id="file-offload-min-rows"
+                    type="number"
+                    min={1}
+                    value={transferForm.file_offload_min_rows}
+                    onChange={(e) =>
+                      updateTransferField("file_offload_min_rows", Number(e.target.value))
+                    }
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Use native file offload when the source estimate is at least this many rows.
+                    Default is 2,000,000.
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="file-offload-min-mb">Minimum size (MB)</Label>
+                  <Input
+                    id="file-offload-min-mb"
+                    type="number"
+                    min={0.1}
+                    step={0.1}
+                    value={transferForm.file_offload_min_mb}
+                    onChange={(e) =>
+                      updateTransferField("file_offload_min_mb", Number(e.target.value))
+                    }
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Offload also triggers when estimated table size meets this threshold.
+                  </p>
+                </div>
+                <div className="space-y-2 md:col-span-2">
+                  <Label htmlFor="file-offload-staging">Staging path (optional)</Label>
+                  <Input
+                    id="file-offload-staging"
+                    value={transferForm.staging_path}
+                    onChange={(e) => updateTransferField("staging_path", e.target.value)}
+                    placeholder="Leave empty to use the worker default"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Directory or share the Go transfer worker writes BCP files to. Empty uses the
+                    engine default.
+                  </p>
+                </div>
+              </div>
+
+              <Button onClick={handleSaveTransferSettings} disabled={savingTransfer}>
+                {savingTransfer ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <Save className="h-4 w-4 mr-2" />
+                )}
+                Save transfer settings
+              </Button>
+              <p className="text-xs text-muted-foreground">
+                Requires admin role to save.
+                {transferConfig?.updated_at && (
+                  <> Last updated: {new Date(transferConfig.updated_at).toLocaleString()}.</>
+                )}
+              </p>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
         <TabsContent value="connections" className="space-y-4" role="tabpanel">
           <div className="flex items-center justify-between">
             <div>
@@ -1282,7 +1431,8 @@ export default function SettingsPage() {
                     <div>
                       <CardTitle className="text-base">{conn.name}</CardTitle>
                       <CardDescription>
-                        {conn.type === "source" ? "Source" : "Target"} &mdash;{" "}
+                        {conn.type === "source" ? "Source" : "Target"} ·{" "}
+                        {conn.engine === "postgres" ? "PostgreSQL" : "SQL Server"} &mdash;{" "}
                         {conn.host}:{conn.port}/{conn.database}
                       </CardDescription>
                     </div>
@@ -1443,9 +1593,39 @@ export default function SettingsPage() {
                   aria-invalid={!!formErrors.type}
                   aria-describedby={formErrors.type ? "conn-type-error" : undefined}
                 >
-                  <option value="source">Source (SQL Server)</option>
-                  <option value="target">Target (PostgreSQL)</option>
+                  <option value="source">Source (Migrations wizard)</option>
+                  <option value="target">Target (Migrations wizard)</option>
                 </select>
+                {formErrors.type && (
+                  <p id="conn-type-error" className="text-xs text-destructive flex items-center gap-1">
+                    <AlertCircle className="h-3 w-3" />
+                    {formErrors.type}
+                  </p>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="conn-engine">Engine <span className="text-destructive">*</span></Label>
+                <select
+                  id="conn-engine"
+                  value={form.engine || (form.type === "target" ? "postgres" : "sqlserver")}
+                  onChange={(e) => {
+                    const engine = e.target.value as "sqlserver" | "postgres";
+                    setForm((prev) => ({
+                      ...prev,
+                      engine,
+                      port: engine === "postgres" ? 5432 : 1433,
+                    }));
+                  }}
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                >
+                  <option value="sqlserver">SQL Server</option>
+                  <option value="postgres">PostgreSQL</option>
+                </select>
+                <p className="text-xs text-muted-foreground">
+                  Used by Transfer. Migrations still treat Source as SQL Server and Target as PostgreSQL.
+                </p>
+              </div>
                 {formErrors.type && (
                   <p id="conn-type-error" className="text-xs text-destructive flex items-center gap-1">
                     <AlertCircle className="h-3 w-3" />

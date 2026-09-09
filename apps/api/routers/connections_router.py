@@ -17,7 +17,8 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from application.migration_service import make_connector
+from application.transfer_connector import make_transfer_connector
+from domains.transfer.connection_engine import infer_engine
 from apps.api.connection_store import (
     delete_connection_async,
     get_all,
@@ -34,7 +35,13 @@ from shared.tenancy.project_scope import resolve_project_filter
 
 logger = get_logger(__name__)
 
-router = APIRouter(tags=["connections"])
+def _connection_response(cid: str, conn: dict) -> ConnectionResponse:
+    payload = {k: v for k, v in conn.items() if k != "password"}
+    try:
+        payload["engine"] = infer_engine(conn).value
+    except ValueError:
+        payload["engine"] = conn.get("engine") or "sqlserver"
+    return ConnectionResponse(id=cid, **{k: v for k, v in payload.items() if k in ConnectionResponse.model_fields})
 
 _DB_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,62}$")
 
@@ -60,6 +67,7 @@ def _find_duplicate_name(name: str, exclude_id: str | None = None) -> dict | Non
 class ConnectionCreateRequest(BaseModel):
     name: str
     type: str
+    engine: str | None = None
     host: str
     port: int
     database: str
@@ -73,6 +81,7 @@ class ConnectionResponse(BaseModel):
     id: str
     name: str
     type: str
+    engine: str = "sqlserver"
     host: str
     port: int
     database: str
@@ -85,6 +94,7 @@ class ConnectionResponse(BaseModel):
 
 class TestRawConnectionRequest(BaseModel):
     type: str
+    engine: str | None = None
     host: str
     port: int
     database: str
@@ -145,7 +155,7 @@ async def list_connections(
         is_admin=user.get("role") == UserRole.ADMIN.value,
     )
     return [
-        ConnectionResponse(id=cid, **{k: v for k, v in conn.items() if k != "password"})
+        _connection_response(cid, conn)
         for cid, conn in get_all(scope).items()
     ]
 
@@ -179,6 +189,10 @@ async def create_connection(req: ConnectionCreateRequest, user: dict = require_r
         )
     cid = str(uuid4())
     entry = req.model_dump()
+    try:
+        entry["engine"] = infer_engine(entry).value
+    except ValueError:
+        entry["engine"] = "sqlserver" if req.type == "source" else "postgres"
     if not entry.get("project_id") and user.get("project_id"):
         entry["project_id"] = user["project_id"]
     secrets = get_secrets()
@@ -188,7 +202,7 @@ async def create_connection(req: ConnectionCreateRequest, user: dict = require_r
     entry["status"] = "disconnected"
     set_entry(cid, entry)
     await save_connection_async(cid)
-    return ConnectionResponse(id=cid, **entry)
+    return _connection_response(cid, entry)
 
 
 @router.put("/connections/{connection_id}", response_model=ConnectionResponse)
@@ -222,6 +236,10 @@ async def update_connection(connection_id: str, req: ConnectionCreateRequest, _:
             detail=f"A connection named '{req.name.strip()}' already exists",
         )
     entry = req.model_dump()
+    try:
+        entry["engine"] = infer_engine(entry).value
+    except ValueError:
+        entry["engine"] = existing.get("engine") or ("sqlserver" if req.type == "source" else "postgres")
     secrets = get_secrets()
     if secrets and entry.get("password"):
         entry["password"] = secrets.encrypt(entry["password"])
@@ -231,7 +249,7 @@ async def update_connection(connection_id: str, req: ConnectionCreateRequest, _:
     entry["status"] = existing.get("status", "disconnected")
     set_entry(connection_id, entry)
     await save_connection_async(connection_id)
-    return ConnectionResponse(id=connection_id, **entry)
+    return _connection_response(connection_id, entry)
 
 
 @router.delete("/connections/{connection_id}")
@@ -261,7 +279,7 @@ async def test_connection(connection_id: str, _: dict = require_role(UserRole.OP
     if not conn:
         raise HTTPException(status_code=404, detail="Connection not found")
     try:
-        connector, _ = await make_connector(conn)
+        connector, _ = await make_transfer_connector(conn)
         await connector.connect()
         await connector.disconnect()
         await update_test_status_async(connection_id, ok=True)
@@ -283,27 +301,8 @@ async def test_connection(connection_id: str, _: dict = require_role(UserRole.OP
 @router.post("/connections/test-raw")
 async def test_raw_connection(req: TestRawConnectionRequest, _: dict = require_role(UserRole.OPERATOR)):
     try:
-        if req.type == "source":
-            from infrastructure.sqlserver.sqlserver_connector import SqlServerConnectionConfig, SqlServerConnector
-            connector = SqlServerConnector(SqlServerConnectionConfig(
-                host=req.host, port=req.port, database=req.database,
-                username=req.username, password=req.password,
-                trust_server_certificate=req.trust_server_certificate,
-            ))
-        else:
-            from infrastructure.postgres.postgres_connector import (
-                PostgresConnector,
-                postgres_config_from_entry,
-            )
-            connector = PostgresConnector(postgres_config_from_entry(
-                {
-                    "host": req.host,
-                    "port": req.port,
-                    "database": req.database,
-                    "username": req.username,
-                },
-                password=req.password,
-            ))
+        raw = req.model_dump()
+        connector, _ = await make_transfer_connector(raw)
         await connector.connect()
         await connector.disconnect()
         return {"status": "connected", "message": "Connection successful"}

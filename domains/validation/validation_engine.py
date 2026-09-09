@@ -500,7 +500,15 @@ class PreMigrationValidator:
                     ),
                 )]
         except Exception:
-            return []
+            return [CompatibilityIssue(
+                severity=ValidationSeverity.BLOCKER,
+                category="privilege",
+                message=(
+                    "Could not verify source database privileges — "
+                    "refusing to start until the principal can be checked "
+                    "(or set MIGRATION_ALLOW_ELEVATED_PRIVILEGES=1 for local/dev)"
+                ),
+            )]
         return []
 
     async def _check_postgres_privileges(self) -> list[CompatibilityIssue]:
@@ -520,7 +528,15 @@ class PreMigrationValidator:
                     ),
                 )]
         except Exception:
-            return []
+            return [CompatibilityIssue(
+                severity=ValidationSeverity.BLOCKER,
+                category="privilege",
+                message=(
+                    "Could not verify target database privileges — "
+                    "refusing to start until the principal can be checked "
+                    "(or set MIGRATION_ALLOW_ELEVATED_PRIVILEGES=1 for local/dev)"
+                ),
+            )]
         return []
 
     async def _get_source_columns(

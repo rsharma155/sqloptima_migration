@@ -40,6 +40,7 @@ export interface Connection {
   id: string;
   name: string;
   type: "source" | "target";
+  engine?: "sqlserver" | "postgres";
   host: string;
   port: number;
   database: string;
@@ -116,6 +117,11 @@ function apiToConnection(
     id: c.id,
     name: c.name,
     type: c.type as "source" | "target",
+    engine: c.engine === "postgres" || c.engine === "sqlserver"
+      ? c.engine
+      : c.type === "target"
+        ? "postgres"
+        : "sqlserver",
     host: c.host,
     port: c.port,
     database: c.database,

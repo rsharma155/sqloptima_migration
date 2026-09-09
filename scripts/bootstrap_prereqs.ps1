@@ -1,4 +1,4 @@
-# Bootstrap system prerequisites for SQL Optima (Windows).
+﻿# Bootstrap system prerequisites for SQL Optima (Windows).
 # Installs Python 3.11+, Node.js LTS, and Go 1.23+ when missing via winget or direct download.
 
 param (
@@ -67,7 +67,7 @@ function Ensure-Python {
         Write-Ok "Python available"
         return
     }
-    Write-Warn "Python 3.11+ not found — installing..."
+    Write-Warn "Python 3.11+ not found - installing..."
     Install-WithWinget "Python.Python.3.12" "Python 3.12" | Out-Null
     if (-not (Test-Python311)) {
         throw "Python 3.11+ is required. Install from https://www.python.org/downloads/ (check Add to PATH)."
@@ -81,7 +81,7 @@ function Ensure-Node {
         Write-Ok "npm $(npm --version 2>$null)"
         return
     }
-    Write-Warn "Node.js / npm not found — installing..."
+    Write-Warn "Node.js / npm not found - installing..."
     if (Install-WithWinget "OpenJS.NodeJS.LTS" "Node.js LTS") {
         $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
                     [System.Environment]::GetEnvironmentVariable("Path", "User")
@@ -109,7 +109,7 @@ function Ensure-Go {
         Write-Ok "$(go version 2>$null)"
         return
     }
-    Write-Warn "Go 1.23+ not found — installing..."
+    Write-Warn "Go 1.23+ not found - installing..."
     if (Install-WithWinget "GoLang.Go" "Go") {
         $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
                     [System.Environment]::GetEnvironmentVariable("Path", "User")

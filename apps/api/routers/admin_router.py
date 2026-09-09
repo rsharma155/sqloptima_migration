@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from application.audit_service import AuditService
 from application.migration_settings_config import migration_settings_status
 from application.replication_settings_config import replication_settings_status
+from application.transfer_settings_config import transfer_settings_status
 from application.replication_runtime import get_runtime_manager
 from apps.api.middleware.auth import UserRole, require_role
 from apps.api.migration_settings_store import (
@@ -24,6 +25,10 @@ from apps.api.migration_settings_store import (
 from apps.api.replication_settings_store import (
     save_settings_async as save_replication_settings_async,
     set_settings as set_replication_settings,
+)
+from apps.api.transfer_settings_store import (
+    save_settings_async as save_transfer_settings_async,
+    set_settings as set_transfer_settings,
 )
 from shared.security.audit_log import AuditAction
 from shared.tenancy.project_scope import resolve_project_filter
@@ -73,6 +78,13 @@ class MigrationSettingsUpdate(BaseModel):
 class ReplicationSettingsUpdate(BaseModel):
     poll_interval_ms: int = Field(default=1000, ge=100, le=600_000)
     batch_size: int = Field(default=1000, ge=1, le=10_000)
+
+
+class TransferSettingsUpdate(BaseModel):
+    file_offload_enabled: bool = True
+    file_offload_min_rows: int = Field(default=2_000_000, ge=1, le=1_000_000_000)
+    file_offload_min_mb: float = Field(default=256.0, gt=0, le=1_000_000.0)
+    staging_path: str = Field(default="", max_length=1024)
 
 
 # ---------------------------------------------------------------------------
@@ -348,3 +360,32 @@ async def update_replication_settings_config(
     status = replication_settings_status()
     status["active_streams_updated"] = active_streams_updated
     return status
+
+
+@router.get("/transfer-settings")
+async def get_transfer_settings_config(_: dict = require_role(UserRole.VIEWER)) -> dict:
+    """Platform Transfer file-offload thresholds (readable by all roles)."""
+    return transfer_settings_status()
+
+
+@router.put("/transfer-settings")
+async def update_transfer_settings_config(
+    req: TransferSettingsUpdate,
+    _: dict = require_role(UserRole.ADMIN),
+) -> dict:
+    """Update platform Transfer file-offload settings (admin only)."""
+    from domains.transfer.transfer_settings import TransferSettingsError, validate_transfer_settings
+
+    payload = {
+        "file_offload_enabled": req.file_offload_enabled,
+        "file_offload_min_rows": req.file_offload_min_rows,
+        "file_offload_min_mb": req.file_offload_min_mb,
+        "staging_path": req.staging_path,
+    }
+    try:
+        validate_transfer_settings(payload)
+    except TransferSettingsError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    set_transfer_settings(payload)
+    await save_transfer_settings_async()
+    return transfer_settings_status()

@@ -36,6 +36,7 @@ import {
   FileText,
   SlidersHorizontal,
   Bell,
+  ArrowLeftRight,
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { logout, getToken, getAuthUsername } from "@/lib/api";
@@ -57,6 +58,7 @@ const navSections = [
       { href: "/projects", label: "Projects", icon: FolderOpen },
       { href: "/assessment", label: "Assessment", icon: ShieldCheck },
       { href: "/migrations", label: "Migrations", icon: Database },
+      { href: "/transfers", label: "Transfer", icon: ArrowLeftRight },
       { href: "/programs", label: "Programs", icon: Layers },
       { href: "/replication", label: "Replication", icon: Repeat },
     ],
@@ -100,8 +102,8 @@ export function Nav() {
     setShowAdminNav(canAccessAdminSettingsPages());
   }, []);
 
-  const handleLogout = () => {
-    logout();
+  const handleLogout = async () => {
+    await logout();
     setIsLoggedIn(false);
     setAuthUsername(null);
     toast.success("Logged out");

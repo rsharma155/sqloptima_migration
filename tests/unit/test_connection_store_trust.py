@@ -23,6 +23,7 @@ def test_record_to_dict_maps_ssl_enabled_to_trust_server_certificate() -> None:
     )
     d = _record_to_dict(record)
     assert d["trust_server_certificate"] is True
+    assert d.get("engine") is None or d.get("engine") in {None, "sqlserver"}
 
 
 def test_dict_to_record_persists_trust_server_certificate_as_ssl_enabled() -> None:

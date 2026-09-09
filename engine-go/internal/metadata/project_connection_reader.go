@@ -12,14 +12,15 @@ import (
 
 // ProjectConnection holds credentials loaded from project_connections.
 type ProjectConnection struct {
-	ConnectionID       uuid.UUID
-	Name               string
-	DBType             string
-	Host               string
-	Port               int
-	Database           string
-	Username           string
-	EncryptedPassword  string
+	ConnectionID           uuid.UUID
+	Name                   string
+	DBType                 string
+	Engine                 string
+	Host                   string
+	Port                   int
+	Database               string
+	Username               string
+	EncryptedPassword      string
 	TrustServerCertificate bool
 }
 
@@ -28,12 +29,14 @@ func (c *Client) LoadProjectConnection(ctx context.Context, connectionID uuid.UU
 	var row ProjectConnection
 	var idStr string
 	err := c.pool.QueryRow(ctx, `
-		SELECT project_connection_id, name, db_type, host, port, database_name,
+		SELECT project_connection_id, name, db_type,
+		       COALESCE(NULLIF(engine, ''), CASE WHEN db_type = 'target' THEN 'postgres' ELSE 'sqlserver' END),
+		       host, port, database_name,
 		       username, encrypted_password, ssl_enabled
 		FROM project_connections
 		WHERE project_connection_id = $1`, connectionID.String(),
 	).Scan(
-		&idStr, &row.Name, &row.DBType, &row.Host, &row.Port, &row.Database,
+		&idStr, &row.Name, &row.DBType, &row.Engine, &row.Host, &row.Port, &row.Database,
 		&row.Username, &row.EncryptedPassword, &row.TrustServerCertificate,
 	)
 	if err != nil {

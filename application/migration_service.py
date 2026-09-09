@@ -532,7 +532,10 @@ def _decrypt_password(entry: dict) -> str:
         try:
             return secrets.decrypt(pw)
         except Exception:
-            logger.warning("Failed to decrypt password, returning as-is")
+            logger.warning("Failed to decrypt connection password")
+            raise ValueError(
+                "Unable to decrypt connection password — rotate credentials or check MIGRATION_MASTER_KEY"
+            ) from None
     return pw
 
 

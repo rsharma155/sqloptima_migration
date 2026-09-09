@@ -34,6 +34,7 @@ import (
 	"github.com/ravisharma/sql-optima/engine-go/internal/metrics"
 	"github.com/ravisharma/sql-optima/engine-go/internal/planner"
 	"github.com/ravisharma/sql-optima/engine-go/internal/queue"
+	"github.com/ravisharma/sql-optima/engine-go/internal/transfer"
 	"github.com/ravisharma/sql-optima/engine-go/internal/worker"
 )
 
@@ -168,6 +169,26 @@ func main() {
 	}()
 
 	log.Info("migration worker loop started", zap.String("worker_id", workerID))
+
+	// -------------------------------------------------------------------------
+	// 8b. Transfer worker loop (claims transfer_jobs only)
+	// -------------------------------------------------------------------------
+	transferWorkerID := fmt.Sprintf("go-transfer-worker-%d", os.Getpid())
+	transferMeta := transfer.NewTransferMetadataAdapter(meta)
+	transferHandler := transfer.NewTransferGoJobHandler(
+		transferMeta,
+		transfer.NewLiveTransferTableMover(masterKey),
+		poller,
+	).WithMetadataURL(cfg.Database.MetadataURL).WithConstraintApplier(
+		transfer.NewLiveTransferConstraintApplier(masterKey),
+	)
+	transferLoop := transfer.NewTransferEngineWorkerLoop(transferWorkerID, transferMeta, transferHandler)
+	go func() {
+		if err := transferLoop.Run(ctx); err != nil && ctx.Err() == nil {
+			log.Error("transfer worker loop exited", zap.Error(err))
+		}
+	}()
+	log.Info("transfer worker loop started", zap.String("worker_id", transferWorkerID))
 
 	// -------------------------------------------------------------------------
 	// 9. Graceful shutdown on SIGINT / SIGTERM

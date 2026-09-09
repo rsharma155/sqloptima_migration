@@ -119,6 +119,12 @@ class MigrationProgramRepository:
         await self._session.flush()
         return wave
 
+    async def get_wave(self, wave_id: str) -> MigrationWaveRecord | None:
+        result = await self._session.execute(
+            select(MigrationWaveRecord).where(MigrationWaveRecord.migration_wave_id == wave_id)
+        )
+        return result.scalar_one_or_none()
+
     async def set_cutover_window(
         self,
         wave_id: str,

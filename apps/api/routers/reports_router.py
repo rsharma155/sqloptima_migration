@@ -21,10 +21,23 @@ from apps.api.middleware.auth import UserRole, require_role
 from domains.reporting.executive_report import ExecutiveReportBuilder
 from infrastructure.metadata_db.session import AsyncSessionFactory
 from shared.logging.structured_logging import get_logger
+from shared.tenancy.project_scope import assert_resource_project_access
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/reports", tags=["reports"])
+
+
+def _is_admin(user: dict) -> bool:
+    return user.get("role") == UserRole.ADMIN.value
+
+
+def _assert_report_job_access(summary: dict, user: dict) -> None:
+    assert_resource_project_access(
+        summary.get("project_id"),
+        user_project_id=user.get("project_id"),
+        is_admin=_is_admin(user),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -36,7 +49,7 @@ router = APIRouter(prefix="/reports", tags=["reports"])
 async def get_migration_report(
     job_id: UUID,
     fmt: str = Query(default="json", pattern="^(json|html)$"),
-    _: dict = require_role(UserRole.VIEWER),
+    user: dict = require_role(UserRole.VIEWER),
 ) -> Any:
     """Return a migration summary report for *job_id* in JSON or HTML."""
     async with AsyncSessionFactory() as session:
@@ -51,6 +64,8 @@ async def get_migration_report(
                 status_code=500, detail=f"Report generation failed: {exc}"
             ) from exc
 
+    _assert_report_job_access(summary, user)
+
     if fmt == "html":
         return HTMLResponse(content=ReportingService.migration_summary_html(summary))
     return JSONResponse(content=summary)
@@ -64,7 +79,7 @@ async def get_migration_report(
 @router.get("/validation/{job_id}")
 async def get_validation_summary_report(
     job_id: UUID,
-    _: dict = require_role(UserRole.VIEWER),
+    user: dict = require_role(UserRole.VIEWER),
 ) -> Any:
     """Return an aggregated validation summary for all runs under *job_id*."""
     async with AsyncSessionFactory() as session:
@@ -81,6 +96,7 @@ async def get_validation_summary_report(
                 status_code=500, detail=f"Report generation failed: {exc}"
             ) from exc
 
+    _assert_report_job_access(summary, user)
     return JSONResponse(content=summary)
 
 

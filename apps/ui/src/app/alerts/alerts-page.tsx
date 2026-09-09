@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PageHeader } from "@/components/shared/page-header";
+import { PlatformError } from "@/components/shared/platform-error";
 import { AlertListItem } from "@/components/alerts/alert-list";
 import { useGlobalAlerts } from "@/components/alerts/global-alerts-provider";
 import { usePlatformAlerts } from "@/hooks/use-platform-alerts";
@@ -199,9 +200,15 @@ export default function AlertsPage() {
           )}
 
           {isError && (
-            <p className="text-sm text-destructive py-8 text-center">
-              Could not load alerts — verify the API is running.
-            </p>
+            <PlatformError
+              error={{
+                title: "Could not load alerts",
+                remediation: "Verify the API is running, then retry.",
+                error_code: "INTERNAL_ERROR",
+              }}
+              onRetry={() => qc.invalidateQueries({ queryKey: ["platform-alerts"] })}
+              className="my-4"
+            />
           )}
 
           {!isPending && !isError && filtered.length === 0 && (

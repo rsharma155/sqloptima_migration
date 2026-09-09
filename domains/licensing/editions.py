@@ -18,13 +18,13 @@ class ProductEdition(StrEnum):
 
 _EDITION_FEATURES: dict[ProductEdition, set[str]] = {
     ProductEdition.ASSESS: {"discovery", "assessment", "reports"},
-    ProductEdition.MIGRATE: {"discovery", "assessment", "reports", "migration", "validation"},
+    ProductEdition.MIGRATE: {"discovery", "assessment", "reports", "migration", "validation", "transfer"},
     ProductEdition.REPLICATE: {
-        "discovery", "assessment", "reports", "migration", "validation", "replication", "cutover",
+        "discovery", "assessment", "reports", "migration", "validation", "replication", "cutover", "transfer",
     },
     ProductEdition.ENTERPRISE: {
         "discovery", "assessment", "reports", "migration", "validation",
-        "replication", "cutover", "programs", "multi_project", "audit_export",
+        "replication", "cutover", "programs", "multi_project", "audit_export", "transfer",
     },
 }
 

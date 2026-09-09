@@ -155,7 +155,15 @@ export function getAuthUsername(): string | null {
   return typeof window !== "undefined" ? localStorage.getItem("auth_username") : null;
 }
 
-export function logout(): void {
+export async function logout(): Promise<void> {
+  const token = typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
+  if (token) {
+    try {
+      await request("/api/v1/auth/logout", { method: "POST", timeout: 5000 });
+    } catch {
+      // Always clear local session even if revoke fails (offline / expired).
+    }
+  }
   clearAuthCookieAndStorage();
 }
 
@@ -651,6 +659,7 @@ export interface ConnectionConfig {
   id?: string;
   name: string;
   type: "source" | "target";
+  engine?: "sqlserver" | "postgres";
   host: string;
   port: number;
   database: string;
@@ -663,6 +672,7 @@ export interface ConnectionResponse {
   id: string;
   name: string;
   type: "source" | "target";
+  engine?: "sqlserver" | "postgres";
   host: string;
   port: number;
   database: string;
@@ -694,6 +704,236 @@ export async function testConnection(id: string): Promise<{ status: string; mess
 
 export async function testRawConnection(config: ConnectionConfig): Promise<{ status: string; message: string }> {
   return request("/api/v1/connections/test-raw", { method: "POST", body: config });
+}
+
+export type TransferPath = "mssql_to_pg" | "pg_to_mssql" | "pg_to_pg" | "mssql_to_mssql";
+
+export interface TransferTableMapping {
+  source_schema: string;
+  source_table: string;
+  target_schema: string;
+  target_table: string;
+  columns?: string[];
+}
+
+export interface TransferJob {
+  job_id: string;
+  path: TransferPath;
+  status: string;
+  phase: string;
+  source_connection_id: string;
+  target_connection_id: string;
+  tables_total: number;
+  tables_done: number;
+  rows_copied: number;
+  rows_total: number;
+  overall_percentage: number;
+  error?: string | null;
+  preflight?: TransferPreflightResponse | null;
+  constraint_plan?: Record<string, unknown> | null;
+  tables: Array<{
+    source_schema: string;
+    source_table: string;
+    target_schema: string;
+    target_table: string;
+    status: string;
+    rows_copied: number;
+    row_count_estimate: number;
+    chunk_size: number;
+    error?: string | null;
+    error_count?: number;
+    error_at?: string | null;
+  }>;
+  threshold: {
+    chunk_size: number;
+    min_chunk_size: number;
+    max_chunk_size: number;
+    max_rows_per_sec: number | null;
+  };
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface TransferPreflightResponse {
+  path: TransferPath;
+  source: { host: string; port: number; database: string; engine: string };
+  target: { host: string; port: number; database: string; engine: string };
+  same_server: boolean;
+  can_start: boolean;
+  summary: { blockers: number; warnings: number; ok: number; can_start: boolean };
+  job_conflicts: Array<{
+    job_id: string;
+    status: string;
+    overlapping_tables: string[];
+    rows_copied: number;
+    message: string;
+  }>;
+  tables: Array<{
+    source: { schema: string; table: string };
+    target: { schema: string; table: string };
+    existence: string;
+    row_count_source: number;
+    row_count_target: number;
+    has_blocker: boolean;
+    warning_count: number;
+    columns: {
+      matched: Array<{ name: string; source_type: string; target_type: string }>;
+      missing_on_target: Array<{ name: string; message?: string }>;
+      extra_on_target: Array<{ name: string }>;
+      type_mismatches: Array<{ name: string; source_type: string; target_type: string; severity: string; message: string }>;
+    };
+    foreign_keys: Array<{ id: string; kind?: string; recommended_action: string; referenced?: string; definition?: string; reason?: string }>;
+    indexes: Array<{ id: string; kind?: string; recommended_action: string; definition?: string; reason?: string }>;
+    triggers: Array<{ id: string; kind?: string; recommended_action: string; definition?: string; reason?: string }>;
+    constraints?: Array<{ id: string; kind: string; recommended_action: string; definition?: string; reason?: string }>;
+  }>;
+  target_constraints?: TransferConstraintCatalogItem[];
+}
+
+export interface TransferConstraintCatalogItem {
+  key: string;
+  object_id: string;
+  kind: string;
+  schema: string;
+  table: string;
+  recommended_action: string;
+  allowed_actions: string[];
+  definition?: string;
+  reason?: string | null;
+  referenced?: string;
+}
+
+export async function listTransfers(): Promise<TransferJob[]> {
+  return request("/api/v1/transfers");
+}
+
+export async function getTransfer(jobId: string): Promise<TransferJob> {
+  return request(`/api/v1/transfers/${jobId}`);
+}
+
+export async function transferCatalogSchemas(connectionId: string): Promise<string[]> {
+  const res = await request<{ schemas: string[] }>(
+    `/api/v1/transfers/catalog/schemas?connection_id=${encodeURIComponent(connectionId)}`,
+  );
+  return res.schemas;
+}
+
+export async function transferCatalogTables(
+  connectionId: string,
+  schema: string,
+): Promise<Array<{ schema: string; table: string; row_count_estimate: number; column_count: number }>> {
+  const res = await request<{ tables: Array<{ schema: string; table: string; row_count_estimate: number; column_count: number }> }>(
+    `/api/v1/transfers/catalog/tables?connection_id=${encodeURIComponent(connectionId)}&schema=${encodeURIComponent(schema)}`,
+  );
+  return res.tables;
+}
+
+export async function preflightTransfer(body: {
+  path: TransferPath;
+  source_connection_id: string;
+  target_connection_id: string;
+  tables: TransferTableMapping[];
+  create_if_missing?: boolean;
+}): Promise<TransferPreflightResponse> {
+  return request("/api/v1/transfers/preflight", { method: "POST", body });
+}
+
+export async function createTransfer(body: {
+  path: TransferPath;
+  source_connection_id: string;
+  target_connection_id: string;
+  tables: TransferTableMapping[];
+  create_if_missing?: boolean;
+  chunk_size?: number;
+  min_chunk_size?: number;
+  max_chunk_size?: number;
+  max_rows_per_sec?: number | null;
+  constraint_plan?: Record<string, unknown>;
+}): Promise<TransferJob> {
+  return request("/api/v1/transfers", { method: "POST", body });
+}
+
+export async function getTransferProgress(jobId: string): Promise<{
+  job_id: string;
+  status: string;
+  phase: string;
+  overall_percentage: number;
+  total_rows_copied: number;
+  total_rows_estimate: number;
+  effective_chunk_size: number;
+  tables: Record<string, {
+    status: string;
+    rows_copied: number;
+    row_count_estimate: number;
+    percent: number;
+    error?: string | null;
+    error_count?: number;
+  }>;
+}> {
+  return request(`/api/v1/transfers/${jobId}/progress`);
+}
+
+export interface TransferLiveMetrics {
+  job_id: string;
+  status: string;
+  phase: string;
+  overall_percentage: number;
+  total_rows_copied: number;
+  total_rows_estimate: number;
+  tables_total: number;
+  tables_done: number;
+  tables_completed: number;
+  tables_running: number;
+  tables_failed: number;
+  effective_chunk_size: number;
+  tables: Array<{
+    table_key: string;
+    source_schema: string;
+    source_table: string;
+    target_schema: string;
+    target_table: string;
+    status: string;
+    rows_copied: number;
+    row_count_estimate: number;
+    percent: number;
+    chunk_size: number;
+    error?: string | null;
+    error_count: number;
+    error_at?: string | null;
+  }>;
+}
+
+export async function getTransferMetrics(jobId: string): Promise<TransferLiveMetrics> {
+  return request(`/api/v1/transfers/${jobId}/metrics`);
+}
+
+export async function getTransferLogs(
+  jobId: string,
+  afterId = 0,
+  tableName?: string | null,
+): Promise<Array<{ id: number; logged_at: string; level: string; phase?: string; table_name?: string; message: string }>> {
+  const params = new URLSearchParams({ after_id: String(afterId) });
+  if (tableName) params.set("table_name", tableName);
+  return request(`/api/v1/transfers/${jobId}/logs?${params.toString()}`);
+}
+
+export async function pauseTransfer(jobId: string): Promise<TransferJob> {
+  return request(`/api/v1/transfers/${jobId}/pause`, { method: "POST" });
+}
+
+export async function resumeTransfer(jobId: string): Promise<TransferJob> {
+  return request(`/api/v1/transfers/${jobId}/resume`, { method: "POST" });
+}
+
+export async function stopTransfer(jobId: string, restore = true): Promise<TransferJob> {
+  return request(`/api/v1/transfers/${jobId}/stop`, { method: "POST", body: { restore } });
+}
+
+export async function patchTransferThreshold(
+  jobId: string,
+  threshold: { chunk_size: number; min_chunk_size?: number; max_chunk_size?: number; max_rows_per_sec?: number | null },
+): Promise<TransferJob> {
+  return request(`/api/v1/transfers/${jobId}/threshold`, { method: "PATCH", body: threshold });
 }
 
 export interface PrivilegeScriptInfo {
@@ -824,6 +1064,16 @@ export async function scheduleProgramWave(
   return request(`/api/v1/programs/waves/${waveId}/schedule`, {
     method: "PATCH",
     body,
+  });
+}
+
+export async function signOffProgramWave(
+  waveId: string,
+  approver: string,
+): Promise<Pick<MigrationWave, "id" | "status" | "approver" | "signed_off_at">> {
+  return request(`/api/v1/programs/waves/${waveId}/sign-off`, {
+    method: "POST",
+    body: { approver },
   });
 }
 
@@ -1222,6 +1472,31 @@ export async function saveReplicationSettings(
   body: ReplicationSettingsUpdateRequest,
 ): Promise<ReplicationSettingsResponse> {
   return request("/api/v1/admin/replication-settings", { method: "PUT", body });
+}
+
+export interface TransferSettingsResponse {
+  file_offload_enabled: boolean;
+  file_offload_min_rows: number;
+  file_offload_min_mb: number;
+  staging_path: string;
+  updated_at: string | null;
+}
+
+export interface TransferSettingsUpdateRequest {
+  file_offload_enabled: boolean;
+  file_offload_min_rows: number;
+  file_offload_min_mb: number;
+  staging_path: string;
+}
+
+export async function getTransferSettings(): Promise<TransferSettingsResponse> {
+  return request("/api/v1/admin/transfer-settings");
+}
+
+export async function saveTransferSettings(
+  body: TransferSettingsUpdateRequest,
+): Promise<TransferSettingsResponse> {
+  return request("/api/v1/admin/transfer-settings", { method: "PUT", body });
 }
 
 export async function testAlertChannels(

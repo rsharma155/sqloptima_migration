@@ -31,6 +31,26 @@ def resolve_project_filter(
     return requested_project_id
 
 
+def assert_resource_project_access(
+    resource_project_id: str | None,
+    *,
+    user_project_id: str | None = None,
+    is_admin: bool = False,
+) -> None:
+    """Raise 403 when a scoped non-admin user accesses another project's resource.
+
+    Resources without ``project_id`` remain visible (legacy / global rows).
+    Admins and unscoped tokens are not restricted.
+    """
+    if is_admin or not user_project_id:
+        return
+    if resource_project_id and str(resource_project_id) != str(user_project_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Cannot access resources outside your project",
+        )
+
+
 def connection_in_project(entry: dict, project_id: str | None) -> bool:
     if not project_id:
         return True
