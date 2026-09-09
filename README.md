@@ -18,38 +18,41 @@ End users do **not** compile the app and do **not** install Python, Node, or Go.
 
 **Only prerequisite:** [Docker Desktop](https://docs.docker.com/get-docker/) (Windows / macOS) or Docker Engine (Linux). Start Docker and wait until it is running.
 
-Host the files in `deploy/install/` on **your website** (zip or individual scripts). Customers never need GitHub.
+### One-line install
 
-### Windows
+Copies the installer into `~/sql-optima` (Windows: `%USERPROFILE%\sql-optima`), pulls images, and starts the stack. The dashboard opens at **http://localhost:3508** — create the first admin account there.
 
-1. Install Docker Desktop and wait until it is running.
-2. Download `sql-optima.zip` from your website and unzip it.
-3. Double-click `sql-optima.cmd`.
-
-The dashboard opens at **http://localhost:3508**. Create the first admin account.
+Windows (PowerShell):
 
 ```powershell
-.\sql-optima.ps1
+irm https://raw.githubusercontent.com/rsharma155/sqloptima_migration/main/deploy/install/sql-optima.ps1 | iex
 ```
 
-### macOS / Linux
+macOS / Linux:
 
 ```bash
-chmod +x sql-optima.sh
-./sql-optima.sh
+curl -fsSL https://raw.githubusercontent.com/rsharma155/sqloptima_migration/main/deploy/install/sql-optima.sh | bash
 ```
 
-### Website one-liners (replace with your domain)
+The GHCR packages (`sqloptima-api`, `sqloptima-ui`, `sqloptima-engine`) must be **public**, or run `docker login ghcr.io` first.
+
+Stop later:
 
 ```powershell
-irm https://your-domain.example/sql-optima/sql-optima.ps1 | iex
+# Windows
+& "$HOME\sql-optima\sql-optima.ps1" -Stop
 ```
 
 ```bash
-curl -fsSL https://your-domain.example/sql-optima/sql-optima.sh | bash
+# macOS / Linux
+~/sql-optima/sql-optima.sh stop
 ```
 
-Full customer copy and zip layout: [deploy/install/INSTALL.md](deploy/install/INSTALL.md).
+### Zip / website (optional)
+
+Host `deploy/install/` as a zip if you do not want users to hit GitHub. Unzip, then double-click `sql-optima.cmd` (Windows) or run `./sql-optima.sh` (macOS / Linux).
+
+Full customer copy: [deploy/install/INSTALL.md](deploy/install/INSTALL.md).
 
 Publish images with `.github/workflows/publish-images.yml` (git tag `v*` or **workflow_dispatch**) and mark the GHCR packages **public** so `docker pull` does not require a GitHub login.
 

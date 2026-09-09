@@ -131,6 +131,9 @@ alembic/versions/*.pyc
 .coverage.*
 .pytest_cache/
 engine-go/migration-engine
+engine-go/migration-engine.exe
+/bin/migration-engine
+/bin/migration-engine.exe
 
 # ── Miscellaneous ─────────────────────────────────────────────────────────────
 dy
