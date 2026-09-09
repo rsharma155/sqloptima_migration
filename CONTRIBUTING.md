@@ -4,7 +4,11 @@ Thank you for your interest in contributing to [SQL Optima](https://github.com/r
 
 ## Getting started
 
-### One-command local setup
+### End users
+
+Do not clone this repository. Follow [deploy/install/INSTALL.md](deploy/install/INSTALL.md): Docker Desktop only, then the zip or scripts hosted on the product website.
+
+### One-command local setup (contributors)
 
 From a clean machine (Python 3.11+, Node.js 18+, Go 1.23+ recommended):
 
@@ -97,6 +101,8 @@ Guidelines:
 ## Architecture
 
 Read [ARCHITECTURE.md](ARCHITECTURE.md) before touching cross-layer code. The dependency rule is: API → application services → domain + infrastructure ports → shared kernel. Domain code must not import FastAPI or SQLAlchemy models.
+
+For an agent-oriented quick map of commands and invariants, see [CLAUDE.md](CLAUDE.md) (may be gitignored locally).
 
 ## Pull request checklist
 

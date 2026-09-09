@@ -1,0 +1,89 @@
+# SQL Optima — end-user stack (pre-built images, no compile).
+# Prerequisite: Docker Desktop or Docker Engine.
+#
+# Images default to GHCR. Override SQLOPTIMA_IMAGE_REGISTRY / SQLOPTIMA_VERSION
+# if you mirror them (for example on your website's registry).
+
+name: sqloptima
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: migration_checklist
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${METADATA_DB_PASSWORD:?Set METADATA_DB_PASSWORD in .env}
+    volumes:
+      - sqloptima_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d migration_checklist"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  api:
+    image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima-api:${SQLOPTIMA_VERSION:-0.2.0}
+    ports:
+      - "8508:8508"
+    environment:
+      METADATA_DB_HOST: postgres
+      METADATA_DB_PORT: "5432"
+      METADATA_DB_URL: postgresql+asyncpg://postgres:${METADATA_DB_PASSWORD}@postgres:5432/migration_checklist
+      MIGRATION_DATABASE_METADATA_URL: postgresql://postgres:${METADATA_DB_PASSWORD}@postgres:5432/migration_checklist
+      MIGRATION_MASTER_KEY: ${MIGRATION_MASTER_KEY:?Set MIGRATION_MASTER_KEY in .env}
+      MIGRATION_JWT_SECRET: ${MIGRATION_JWT_SECRET:?Set MIGRATION_JWT_SECRET in .env}
+      MIGRATION_EDITION: ${MIGRATION_EDITION:-enterprise}
+      MIGRATION_LICENSE_KEY: ${MIGRATION_LICENSE_KEY:-DEV-LOCAL}
+      MIGRATION_ENV: ${MIGRATION_ENV:-on-prem}
+      MIGRATION_DEPLOYMENT: on-prem
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      MIGRATION_ALLOWED_ORIGINS: ${MIGRATION_ALLOWED_ORIGINS:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8508/health', timeout=5)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    restart: unless-stopped
+
+  ui:
+    image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima-ui:${SQLOPTIMA_VERSION:-0.2.0}
+    ports:
+      - "3508:3508"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8508
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  migration-engine:
+    image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima-engine:${SQLOPTIMA_VERSION:-0.2.0}
+    environment:
+      MIGRATION_MASTER_KEY: ${MIGRATION_MASTER_KEY}
+      MIGRATION_DATABASE_METADATA_URL: postgresql://postgres:${METADATA_DB_PASSWORD}@postgres:5432/migration_checklist
+      MIGRATION_QUEUE_PATH: /var/lib/sqloptima/migration_queue.bbolt
+      MIGRATION_LOGGING_FORMAT: text
+    volumes:
+      - sqloptima_queue:/var/lib/sqloptima
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  sqloptima_pg:
+  sqloptima_queue:

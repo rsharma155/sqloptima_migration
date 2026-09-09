@@ -2,11 +2,15 @@ replicaCount: 1
 
 image:
   api:
-    repository: sql-optima/api
+    repository: ghcr.io/rsharma155/sqloptima-api
     tag: "0.2.0"
     pullPolicy: IfNotPresent
   ui:
-    repository: sql-optima/ui
+    repository: ghcr.io/rsharma155/sqloptima-ui
+    tag: "0.2.0"
+    pullPolicy: IfNotPresent
+  engine:
+    repository: ghcr.io/rsharma155/sqloptima-engine
     tag: "0.2.0"
     pullPolicy: IfNotPresent
 
@@ -38,6 +42,7 @@ env:
   MIGRATION_JWT_SECRET: ""
   MIGRATION_MASTER_KEY: ""
   METADATA_DB_URL: "postgresql+asyncpg://postgres:postgres@metadata-db:5432/sql_optima"
+  MIGRATION_DATABASE_METADATA_URL: "postgresql://postgres:postgres@metadata-db:5432/sql_optima"
 
 resources:
   api:
@@ -54,6 +59,13 @@ resources:
     limits:
       cpu: 500m
       memory: 512Mi
+  engine:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
 
 metadataDb:
   enabled: true

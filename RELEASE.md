@@ -4,6 +4,21 @@ Version history and upgrade guidance for SQL Optima.
 
 ---
 
+## Unreleased (working tree)
+
+Documentation and control-plane polish aligned with the current codebase (2026-07-24), plus a **Docker-only product install**:
+
+- **Website install package** — `deploy/install/` (compose + `sql-optima.cmd` / `.ps1` / `.sh`). Customers install Docker, download a zip from your site, and start. No compile, no Python/Node/Go on the host.
+- **Production images** — API Dockerfile (ODBC Driver 18), `apps/ui/Dockerfile` (Next.js `standalone`), existing `Dockerfile.migration-engine`. CI: `.github/workflows/publish-images.yml`.
+- **Helm** — chart deploys the Go engine and pulls `ghcr.io/rsharma155/sqloptima-*`.
+- **Project scoping** — `shared/tenancy/project_scope.py` + Alembic `006`; non-admin JWTs with `project_id` are filtered on list/detail APIs.
+- **Programs / Reports UI** — `/programs` and `/reports` nav entries wired to `/api/v1/programs` and `/api/v1/reports`.
+- **Root docs refresh** — `CLAUDE.md`, `ARCHITECTURE.md`, `README.md`, `OPERATIONS.md`, `PACKAGING.md`, `SECURITY.md` updated for Go data plane, compose ports, and canonical root runbooks (not `docs/` copies).
+
+No package version bump yet — still **0.2.0** until the next tagged release. Tag `v0.2.0` (or run **Publish install images**) so GHCR tags exist before sending customers the website zip.
+
+---
+
 ## v0.2.0 — 2026-06-09
 
 Replication hardening, platform capture tuning, migration control improvements, and developer-experience polish.
