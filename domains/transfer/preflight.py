@@ -43,6 +43,7 @@ class ColumnInventory:
     type_name: str
     nullable: bool
     is_identity: bool = False
+    is_computed: bool = False
 
 
 @dataclass(slots=True)
@@ -81,12 +82,10 @@ def compare_table(
     tables_in_job: set[str],
 ) -> dict[str, Any]:
     homogeneous = is_homogeneous(path)
-    columns_report = _compare_columns(source, target, homogeneous)
+    columns_report = _compare_columns(
+        source, target, homogeneous, create_if_missing=create_if_missing,
+    )
     existence, existence_blocker = _existence(target, create_if_missing)
-    if not target.exists and create_if_missing:
-        columns_report["missing_on_target"] = []
-        columns_report["type_mismatches"] = []
-        columns_report["nullability_mismatches"] = []
 
     constraints = []
     for c in target.constraints:
@@ -204,6 +203,8 @@ def _compare_columns(
     source: TableInventory,
     target: TableInventory,
     homogeneous: bool,
+    *,
+    create_if_missing: bool = False,
 ) -> dict[str, Any]:
     src_by = {c.name.lower(): c for c in source.columns}
     tgt_by = {c.name.lower(): c for c in target.columns}
@@ -212,9 +213,19 @@ def _compare_columns(
     extra_on_target: list[dict[str, str]] = []
     type_mismatches: list[dict[str, Any]] = []
     nullability_mismatches: list[dict[str, Any]] = []
+    clone_missing = create_if_missing and not target.exists
 
     for key, col in src_by.items():
+        if col.is_computed:
+            continue
         tgt = tgt_by.get(key)
+        if tgt is None and clone_missing:
+            matched.append({
+                "name": col.name,
+                "source_type": col.type_name,
+                "target_type": col.type_name,
+            })
+            continue
         if tgt is None:
             missing_on_target.append({
                 "name": col.name,

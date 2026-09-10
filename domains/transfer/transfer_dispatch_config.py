@@ -14,6 +14,7 @@ from uuid import UUID
 
 from domains.transfer.transfer_path import TransferPath
 from domains.transfer.transfer_settings import file_offload_snapshot
+from domains.transfer.schema_clone import SchemaClonePlan
 
 TRANSFER_KIND = "transfer"
 
@@ -90,6 +91,7 @@ class TransferDispatchConfig:
     tables: tuple[TransferTablePayload, ...]
     constraint_plan: dict[str, Any] = field(default_factory=dict)
     file_offload: dict[str, Any] = field(default_factory=file_offload_snapshot)
+    schema_clone: SchemaClonePlan = field(default_factory=SchemaClonePlan)
     kind: str = TRANSFER_KIND
 
     def to_dict(self) -> dict[str, Any]:
@@ -102,6 +104,7 @@ class TransferDispatchConfig:
             "tables": [t.to_dict() for t in self.tables],
             "constraint_plan": dict(self.constraint_plan or {}),
             "file_offload": file_offload_snapshot(self.file_offload),
+            "schema_clone": self.schema_clone.to_dict(),
         }
 
     @classmethod
@@ -117,6 +120,7 @@ class TransferDispatchConfig:
             tables=tuple(TransferTablePayload.from_dict(t) for t in tables_raw),
             constraint_plan=dict(data.get("constraint_plan") or {}),
             file_offload=file_offload_snapshot(data.get("file_offload")),
+            schema_clone=SchemaClonePlan.from_dict(data.get("schema_clone")),
         )
 
     def validate(self) -> None:
@@ -157,6 +161,7 @@ def build_transfer_dispatch_config(
     constraint_plan: dict[str, Any],
     preflight: dict[str, Any] | None,
     file_offload: dict[str, Any] | None = None,
+    schema_clone: SchemaClonePlan | None = None,
 ) -> TransferDispatchConfig:
     chunk_size = int(threshold.get("chunk_size") or 10_000)
     payloads: list[TransferTablePayload] = []
@@ -193,6 +198,7 @@ def build_transfer_dispatch_config(
         tables=tuple(payloads),
         constraint_plan=dict(constraint_plan or {}),
         file_offload=file_offload_snapshot(file_offload),
+        schema_clone=schema_clone or SchemaClonePlan(),
     )
     cfg.validate()
     return cfg

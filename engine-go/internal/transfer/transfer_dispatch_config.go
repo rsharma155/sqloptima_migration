@@ -20,6 +20,7 @@ type TransferDispatchConfig struct {
 	Tables         []TransferTablePayload       `json:"tables"`
 	ConstraintPlan json.RawMessage              `json:"constraint_plan"`
 	FileOffload    *TransferFileOffloadSettings `json:"file_offload"`
+	SchemaClone    SchemaClonePlan              `json:"schema_clone"`
 }
 
 type TransferFileOffloadSettings struct {

@@ -73,6 +73,10 @@ function engineOf(c: Connection): "sqlserver" | "postgres" {
   return c.type === "target" ? "postgres" : "sqlserver";
 }
 
+function engineLabel(engine: "sqlserver" | "postgres"): string {
+  return engine === "sqlserver" ? "SQL Server" : "PostgreSQL";
+}
+
 function statusVariant(status: string): "default" | "secondary" | "outline" | "destructive" {
   if (status === "completed") return "default";
   if (status === "failed" || status === "stopped" || status === "restore_failed") return "destructive";
@@ -93,6 +97,7 @@ export default function TransfersPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [chunkSize, setChunkSize] = useState(10000);
   const [createIfMissing, setCreateIfMissing] = useState(false);
+  const [cloneObjects, setCloneObjects] = useState(false);
   const [preflight, setPreflight] = useState<TransferPreflightResponse | null>(null);
   const [reviewedConstraints, setReviewedConstraints] = useState(false);
   const [disabledKeys, setDisabledKeys] = useState<Set<string>>(new Set());
@@ -144,6 +149,7 @@ export default function TransfersPage() {
         target_connection_id: targetId,
         tables: mappings,
         create_if_missing: createIfMissing,
+        clone_objects: cloneObjects,
       }),
     onSuccess: (data) => {
       setPreflight(data);
@@ -167,6 +173,7 @@ export default function TransfersPage() {
         target_connection_id: targetId,
         tables: mappings,
         create_if_missing: createIfMissing,
+        clone_objects: cloneObjects,
         chunk_size: chunkSize,
         constraint_plan: {
           operator_reviewed: true,
@@ -193,7 +200,7 @@ export default function TransfersPage() {
     <div className="p-6 space-y-6">
       <PageHeader
         title="Transfer"
-        description="Bulk copy rows between two different databases. Same or different server and RDBMS."
+        description="Bulk copy rows between two databases. The path you pick below sets the source and target engines (SQL Server vs PostgreSQL)."
       >
         <Button variant="outline" size="sm" onClick={() => jobsQuery.refetch()}>
           <RefreshCw className="h-4 w-4 mr-1" /> Refresh
@@ -209,6 +216,7 @@ export default function TransfersPage() {
         </CardHeader>
         <CardContent className="space-y-4">
           {step === "path" && (
+            <div className="space-y-3">
             <div className="grid gap-3 sm:grid-cols-2">
               {PATHS.map((p) => (
                 <button
@@ -222,21 +230,31 @@ export default function TransfersPage() {
                     setPreflight(null);
                     setReviewedConstraints(false);
                     setDisabledKeys(new Set());
+                    if (p.id !== "mssql_to_mssql") setCloneObjects(false);
+                    if (p.id === "pg_to_mssql") setCreateIfMissing(false);
                   }}
                   className={cn(
                     "rounded-md border p-3 text-left text-sm",
                     path === p.id ? "border-primary bg-primary/5" : "border-input",
                   )}
                 >
-                  {p.label}
+                  <div className="font-medium">{p.label}</div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    Source engine: {engineLabel(p.source)} · Target engine: {engineLabel(p.target)}
+                  </div>
                 </button>
               ))}
+            </div>
+            <p className="text-sm text-muted-foreground">
+              Pick the engine pair first. Transfer lists connections by Settings → Engine, not by the
+              Migrations Source/Target role.
+            </p>
             </div>
           )}
 
           {step === "source" && (
             <div className="space-y-3">
-              <Label>Source connection ({spec.source})</Label>
+              <Label>Source connection ({engineLabel(spec.source)})</Label>
               <select
                 className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                 value={sourceId}
@@ -251,7 +269,7 @@ export default function TransfersPage() {
               </select>
               {sourceConns.length === 0 && (
                 <p className="text-sm text-muted-foreground">
-                  No {spec.source} connections. Add one in Settings and set Engine.
+                  No {engineLabel(spec.source)} connections. In Settings, add a connection and set Engine to {engineLabel(spec.source)}. The Migrations Source/Target role is ignored here.
                 </p>
               )}
             </div>
@@ -300,7 +318,7 @@ export default function TransfersPage() {
 
           {step === "target" && (
             <div className="space-y-3">
-              <Label>Target connection ({spec.target})</Label>
+              <Label>Target connection ({engineLabel(spec.target)})</Label>
               <select
                 className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                 value={targetId}
@@ -326,14 +344,32 @@ export default function TransfersPage() {
               </select>
               <Label>Chunk size</Label>
               <Input type="number" min={100} value={chunkSize} onChange={(e) => setChunkSize(Number(e.target.value))} />
-              <label className="flex items-center gap-2 text-sm">
+              <label className="flex items-start gap-2 text-sm">
                 <input
                   type="checkbox"
+                  className="mt-1"
                   checked={createIfMissing}
+                  disabled={path === "pg_to_mssql"}
                   onChange={(e) => setCreateIfMissing(e.target.checked)}
                 />
-                Allow start if the target table is missing (create-if-missing)
+                <span>
+                  Create missing destination tables before copy
+                  {path === "mssql_to_mssql" ? " (T-SQL CREATE TABLE as-is)" : path === "mssql_to_pg" ? " (mapped PostgreSQL types)" : path === "pg_to_pg" ? " (PostgreSQL CREATE TABLE)" : " (not available for PostgreSQL → SQL Server yet)"}
+                </span>
               </label>
+              {path === "mssql_to_mssql" && (
+                <label className="flex items-start gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    className="mt-1"
+                    checked={cloneObjects}
+                    onChange={(e) => setCloneObjects(e.target.checked)}
+                  />
+                  <span>
+                    Clone schema objects T-SQL as-is after the load (indexes, checks, foreign keys, triggers, views, functions, procedures)
+                  </span>
+                </label>
+              )}
             </div>
           )}
 

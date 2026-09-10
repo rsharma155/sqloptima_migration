@@ -36,6 +36,7 @@ from infrastructure.metadata_db.models import TransferJobRecord
 from infrastructure.metadata_db.repositories.transfer_job_repository import TransferJobRepository
 from infrastructure.metadata_db.session import AsyncSessionFactory
 from infrastructure.transfer.inventory import list_schema_tables, list_schemas, load_table_inventory
+from infrastructure.transfer.schema_clone import build_schema_clone_plan
 from shared.logging.structured_logging import get_logger
 from shared.tenancy.project_scope import assert_resource_project_access
 
@@ -227,6 +228,7 @@ async def run_preflight(
     target_connection_id: UUID,
     tables: list[TransferTableMapping],
     create_if_missing: bool = False,
+    clone_objects: bool = False,
 ) -> dict[str, Any]:
     if not tables:
         raise TransferError("Select at least one table")
@@ -305,6 +307,8 @@ async def run_preflight(
         "job_conflicts": conflicts,
         "summary": summary,
         "can_start": summary["can_start"],
+        "create_if_missing": create_if_missing,
+        "clone_objects": clone_objects,
     }
 
 
@@ -317,6 +321,7 @@ async def create_job(
     threshold: TransferThreshold,
     constraint_plan: dict[str, Any] | None,
     create_if_missing: bool,
+    clone_objects: bool = False,
     project_id: str | None,
 ) -> dict[str, Any]:
     report = await run_preflight(
@@ -325,6 +330,7 @@ async def create_job(
         target_connection_id=target_connection_id,
         tables=tables,
         create_if_missing=create_if_missing,
+        clone_objects=clone_objects,
     )
     if not report["can_start"]:
         raise TransferError(
@@ -361,6 +367,32 @@ async def create_job(
     job_id = uuid4()
     from application.transfer_settings_config import resolved_file_offload
 
+    missing_targets = {
+        f"{t['target']['schema']}.{t['target']['table']}".lower()
+        for t in report["tables"]
+        if str(t.get("existence") or "") == "missing"
+    }
+    clone_plan = None
+    if create_if_missing or clone_objects:
+        src_engine = infer_engine(src_entry)
+        src_conn, _ = await make_transfer_connector(src_entry)
+        await src_conn.connect()
+        try:
+            clone_plan = await build_schema_clone_plan(
+                path=path,
+                source_connector=src_conn,
+                source_engine=src_engine,
+                source_database=str(src_entry.get("database") or ""),
+                tables=tables,
+                missing_targets=missing_targets,
+                create_if_missing=create_if_missing,
+                clone_objects=clone_objects,
+            )
+        except ValueError as exc:
+            raise TransferError(str(exc)) from exc
+        finally:
+            await src_conn.disconnect()
+
     dispatch = build_transfer_dispatch_config(
         job_id=job_id,
         path=path,
@@ -373,6 +405,7 @@ async def create_job(
         constraint_plan=plan,
         preflight=report,
         file_offload=resolved_file_offload(),
+        schema_clone=clone_plan,
     )
     table_rows = [
         {
