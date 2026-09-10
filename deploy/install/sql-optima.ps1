@@ -131,8 +131,34 @@ volumes:
     [System.IO.File]::WriteAllText((Join-Path $Root "docker-compose.yml"), $compose, $utf8)
 }
 
+function Set-EnvKey {
+    param([string]$Key, [string]$Value)
+    $path = Join-Path $Root ".env"
+    $lines = @(Get-Content -LiteralPath $path)
+    $found = $false
+    $out = foreach ($line in $lines) {
+        if ($line -match "^$([regex]::Escape($Key))=") {
+            $found = $true
+            "$Key=$Value"
+        } else {
+            $line
+        }
+    }
+    if (-not $found) {
+        $out = @($out) + "$Key=$Value"
+    }
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($path, (($out -join "`n").Trim() + "`n"), $utf8)
+}
+
 function Initialize-EnvFile {
-    if (Test-Path ".env") { return }
+    $path = Join-Path $Root ".env"
+    if (Test-Path $path) {
+        Set-EnvKey -Key "SQLOPTIMA_VERSION" -Value $Version
+        Set-EnvKey -Key "SQLOPTIMA_IMAGE_REGISTRY" -Value $Registry
+        Write-Host "Using existing $path — image tag set to $Version."
+        return
+    }
     $master = New-OptimaKey
     $jwt = New-OptimaKey
     $pg = New-AlnumPassword
@@ -148,8 +174,8 @@ MIGRATION_ENV=on-prem
 ENVIRONMENT=development
 "@
     $utf8 = New-Object System.Text.UTF8Encoding $false
-    [System.IO.File]::WriteAllText((Join-Path $Root ".env"), ($content.Trim() + "`n"), $utf8)
-    Write-Host "Created $Root\.env with generated secrets. Keep this file private."
+    [System.IO.File]::WriteAllText($path, ($content.Trim() + "`n"), $utf8)
+    Write-Host "Created $path with generated secrets. Keep this file private."
 }
 
 function Invoke-Compose {
