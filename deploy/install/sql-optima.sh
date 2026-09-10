@@ -130,11 +130,30 @@ alnum_password() {
   tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24
 }
 
-ensure_env() {
-  if [[ -f .env ]]; then
-    return
+upsert_env_key() {
+  local key="$1"
+  local value="$2"
+  local tmp
+  tmp="$(mktemp)"
+  if [[ -f .env ]] && grep -q "^${key}=" .env; then
+    awk -v k="$key" -v v="$value" '
+      BEGIN { done = 0 }
+      $0 ~ "^" k "=" { print k "=" v; done = 1; next }
+      { print }
+      END { if (!done) print k "=" v }
+    ' .env > "$tmp"
+    mv "$tmp" .env
+  elif [[ -f .env ]]; then
+    printf '%s=%s\n' "$key" "$value" >> .env
+    rm -f "$tmp"
+  else
+    rm -f "$tmp"
   fi
-  cat > .env <<EOF
+}
+
+ensure_env() {
+  if [[ ! -f .env ]]; then
+    cat > .env <<EOF
 SQLOPTIMA_VERSION=${VERSION}
 SQLOPTIMA_IMAGE_REGISTRY=${REGISTRY}
 MIGRATION_MASTER_KEY=$(b64_key)
@@ -145,7 +164,14 @@ MIGRATION_LICENSE_KEY=DEV-LOCAL
 MIGRATION_ENV=on-prem
 ENVIRONMENT=development
 EOF
-  echo "Created $ROOT/.env with generated secrets. Keep this file private."
+    echo "Created $ROOT/.env with generated secrets. Keep this file private."
+    return
+  fi
+  # Keep secrets; always align image tag/registry with this installer so upgrades
+  # do not keep pulling unpublished sqloptima_migration-*:0.2.0 images.
+  upsert_env_key SQLOPTIMA_VERSION "$VERSION"
+  upsert_env_key SQLOPTIMA_IMAGE_REGISTRY "$REGISTRY"
+  echo "Using existing $ROOT/.env — image tag set to ${VERSION}."
 }
 
 compose() {
@@ -211,7 +237,7 @@ case "$cmd" in
     compose ps
     ;;
   start|up|"")
-    echo "Pulling SQL Optima Migration images (no compile on this machine)..."
+    echo "Pulling SQL Optima Migration images ${REGISTRY}/sqloptima_migration-*:${VERSION} (no compile on this machine)..."
     compose pull
     if ! compose up -d; then
       echo "Failed to start containers. API logs:" >&2

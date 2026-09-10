@@ -74,7 +74,7 @@ Secrets are written to `.env` next to the compose file on first run. Keep that f
 ```bash
 # Linux / macOS
 ./sql-optima.sh stop
-# edit SQLOPTIMA_VERSION in .env if you pin a newer tag
+# Re-run the installer; it keeps secrets and updates SQLOPTIMA_VERSION
 ./sql-optima.sh
 ```
 
