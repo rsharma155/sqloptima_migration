@@ -68,7 +68,7 @@ def print_banner():
  \__ \ (_) | |__  | (_) | '_ \  _| | '  \/ _` | | |\/| | / _` | '_/ _` |  _| / _ \ ' \
  |___/\__\_\____|  \___/| .__/\__|_|_|_|_\__,_| |_|  |_|_\__, |_| \__,_|\__|_\___/_||_|
                         |_|                               |___/
-{C.CYAN}{C.DIM}  SQL Server → PostgreSQL  |  DDD + Clean Arch  |  v0.2.0{C.END}
+{C.CYAN}{C.DIM}  SQL Server → PostgreSQL  |  DDD + Clean Arch  |  v0.2.1{C.END}
     """
     print(banner)
 
@@ -424,7 +424,7 @@ def require_postgres_metadata() -> bool:
         return True
 
     print(f" {C.RED}✗{C.END} Metadata PostgreSQL is not reachable on port 5555")
-    print(f"   SQL Optima requires the {C.BOLD}postgres_checklist{C.END} database.")
+    print(f"   SQL Optima Migration requires the {C.BOLD}postgres_checklist{C.END} database.")
     if IS_WINDOWS:
         print(f"   1. Install and start {C.CYAN}Docker Desktop{C.END}")
     else:

@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Image tag (for example 0.2.0)"
+        description: "Image tag (for example 0.2.1)"
         required: true
-        default: "0.2.0"
+        default: "0.2.1"
 
 permissions:
   contents: write
@@ -52,8 +52,8 @@ jobs:
           file: Dockerfile
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ steps.ns.outputs.owner }}/sqloptima-api:${{ steps.ver.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ steps.ns.outputs.owner }}/sqloptima-api:latest
+            ${{ env.REGISTRY }}/${{ steps.ns.outputs.owner }}/sqloptima_migration-api:${{ steps.ver.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ steps.ns.outputs.owner }}/sqloptima_migration-api:latest
 
       - name: Build and push engine
         uses: docker/build-push-action@v6
@@ -62,8 +62,8 @@ jobs:
           file: Dockerfile.migration-engine
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ steps.ns.outputs.owner }}/sqloptima-engine:${{ steps.ver.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ steps.ns.outputs.owner }}/sqloptima-engine:latest
+            ${{ env.REGISTRY }}/${{ steps.ns.outputs.owner }}/sqloptima_migration-engine:${{ steps.ver.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ steps.ns.outputs.owner }}/sqloptima_migration-engine:latest
 
       - name: Build and push UI
         uses: docker/build-push-action@v6
@@ -72,8 +72,8 @@ jobs:
           file: apps/ui/Dockerfile
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ steps.ns.outputs.owner }}/sqloptima-ui:${{ steps.ver.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ steps.ns.outputs.owner }}/sqloptima-ui:latest
+            ${{ env.REGISTRY }}/${{ steps.ns.outputs.owner }}/sqloptima_migration-ui:${{ steps.ver.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ steps.ns.outputs.owner }}/sqloptima_migration-ui:latest
 
       - name: Pack website install zip
         run: |
@@ -82,7 +82,7 @@ jobs:
           import pathlib
           import zipfile
           root = pathlib.Path("deploy/install")
-          out = pathlib.Path("dist/sql-optima-install.zip")
+          out = pathlib.Path("dist/sqloptima_migration-install.zip")
           with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
               for path in sorted(root.iterdir()):
                   if path.is_file() and path.name != ".env":
@@ -93,11 +93,11 @@ jobs:
       - name: Upload install zip
         uses: actions/upload-artifact@v7
         with:
-          name: sql-optima-install
-          path: dist/sql-optima-install.zip
+          name: sqloptima_migration-install
+          path: dist/sqloptima_migration-install.zip
 
       - name: Attach zip to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/sql-optima-install.zip
+          files: dist/sqloptima_migration-install.zip

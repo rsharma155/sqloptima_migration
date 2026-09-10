@@ -57,4 +57,4 @@ Key platform controls already in the product:
 - `.github/workflows/security-audit.yml` — weekly `pip-audit` and `npm audit`
 - `.github/dependabot.yml` — dependency update PRs
 - `scripts/generate_sbom.py` — SBOM generation for release artifacts
-- `.github/workflows/publish-images.yml` — GHCR images + `sql-optima-install.zip`
+- `.github/workflows/publish-images.yml` — GHCR images + `sqloptima_migration-install.zip`

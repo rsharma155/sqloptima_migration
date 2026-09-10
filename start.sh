@@ -27,7 +27,7 @@ cat << 'BANNER'
  |_|  |_|_\__, |_\___|\__\___|_| \___/__/ \___/| .__/ \__|_\___/__/
           |___/                                 |_|
 BANNER
-echo -e "${RESET}${CYAN}  SQL Server → PostgreSQL Migration Platform  |  v0.2.0${RESET}"
+echo -e "${RESET}${CYAN}  SQL Server → PostgreSQL Migration Platform  |  v0.2.1${RESET}"
 
 # ══════════════════════════════════════════════════════════════════════
 # STEP 1 — Bootstrap prerequisites (Python venv module, Node, Go)

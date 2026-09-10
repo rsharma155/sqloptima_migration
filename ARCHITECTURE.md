@@ -1,7 +1,7 @@
 # Architecture — SQL Server → PostgreSQL Migration Platform
 
 **Repository:** [github.com/rsharma155/sqloptima_migration](https://github.com/rsharma155/sqloptima_migration)  
-**Version:** 0.2.0 — Go data plane + control plane (programs, reports, project scoping, replication settings)  
+**Version:** 0.2.1 — Go data plane + control plane (programs, reports, project scoping, replication settings, Transfer schema clone)  
 **Last updated:** 2026-09-09  
 **Author:** Ravi Sharma  
 **License:** MIT — © 2026 Ravi Sharma

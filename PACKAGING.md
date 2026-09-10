@@ -4,9 +4,9 @@
 
 Ship **pre-built container images**. Customers install Docker only.
 
-1. Publish images (`sqloptima-api`, `sqloptima-ui`, `sqloptima-engine`) to GHCR via `.github/workflows/publish-images.yml`.
+1. Publish images (`sqloptima_migration-api`, `sqloptima_migration-ui`, `sqloptima_migration-engine`) to GHCR via `.github/workflows/publish-images.yml`.
 2. Mark those packages **public**.
-3. Host `deploy/install/` (or `dist/sql-optima-install.zip` from the workflow) on your **website**.
+3. Host `deploy/install/` (or `dist/sqloptima_migration-install.zip` from the workflow) on your **website**.
 4. Customer: install Docker → download zip → `sql-optima.cmd` / `./sql-optima.sh`.
 
 See [deploy/install/INSTALL.md](deploy/install/INSTALL.md). Do not send customers to `git clone` or `python start.py`.
@@ -77,4 +77,4 @@ python scripts/generate_sbom.py
 # → dist/sbom-python.json
 ```
 
-Weekly CI generates and uploads the SBOM artifact. Release CI also uploads `sql-optima-install.zip`.
+Weekly CI generates and uploads the SBOM artifact. Release CI also uploads `sqloptima_migration-install.zip`.

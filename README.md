@@ -1,4 +1,4 @@
-# SQL Optima — SQL Server → PostgreSQL Migration Platform
+# SQL Optima Migration — SQL Server → PostgreSQL Migration Platform
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
@@ -8,7 +8,7 @@
 
 **Repository:** [github.com/rsharma155/sqloptima_migration](https://github.com/rsharma155/sqloptima_migration)
 
-**SQL Optima** is a full-stack migration platform that automates the transition from Microsoft SQL Server to PostgreSQL. It treats migration as a **compilation problem** — parsing T-SQL into an AST and re-emitting idiomatic PL/pgSQL — rather than applying fragile regex substitutions. Bulk data movement runs in a dedicated **Go data plane** (`engine-go/`) with adaptive chunking, a crash-safe bbolt queue, and PostgreSQL binary `COPY`; Python provides the control plane (API, dispatch, validation, UI).
+**SQL Optima Migration** is a full-stack migration platform that automates the transition from Microsoft SQL Server to PostgreSQL. It treats migration as a **compilation problem** — parsing T-SQL into an AST and re-emitting idiomatic PL/pgSQL — rather than applying fragile regex substitutions. Bulk data movement runs in a dedicated **Go data plane** (`engine-go/`) with adaptive chunking, a crash-safe bbolt queue, and PostgreSQL binary `COPY`; Python provides the control plane (API, dispatch, validation, UI).
 
 ---
 
@@ -34,7 +34,7 @@ macOS / Linux:
 curl -fsSL https://raw.githubusercontent.com/rsharma155/sqloptima_migration/main/deploy/install/sql-optima.sh | bash
 ```
 
-The GHCR packages (`sqloptima-api`, `sqloptima-ui`, `sqloptima-engine`) must be **public**, or run `docker login ghcr.io` first.
+The GHCR packages (`sqloptima_migration-api`, `sqloptima_migration-ui`, `sqloptima_migration-engine`) must be **public**, or run `docker login ghcr.io` first.
 
 Stop later:
 
@@ -74,12 +74,12 @@ Publish images with `.github/workflows/publish-images.yml` (git tag `v*` or **wo
 
 ---
 
-## Why SQL Optima?
+## Why SQL Optima Migration?
 
-Migrating from SQL Server to PostgreSQL is hard due to deep differences in procedural logic, data types, and proprietary features. SQL Optima handles these differences systematically:
+Migrating from SQL Server to PostgreSQL is hard due to deep differences in procedural logic, data types, and proprietary features. SQL Optima Migration handles these differences systematically:
 
 
-| Challenge             | How SQL Optima Handles It                                                                                                                                |
+| Challenge             | How SQL Optima Migration Handles It                                                                                                                                |
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Complex T-SQL logic   | Multi-pass AST transpiler (SQLGlot + ANTLR4 fallback) with T-SQL parse unblockers, pgparse validation, and an auto-repair loop — never regex on full SQL |
 | Bulk data movement    | Go engine: half-open PK chunk boundaries, adaptive chunking, bbolt crash-safe queue, binary `COPY`, parallel workers                                     |
@@ -95,7 +95,7 @@ Migrating from SQL Server to PostgreSQL is hard due to deep differences in proce
 
 ## The Migration Lifecycle
 
-SQL Optima guides you through five stages, each backed by its own UI page:
+SQL Optima Migration guides you through five stages, each backed by its own UI page:
 
 ```
 1. Assess  →  2. Convert  →  3. Migrate  →  4. Validate  →  5. Sync (CDC)
@@ -196,7 +196,7 @@ Create and manage migration projects. Each project pairs a SQL Server source con
 
 #### Assessment — `/assessment`
 
-Database readiness report. Connect to a source, select a schema, and SQL Optima introspects `sys.`* catalog views to produce:
+Database readiness report. Connect to a source, select a schema, and SQL Optima Migration introspects `sys.`* catalog views to produce:
 
 - Per-table classification: `SAFE` / `WARNING` / `BLOCKER`
 - Complexity distribution chart
@@ -395,7 +395,7 @@ MIGRATION_SNAPSHOT_DIR=./snapshots
 
 ## CLI Reference
 
-SQL Optima is fully scriptable for DevOps integration:
+SQL Optima Migration is fully scriptable for DevOps integration:
 
 ```bash
 # Convert a stored procedure

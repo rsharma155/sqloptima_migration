@@ -1,21 +1,25 @@
 # Release Notes
 
-Version history and upgrade guidance for SQL Optima.
+Version history and upgrade guidance for SQL Optima Migration.
 
 ---
 
-## Unreleased (working tree)
+## v0.2.1 — 2026-09-10
 
-Documentation and control-plane polish aligned with the current codebase (2026-07-24), plus a **Docker-only product install**:
+GHCR packages are published as **`sqloptima_migration-*`** (matching the GitHub repo), not `sqloptima-*`. Transfer can create missing SQL Server destination tables and clone T-SQL objects as-is.
 
-- **Website install package** — `deploy/install/` (compose + `sql-optima.cmd` / `.ps1` / `.sh`). Customers install Docker, download a zip from your site, and start. No compile, no Python/Node/Go on the host.
-- **Production images** — API Dockerfile (ODBC Driver 18), `apps/ui/Dockerfile` (Next.js `standalone`), existing `Dockerfile.migration-engine`. CI: `.github/workflows/publish-images.yml`.
-- **Helm** — chart deploys the Go engine and pulls `ghcr.io/rsharma155/sqloptima-*`.
-- **Project scoping** — `shared/tenancy/project_scope.py` + Alembic `006`; non-admin JWTs with `project_id` are filtered on list/detail APIs.
-- **Programs / Reports UI** — `/programs` and `/reports` nav entries wired to `/api/v1/programs` and `/api/v1/reports`.
-- **Root docs refresh** — `CLAUDE.md`, `ARCHITECTURE.md`, `README.md`, `OPERATIONS.md`, `PACKAGING.md`, `SECURITY.md` updated for Go data plane, compose ports, and canonical root runbooks (not `docs/` copies).
+### Highlights
 
-No package version bump yet — still **0.2.0** until the next tagged release. Tag `v0.2.0` (or run **Publish install images**) so GHCR tags exist before sending customers the website zip.
+- **Package names** — `ghcr.io/rsharma155/sqloptima_migration-api`, `sqloptima_migration-ui`, `sqloptima_migration-engine` (tags `0.2.1` and `latest`). Python project name is `sqloptima_migration`.
+- **Install zip** — `sqloptima_migration-install.zip` from **Publish install images**.
+- **Transfer SQL Server → SQL Server** — create missing destination tables (`CREATE TABLE` as-is) and clone indexes, checks, FKs, triggers, views, functions, and procedures after the load.
+- **Connections** — Transfer selects endpoints by **Engine** (SQL Server vs PostgreSQL); Migrations still uses Source/Target roles.
+
+### Upgrade notes
+
+1. Point installers and Helm at `sqloptima_migration-*` images and `SQLOPTIMA_VERSION=0.2.1`.
+2. Old `sqloptima-api` / `sqloptima-ui` / `sqloptima-engine` tags are not updated by this release.
+3. Mark the new GHCR packages **public** if customers pull without `docker login`.
 
 ---
 
@@ -91,7 +95,7 @@ Replication hardening, platform capture tuning, migration control improvements, 
 
 ## v0.1.0 — 2026-03-01
 
-Initial public release of the SQL Optima migration platform.
+Initial public release of the SQL Optima Migration platform.
 
 ### Highlights
 

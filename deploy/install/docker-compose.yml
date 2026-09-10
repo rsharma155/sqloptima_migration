@@ -1,10 +1,10 @@
-# SQL Optima — end-user stack (pre-built images, no compile).
+# SQL Optima Migration — end-user stack (pre-built images, no compile).
 # Prerequisite: Docker Desktop or Docker Engine.
 #
 # Images default to GHCR. Override SQLOPTIMA_IMAGE_REGISTRY / SQLOPTIMA_VERSION
 # if you mirror them (for example on your website's registry).
 
-name: sqloptima
+name: sqloptima_migration
 
 services:
   postgres:
@@ -24,7 +24,7 @@ services:
     restart: unless-stopped
 
   api:
-    image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima-api:${SQLOPTIMA_VERSION:-0.2.0}
+    image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima_migration-api:${SQLOPTIMA_VERSION:-0.2.1}
     ports:
       - "8508:8508"
     env_file:
@@ -58,7 +58,7 @@ services:
     restart: unless-stopped
 
   ui:
-    image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima-ui:${SQLOPTIMA_VERSION:-0.2.0}
+    image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima_migration-ui:${SQLOPTIMA_VERSION:-0.2.1}
     ports:
       - "3508:3508"
     environment:
@@ -69,7 +69,7 @@ services:
     restart: unless-stopped
 
   migration-engine:
-    image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima-engine:${SQLOPTIMA_VERSION:-0.2.0}
+    image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima_migration-engine:${SQLOPTIMA_VERSION:-0.2.1}
     environment:
       MIGRATION_MASTER_KEY: ${MIGRATION_MASTER_KEY}
       METADATA_DB_HOST: postgres

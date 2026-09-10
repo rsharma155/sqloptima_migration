@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-const transferEngineVersion = "0.2.0"
+const transferEngineVersion = "0.2.1"
 
 // TransferEngineWorkerLoop polls transfer_jobs for queued work.
 type TransferEngineWorkerLoop struct {

@@ -1,4 +1,4 @@
-# Install SQL Optima (Docker only)
+# Install SQL Optima Migration (Docker only)
 
 End users do **not** clone GitHub, compile code, or install Python / Node / Go.
 
@@ -10,7 +10,7 @@ Host this folder (`deploy/install/`) as a zip, for example:
 
 `https://your-domain.example/sql-optima/sql-optima.zip`
 
-Suggested button copy: **Download SQL Optima** → unzip → run the starter.
+Suggested button copy: **Download SQL Optima Migration** → unzip → run the starter.
 
 You can also host the scripts at stable URLs and use a one-line install (below).
 
@@ -83,12 +83,12 @@ Secrets are written to `.env` next to the compose file on first run. Keep that f
 .\sql-optima.ps1
 ```
 
-Images are pulled from `ghcr.io/rsharma155/sqloptima-*` (or `SQLOPTIMA_IMAGE_REGISTRY`). Make those packages **public** in GitHub Packages so customers are not asked to log in to GitHub.
+Images are pulled from `ghcr.io/rsharma155/sqloptima_migration-*` (or `SQLOPTIMA_IMAGE_REGISTRY`). Make those packages **public** in GitHub Packages so customers are not asked to log in to GitHub.
 
 ## Website snippet
 
 ```html
-<h1>Install SQL Optima</h1>
+<h1>Install SQL Optima Migration</h1>
 <p>Install Docker Desktop, then download and run. No compilers.</p>
 <p><a href="/sql-optima/sql-optima.zip">Download for Windows, macOS, and Linux</a></p>
 <p>Windows: unzip and double-click <code>sql-optima.cmd</code>.</p>

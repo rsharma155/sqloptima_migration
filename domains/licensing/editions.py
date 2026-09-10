@@ -43,7 +43,7 @@ def edition_info() -> dict:
         "edition": edition.value,
         "features": sorted(_EDITION_FEATURES[edition]),
         "deployment": os.environ.get("MIGRATION_DEPLOYMENT", "on-prem"),
-        "version": os.environ.get("MIGRATION_PLATFORM_VERSION", "0.2.0"),
+        "version": os.environ.get("MIGRATION_PLATFORM_VERSION", "0.2.1"),
     }
 
 

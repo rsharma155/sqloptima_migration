@@ -221,7 +221,7 @@ class MigrationWorkerHeartbeatRecord(Base):
 
     worker_id = Column(String(128), primary_key=True)
     last_seen_at = Column(DateTime(timezone=True), nullable=False, default=_now)
-    engine_version = Column(String(32), nullable=False, default="0.2.0")
+    engine_version = Column(String(32), nullable=False, default="0.2.1")
     status = Column(String(32), nullable=False, default="idle")
 
 

@@ -92,7 +92,7 @@ except ImportError:  # pragma: no cover
 
 app = FastAPI(
     title="SQL Optima Migration API",
-    version="0.2.0",
+    version="0.2.1",
     description="SQL Optima Migration — SQL Server → PostgreSQL Migration Platform",
 )
 
@@ -296,7 +296,7 @@ async def startup() -> None:
             await AuditService(session).purge_expired_tokens()
     except Exception:
         pass
-    logger.info("startup_complete", version="0.2.0", rate_limiting=_slowapi_available)
+    logger.info("startup_complete", version="0.2.1", rate_limiting=_slowapi_available)
 
 
 @app.on_event("shutdown")
@@ -322,7 +322,7 @@ async def health() -> dict:
 
     return {
         "status": "ok",
-        "version": "0.2.0",
+        "version": "0.2.1",
         "timestamp": datetime.now(UTC).isoformat(),
     }
 

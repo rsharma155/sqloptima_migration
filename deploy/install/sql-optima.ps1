@@ -1,4 +1,4 @@
-# SQL Optima — Docker-only installer. No Python, Node, or Go on the host.
+# SQL Optima Migration — Docker-only installer. No Python, Node, or Go on the host.
 # Usage:
 #   .\sql-optima.ps1
 #   .\sql-optima.ps1 -Stop
@@ -9,7 +9,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$Version = if ($env:SQLOPTIMA_VERSION) { $env:SQLOPTIMA_VERSION } else { "0.2.0" }
+$Version = if ($env:SQLOPTIMA_VERSION) { $env:SQLOPTIMA_VERSION } else { "0.2.1" }
 $Registry = if ($env:SQLOPTIMA_IMAGE_REGISTRY) { $env:SQLOPTIMA_IMAGE_REGISTRY } else { "ghcr.io/rsharma155" }
 $UiUrl = "http://localhost:3508"
 $ApiHealth = "http://localhost:8508/health"
@@ -38,7 +38,7 @@ function New-AlnumPassword {
 
 function Write-ComposeFile {
     $compose = @'
-name: sqloptima
+name: sqloptima_migration
 
 services:
   postgres:
@@ -58,7 +58,7 @@ services:
     restart: unless-stopped
 
   api:
-    image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima-api:${SQLOPTIMA_VERSION:-0.2.0}
+    image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima_migration-api:${SQLOPTIMA_VERSION:-0.2.1}
     ports:
       - "8508:8508"
     env_file:
@@ -92,7 +92,7 @@ services:
     restart: unless-stopped
 
   ui:
-    image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima-ui:${SQLOPTIMA_VERSION:-0.2.0}
+    image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima_migration-ui:${SQLOPTIMA_VERSION:-0.2.1}
     ports:
       - "3508:3508"
     environment:
@@ -103,7 +103,7 @@ services:
     restart: unless-stopped
 
   migration-engine:
-    image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima-engine:${SQLOPTIMA_VERSION:-0.2.0}
+    image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima_migration-engine:${SQLOPTIMA_VERSION:-0.2.1}
     environment:
       MIGRATION_MASTER_KEY: ${MIGRATION_MASTER_KEY}
       METADATA_DB_HOST: postgres
@@ -180,7 +180,7 @@ function Wait-Healthy {
             Start-Sleep -Seconds 2
         }
     }
-    Write-Warning "SQL Optima started but the API is not healthy yet. API logs:"
+    Write-Warning "SQL Optima Migration started but the API is not healthy yet. API logs:"
     Invoke-Compose logs api --tail 80
 }
 
@@ -190,7 +190,7 @@ Initialize-EnvFile
 
 if ($Stop) {
     Invoke-Compose down
-    Write-Host "SQL Optima stopped. Data is kept in Docker volumes."
+    Write-Host "SQL Optima Migration stopped. Data is kept in Docker volumes."
     return
 }
 
@@ -199,7 +199,7 @@ if ($Status) {
     return
 }
 
-Write-Host "Pulling SQL Optima images (no compile on this machine)..."
+Write-Host "Pulling SQL Optima Migration images (no compile on this machine)..."
 Invoke-Compose pull
 try {
     Invoke-Compose up -d
@@ -211,7 +211,7 @@ try {
 Write-Host "Waiting for the app..."
 Wait-Healthy
 Write-Host ""
-Write-Host "SQL Optima is running."
+Write-Host "SQL Optima Migration is running."
 Write-Host "  Dashboard: $UiUrl"
 Write-Host "  API:        http://localhost:8508"
 Write-Host "Open the dashboard and create the first admin account."

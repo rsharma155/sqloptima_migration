@@ -1,4 +1,4 @@
-# SQL Optima Helm Chart
+# SQL Optima Migration Helm Chart
 
 Deploy the migration platform API, UI, and Go data plane to Kubernetes.
 
@@ -6,7 +6,7 @@ Deploy the migration platform API, UI, and Go data plane to Kubernetes.
 
 - Kubernetes 1.25+
 - Helm 3.10+
-- Published images (`ghcr.io/rsharma155/sqloptima-api`, `sqloptima-ui`, `sqloptima-engine`)
+- Published images (`ghcr.io/rsharma155/sqloptima_migration-api`, `sqloptima_migration-ui`, `sqloptima_migration-engine`)
 
 Laptop / VM users should **not** use Helm. Use the Docker-only package in `deploy/install/` (see [INSTALL.md](../install/INSTALL.md)).
 

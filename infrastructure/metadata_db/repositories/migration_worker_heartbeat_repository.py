@@ -22,7 +22,7 @@ class MigrationWorkerHeartbeatRepository:
         self,
         worker_id: str,
         *,
-        engine_version: str = "0.2.0",
+        engine_version: str = "0.2.1",
         status: str = "idle",
     ) -> MigrationWorkerHeartbeatRecord:
         record = await self._session.get(MigrationWorkerHeartbeatRecord, worker_id)

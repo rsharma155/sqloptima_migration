@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# SQL Optima — Docker-only installer. No Python, Node, or Go on the host.
+# SQL Optima Migration — Docker-only installer. No Python, Node, or Go on the host.
 # Usage:
 #   ./sql-optima.sh              # start (or install into ~/sql-optima)
 #   ./sql-optima.sh stop
 #   ./sql-optima.sh status
 set -euo pipefail
 
-VERSION="${SQLOPTIMA_VERSION:-0.2.0}"
+VERSION="${SQLOPTIMA_VERSION:-0.2.1}"
 REGISTRY="${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}"
 UI_URL="http://localhost:3508"
 API_HEALTH="http://localhost:8508/health"
@@ -27,7 +27,7 @@ cd "$ROOT"
 
 write_compose() {
   cat > docker-compose.yml <<'YAML'
-name: sqloptima
+name: sqloptima_migration
 
 services:
   postgres:
@@ -47,7 +47,7 @@ services:
     restart: unless-stopped
 
   api:
-    image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima-api:${SQLOPTIMA_VERSION:-0.2.0}
+    image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima_migration-api:${SQLOPTIMA_VERSION:-0.2.1}
     ports:
       - "8508:8508"
     env_file:
@@ -81,7 +81,7 @@ services:
     restart: unless-stopped
 
   ui:
-    image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima-ui:${SQLOPTIMA_VERSION:-0.2.0}
+    image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima_migration-ui:${SQLOPTIMA_VERSION:-0.2.1}
     ports:
       - "3508:3508"
     environment:
@@ -92,7 +92,7 @@ services:
     restart: unless-stopped
 
   migration-engine:
-    image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima-engine:${SQLOPTIMA_VERSION:-0.2.0}
+    image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima_migration-engine:${SQLOPTIMA_VERSION:-0.2.1}
     environment:
       MIGRATION_MASTER_KEY: ${MIGRATION_MASTER_KEY}
       METADATA_DB_HOST: postgres
@@ -183,7 +183,7 @@ wait_healthy() {
     fi
     sleep 2
   done
-  echo "SQL Optima started but the API is not healthy yet. API logs:" >&2
+  echo "SQL Optima Migration started but the API is not healthy yet. API logs:" >&2
   compose logs api --tail 80 >&2 || true
   return 1
 }
@@ -205,13 +205,13 @@ ensure_env
 case "$cmd" in
   stop)
     compose down
-    echo "SQL Optima stopped. Data is kept in Docker volumes."
+    echo "SQL Optima Migration stopped. Data is kept in Docker volumes."
     ;;
   status)
     compose ps
     ;;
   start|up|"")
-    echo "Pulling SQL Optima images (no compile on this machine)..."
+    echo "Pulling SQL Optima Migration images (no compile on this machine)..."
     compose pull
     if ! compose up -d; then
       echo "Failed to start containers. API logs:" >&2
@@ -221,7 +221,7 @@ case "$cmd" in
     echo "Waiting for the app..."
     wait_healthy || true
     echo
-    echo "SQL Optima is running."
+    echo "SQL Optima Migration is running."
     echo "  Dashboard: $UI_URL"
     echo "  API:        http://localhost:8508"
     echo "Open the dashboard and create the first admin account."

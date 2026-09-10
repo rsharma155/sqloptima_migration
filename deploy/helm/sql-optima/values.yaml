@@ -2,16 +2,16 @@ replicaCount: 1
 
 image:
   api:
-    repository: ghcr.io/rsharma155/sqloptima-api
-    tag: "0.2.0"
+    repository: ghcr.io/rsharma155/sqloptima_migration-api
+    tag: "0.2.1"
     pullPolicy: IfNotPresent
   ui:
-    repository: ghcr.io/rsharma155/sqloptima-ui
-    tag: "0.2.0"
+    repository: ghcr.io/rsharma155/sqloptima_migration-ui
+    tag: "0.2.1"
     pullPolicy: IfNotPresent
   engine:
-    repository: ghcr.io/rsharma155/sqloptima-engine
-    tag: "0.2.0"
+    repository: ghcr.io/rsharma155/sqloptima_migration-engine
+    tag: "0.2.1"
     pullPolicy: IfNotPresent
 
 service:
