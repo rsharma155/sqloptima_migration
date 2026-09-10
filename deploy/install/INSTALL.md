@@ -83,7 +83,13 @@ Secrets are written to `.env` next to the compose file on first run. Keep that f
 .\sql-optima.ps1
 ```
 
-Images are pulled from `ghcr.io/rsharma155/sqloptima_migration-*` (or `SQLOPTIMA_IMAGE_REGISTRY`). Make those packages **public** in GitHub Packages so customers are not asked to log in to GitHub.
+If another app already uses **3508** (Grafana on the developer compose stack, an old UI container, or `next dev`), stop it or set `SQLOPTIMA_UI_PORT=3510` in `.env`.
+
+```bash
+docker ps --filter publish=3508
+docker compose -p sqloptima_migration down
+ss -ltnp | grep 3508
+```
 
 ## Website snippet
 
