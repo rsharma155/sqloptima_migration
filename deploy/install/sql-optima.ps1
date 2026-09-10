@@ -60,7 +60,7 @@ services:
   api:
     image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima_migration-api:${SQLOPTIMA_VERSION:-0.2.1}
     ports:
-      - "8508:8508"
+      - "${SQLOPTIMA_API_PORT:-8508}:8508"
     env_file:
       - .env
     environment:
@@ -94,8 +94,10 @@ services:
   ui:
     image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima_migration-ui:${SQLOPTIMA_VERSION:-0.2.1}
     ports:
-      - "3508:3508"
+      - "${SQLOPTIMA_UI_PORT:-3508}:3508"
     environment:
+      PORT: "3508"
+      HOSTNAME: 0.0.0.0
       NEXT_PUBLIC_API_URL: http://localhost:8508
     depends_on:
       api:

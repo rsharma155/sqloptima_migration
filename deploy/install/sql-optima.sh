@@ -49,7 +49,7 @@ services:
   api:
     image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima_migration-api:${SQLOPTIMA_VERSION:-0.2.1}
     ports:
-      - "8508:8508"
+      - "${SQLOPTIMA_API_PORT:-8508}:8508"
     env_file:
       - .env
     environment:
@@ -83,8 +83,10 @@ services:
   ui:
     image: ${SQLOPTIMA_IMAGE_REGISTRY:-ghcr.io/rsharma155}/sqloptima_migration-ui:${SQLOPTIMA_VERSION:-0.2.1}
     ports:
-      - "3508:3508"
+      - "${SQLOPTIMA_UI_PORT:-3508}:3508"
     environment:
+      PORT: "3508"
+      HOSTNAME: 0.0.0.0
       NEXT_PUBLIC_API_URL: http://localhost:8508
     depends_on:
       api:
@@ -174,6 +176,41 @@ EOF
   echo "Using existing $ROOT/.env — image tag set to ${VERSION}."
 }
 
+env_get() {
+  local key="$1"
+  local default="$2"
+  local val=""
+  if [[ -f .env ]]; then
+    val="$(awk -F= -v k="$key" '$1 == k { sub(/^[^=]+=/, ""); print; exit }' .env)"
+  fi
+  printf '%s\n' "${val:-$default}"
+}
+
+host_port_in_use() {
+  local port="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn 2>/dev/null | grep -qE ":${port}[[:space:]]"
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -ltn 2>/dev/null | grep -qE ":${port}[[:space:]]"
+  else
+    return 1
+  fi
+}
+
+explain_port_conflict() {
+  local port="$1"
+  echo "Host port ${port} is already allocated, so the UI/API cannot bind." >&2
+  echo "Containers publishing that port:" >&2
+  docker ps --filter "publish=${port}" --format '  {{.Names}}  {{.Ports}}' >&2 || true
+  echo >&2
+  echo "If this is an old SQL Optima / Grafana / Next.js process:" >&2
+  echo "  docker ps --filter publish=${port}" >&2
+  echo "  docker compose -p sqloptima_migration down" >&2
+  echo "  ss -ltnp | grep ${port}" >&2
+  echo "Or keep the other service and remap in $ROOT/.env:" >&2
+  echo "  SQLOPTIMA_UI_PORT=3510" >&2
+}
+
 compose() {
   local -a dc
   if docker compose version >/dev/null 2>&1; then
@@ -201,17 +238,62 @@ require_docker() {
   fi
 }
 
-wait_healthy() {
+wait_http() {
+  local url="$1"
+  local label="$2"
   local i
   for i in $(seq 1 90); do
-    if curl -fsS "$API_HEALTH" >/dev/null 2>&1; then
+    if curl -fsS "$url" >/dev/null 2>&1; then
       return 0
     fi
     sleep 2
   done
-  echo "SQL Optima Migration started but the API is not healthy yet. API logs:" >&2
-  compose logs api --tail 80 >&2 || true
+  echo "${label} did not become ready at ${url}." >&2
   return 1
+}
+
+wait_stack() {
+  wait_http "$API_HEALTH" "API" || {
+    echo "API logs:" >&2
+    compose logs api --tail 80 >&2 || true
+    return 1
+  }
+  local ui_id
+  ui_id="$(compose ps -q ui 2>/dev/null || true)"
+  if [[ -z "$ui_id" ]]; then
+    echo "The UI container was not created. Full compose status:" >&2
+    compose ps -a >&2 || true
+    return 1
+  fi
+  local ui_state
+  ui_state="$(docker inspect -f '{{.State.Status}}' "$ui_id" 2>/dev/null || echo missing)"
+  if [[ "$ui_state" != "running" ]]; then
+    echo "The UI container is ${ui_state}, so http://localhost:${UI_PORT} will not work." >&2
+    echo "UI logs:" >&2
+    compose logs ui --tail 80 >&2 || true
+    echo "Host processes/containers on ${UI_PORT}:" >&2
+    docker ps -a --filter "publish=${UI_PORT}" --format '  {{.Names}} {{.Status}} {{.Ports}}' >&2 || true
+    return 1
+  fi
+  if ! docker port "$ui_id" 3508 >/dev/null 2>&1; then
+    echo "The UI is running inside Docker but port ${UI_PORT} is not published on the host (empty PORTS in docker ps)." >&2
+    echo "Recreating the UI container to attach the host port..." >&2
+    compose up -d --force-recreate --no-deps ui || return 1
+    ui_id="$(compose ps -q ui 2>/dev/null || true)"
+    if ! docker port "$ui_id" 3508 >/dev/null 2>&1; then
+      echo "Still no host mapping for ${UI_PORT}. Confirm the compose file has:" >&2
+      echo '  ports:' >&2
+      echo '    - "${SQLOPTIMA_UI_PORT:-3508}:3508"' >&2
+      echo "then: docker compose --env-file .env up -d --force-recreate --no-deps ui" >&2
+      return 1
+    fi
+  fi
+  wait_http "$UI_URL" "Dashboard" || wait_http "${UI_URL}/login" "Dashboard" || {
+    echo "UI logs:" >&2
+    compose logs ui --tail 80 >&2 || true
+    return 1
+  }
+  return 0
 }
 
 open_browser() {
@@ -227,6 +309,17 @@ cmd="${1:-start}"
 require_docker
 write_compose
 ensure_env
+UI_PORT="$(env_get SQLOPTIMA_UI_PORT 3508)"
+API_PORT="$(env_get SQLOPTIMA_API_PORT 8508)"
+UI_URL="http://localhost:${UI_PORT}"
+API_HEALTH="http://localhost:${API_PORT}/health"
+
+ours_on_port() {
+  local port="$1"
+  local names
+  names="$(docker ps --filter "publish=${port}" --format '{{.Names}}' 2>/dev/null || true)"
+  [[ "$names" == *"sqloptima_migration-"* ]]
+}
 
 case "$cmd" in
   stop)
@@ -237,19 +330,34 @@ case "$cmd" in
     compose ps
     ;;
   start|up|"")
+    if host_port_in_use "$UI_PORT" && ! ours_on_port "$UI_PORT"; then
+      explain_port_conflict "$UI_PORT"
+      exit 1
+    fi
+    if host_port_in_use "$API_PORT" && ! ours_on_port "$API_PORT"; then
+      explain_port_conflict "$API_PORT"
+      exit 1
+    fi
     echo "Pulling SQL Optima Migration images ${REGISTRY}/sqloptima_migration-*:${VERSION} (no compile on this machine)..."
     compose pull
     if ! compose up -d; then
-      echo "Failed to start containers. API logs:" >&2
+      echo "Failed to start containers." >&2
+      if host_port_in_use "$UI_PORT"; then
+        explain_port_conflict "$UI_PORT"
+      fi
+      echo "API logs:" >&2
       compose logs api --tail 80 >&2 || true
       exit 1
     fi
     echo "Waiting for the app..."
-    wait_healthy || true
+    if ! wait_stack; then
+      echo "SQL Optima Migration did not start fully. API may be up at http://localhost:${API_PORT}/health — the dashboard needs a running UI on port ${UI_PORT}." >&2
+      exit 1
+    fi
     echo
     echo "SQL Optima Migration is running."
     echo "  Dashboard: $UI_URL"
-    echo "  API:        http://localhost:8508"
+    echo "  API:        http://localhost:${API_PORT}"
     echo "Open the dashboard and create the first admin account."
     open_browser
     ;;
