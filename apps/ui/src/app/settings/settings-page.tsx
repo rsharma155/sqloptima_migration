@@ -510,10 +510,17 @@ export default function SettingsPage() {
 
     if (!data.database?.trim()) {
       errs.database = "Database name is required";
-    } else if (data.type === "target" && data.database.trim().toLowerCase() === "postgres") {
+    } else if (
+      (data.engine || (data.type === "target" ? "postgres" : "sqlserver")) === "postgres" &&
+      data.type === "target" &&
+      data.database.trim().toLowerCase() === "postgres"
+    ) {
       errs.database = "The default 'postgres' database cannot be used as a target. Please create a new target database.";
-    } else if (data.type === "source" && ["master", "model", "msdb", "tempdb", "distribution"].includes(data.database.trim().toLowerCase())) {
-      errs.database = "System databases cannot be migrated. Please select a user database.";
+    } else if (
+      (data.engine || (data.type === "target" ? "postgres" : "sqlserver")) === "sqlserver" &&
+      ["master", "model", "msdb", "tempdb", "distribution"].includes(data.database.trim().toLowerCase())
+    ) {
+      errs.database = "System databases cannot be used. Please select a user database.";
     }
 
     if (!data.username?.trim()) {
@@ -1390,7 +1397,8 @@ export default function SettingsPage() {
             <div>
               <h3 className="text-lg font-medium">Database Connections</h3>
               <p className="text-sm text-muted-foreground">
-                Manage source (SQL Server) and target (PostgreSQL) connections
+                Manage database connections. Set <strong>Engine</strong> to SQL Server or PostgreSQL
+                (used by Transfer). The Source/Target role is only for the Migrations wizard.
               </p>
             </div>
             <Button onClick={openAddDialog} aria-label="Add new database connection">
@@ -1584,28 +1592,7 @@ export default function SettingsPage() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="conn-type">Connection Type <span className="text-destructive">*</span></Label>
-                <select
-                  id="conn-type"
-                  value={form.type || "source"}
-                  onChange={(e) => updateFormField("type", e.target.value as "source" | "target")}
-                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                  aria-invalid={!!formErrors.type}
-                  aria-describedby={formErrors.type ? "conn-type-error" : undefined}
-                >
-                  <option value="source">Source (Migrations wizard)</option>
-                  <option value="target">Target (Migrations wizard)</option>
-                </select>
-                {formErrors.type && (
-                  <p id="conn-type-error" className="text-xs text-destructive flex items-center gap-1">
-                    <AlertCircle className="h-3 w-3" />
-                    {formErrors.type}
-                  </p>
-                )}
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="conn-engine">Engine <span className="text-destructive">*</span></Label>
+                <Label htmlFor="conn-engine">Database engine <span className="text-destructive">*</span></Label>
                 <select
                   id="conn-engine"
                   value={form.engine || (form.type === "target" ? "postgres" : "sqlserver")}
@@ -1623,7 +1610,33 @@ export default function SettingsPage() {
                   <option value="postgres">PostgreSQL</option>
                 </select>
                 <p className="text-xs text-muted-foreground">
-                  Used by Transfer. Migrations still treat Source as SQL Server and Target as PostgreSQL.
+                  This is the server type Transfer uses when you pick SQL Server → SQL Server (or other paths).
+                  It is independent of the Migrations Source/Target role below.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="conn-type">Migrations role</Label>
+                <select
+                  id="conn-type"
+                  value={form.type || "source"}
+                  onChange={(e) => updateFormField("type", e.target.value as "source" | "target")}
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                  aria-invalid={!!formErrors.type}
+                  aria-describedby={formErrors.type ? "conn-type-error" : undefined}
+                >
+                  <option value="source">Source (SQL Server → PostgreSQL Migrations)</option>
+                  <option value="target">Target (SQL Server → PostgreSQL Migrations)</option>
+                </select>
+                {formErrors.type && (
+                  <p id="conn-type-error" className="text-xs text-destructive flex items-center gap-1">
+                    <AlertCircle className="h-3 w-3" />
+                    {formErrors.type}
+                  </p>
+                )}
+                <p className="text-xs text-muted-foreground">
+                  Migrations still treat Source as SQL Server and Target as PostgreSQL, regardless of Engine.
+                  For native SQL Server → SQL Server copies, set Engine to SQL Server on both connections and use Transfer.
                 </p>
               </div>
 

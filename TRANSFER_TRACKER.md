@@ -15,7 +15,15 @@ Update this file whenever a slice lands or is blocked.
 | 4 | Homogeneous SQL Server→SQL Server bulk load | **done** |
 | 5 | Heterogeneous PostgreSQL→SQL Server | pending |
 | 6 | Worker applies live `transfer_runtime_settings` (chunk size / throttle) per chunk | partial (MSSQL→MSSQL only) |
-| — | Platform Transfer settings + live per-table metrics/error logs | **done** |
+| 7 | Create missing destination tables + T-SQL as-is object clone (SS→SS) | **done** |
+
+## Slice 7 checklist
+
+- [x] `create_if_missing` emits `CREATE TABLE` (T-SQL as-is for MSSQL→MSSQL; native PG / mapped PG for other implemented paths)
+- [x] Homogeneous SQL Server: clone indexes, checks, FKs, triggers, views, functions, procedures as source T-SQL
+- [x] Go worker runs `schema_clone.pre_copy` before row copy and `post_copy` after
+- [x] Transfer UI: Engine is selected via path + Settings Engine (not Migrations Source/Target role)
+
 
 ## Platform Transfer settings (app-level)
 

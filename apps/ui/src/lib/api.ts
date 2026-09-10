@@ -834,6 +834,7 @@ export async function preflightTransfer(body: {
   target_connection_id: string;
   tables: TransferTableMapping[];
   create_if_missing?: boolean;
+  clone_objects?: boolean;
 }): Promise<TransferPreflightResponse> {
   return request("/api/v1/transfers/preflight", { method: "POST", body });
 }
@@ -844,6 +845,7 @@ export async function createTransfer(body: {
   target_connection_id: string;
   tables: TransferTableMapping[];
   create_if_missing?: boolean;
+  clone_objects?: boolean;
   chunk_size?: number;
   min_chunk_size?: number;
   max_chunk_size?: number;

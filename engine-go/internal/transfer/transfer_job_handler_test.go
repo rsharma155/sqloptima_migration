@@ -289,6 +289,56 @@ func TestTransferGoJobHandlerRecordsTableError(t *testing.T) {
 	}
 }
 
+type fakeSchemaCloneApplier struct {
+	phases []string
+}
+
+func (f *fakeSchemaCloneApplier) Apply(_ context.Context, _ *metadata.ProjectConnection, statements []SchemaCloneStatement) error {
+	for _, s := range statements {
+		f.phases = append(f.phases, s.Phase+":"+s.Kind)
+	}
+	return nil
+}
+
+func TestTransferGoJobHandlerRunsSchemaCloneAroundCopy(t *testing.T) {
+	jobID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
+	cfg := json.RawMessage(`{
+		"job_id": "` + jobID.String() + `",
+		"kind": "transfer",
+		"path": "mssql_to_mssql",
+		"source": {"connection_id": "550e8400-e29b-41d4-a716-446655440001", "schema": "dbo", "engine": "sqlserver"},
+		"target": {"connection_id": "550e8400-e29b-41d4-a716-446655440002", "schema": "dbo", "engine": "sqlserver"},
+		"tables": [{
+			"source_schema": "dbo",
+			"source_table": "orders",
+			"target_schema": "dbo",
+			"target_table": "orders",
+			"columns": ["id"],
+			"chunk_size": 10000
+		}],
+		"schema_clone": {
+			"create_if_missing": true,
+			"clone_objects": true,
+			"statements": [
+				{"phase": "pre_copy", "kind": "table", "sql": "CREATE TABLE t (id int)", "schema": "dbo", "name": "orders", "skip_if_exists": true},
+				{"phase": "post_copy", "kind": "view", "sql": "CREATE VIEW v AS SELECT 1 AS x", "schema": "dbo", "name": "v", "skip_if_exists": true}
+			]
+		}
+	}`)
+	meta := &fakeTransferMeta{queued: []QueuedTransferJob{{JobID: jobID, Config: cfg}}}
+	clone := &fakeSchemaCloneApplier{}
+	h := NewTransferGoJobHandler(meta, &fakeMover{}, nil).WithSchemaCloneApplier(clone)
+	if err := h.Run(context.Background(), &QueuedTransferJob{JobID: jobID, Config: cfg}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(clone.phases) != 2 || clone.phases[0] != "pre_copy:table" || clone.phases[1] != "post_copy:view" {
+		t.Fatalf("clone phases = %v", clone.phases)
+	}
+	if meta.status != "completed" {
+		t.Fatalf("status = %s", meta.status)
+	}
+}
+
 func TestTransferJobCommandControllerStop(t *testing.T) {
 	jobID := uuid.New()
 	meta := &fakeTransferMeta{commands: []core.Command{core.CommandStop}}

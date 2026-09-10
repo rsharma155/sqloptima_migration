@@ -181,6 +181,8 @@ func main() {
 		poller,
 	).WithMetadataURL(cfg.Database.MetadataURL).WithConstraintApplier(
 		transfer.NewLiveTransferConstraintApplier(masterKey),
+	).WithSchemaCloneApplier(
+		transfer.NewLiveTransferSchemaCloneApplier(masterKey),
 	)
 	transferLoop := transfer.NewTransferEngineWorkerLoop(transferWorkerID, transferMeta, transferHandler)
 	go func() {

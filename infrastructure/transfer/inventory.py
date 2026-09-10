@@ -138,6 +138,7 @@ async def _from_discovery(
             type_name=c.data_type.type_name if c.data_type else "",
             nullable=bool(c.is_nullable),
             is_identity=bool(c.is_identity),
+            is_computed=bool(getattr(c, "is_computed", False)),
         )
         for c in (found.columns or [])
     ]

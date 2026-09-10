@@ -23,6 +23,7 @@ type TransferGoJobHandler struct {
 	meta          TransferMetadataPort
 	mover         TransferTableMover
 	applier       TransferConstraintApplier
+	cloneApplier  TransferSchemaCloneApplier
 	commandPoller *metadata.CommandPoller
 	metadataURL   string
 }
@@ -42,6 +43,11 @@ func (h *TransferGoJobHandler) WithMetadataURL(url string) *TransferGoJobHandler
 
 func (h *TransferGoJobHandler) WithConstraintApplier(applier TransferConstraintApplier) *TransferGoJobHandler {
 	h.applier = applier
+	return h
+}
+
+func (h *TransferGoJobHandler) WithSchemaCloneApplier(applier TransferSchemaCloneApplier) *TransferGoJobHandler {
+	h.cloneApplier = applier
 	return h
 }
 
@@ -104,6 +110,22 @@ func (h *TransferGoJobHandler) Run(ctx context.Context, job *QueuedTransferJob) 
 	if err != nil {
 		h.failJob(runCtx, jobID, fmt.Sprintf("load target connection: %v", err))
 		return err
+	}
+
+	preClone := cfg.SchemaClone.Phase("pre_copy")
+	if len(preClone) > 0 {
+		if h.cloneApplier == nil {
+			msg := "schema clone applier is not configured"
+			h.failJob(runCtx, jobID, msg)
+			return fmt.Errorf("%s", msg)
+		}
+		_ = h.meta.SetTransferJobStatus(runCtx, jobID, "preparing")
+		_ = h.meta.AppendTransferJobLog(runCtx, jobID, "info",
+			fmt.Sprintf("Creating %d destination schema object(s) before copy", len(preClone)))
+		if err := h.cloneApplier.Apply(runCtx, tgtConn, preClone); err != nil {
+			h.failJob(runCtx, jobID, err.Error())
+			return err
+		}
 	}
 
 	plan, err := ParseTransferConstraintPlan(cfg.ConstraintPlan)
@@ -189,6 +211,22 @@ func (h *TransferGoJobHandler) Run(ctx context.Context, job *QueuedTransferJob) 
 			fmt.Sprintf("Copied %d row(s) for %s", rows, tableKey))
 	}
 	_ = h.meta.UpdateTransferJobTotals(runCtx, jobID, totalRows, tablesDone)
+
+	postClone := cfg.SchemaClone.Phase("post_copy")
+	if len(postClone) > 0 {
+		if h.cloneApplier == nil {
+			msg := "schema clone applier is not configured"
+			h.failJob(runCtx, jobID, msg)
+			return fmt.Errorf("%s", msg)
+		}
+		_ = h.meta.AppendTransferJobLog(runCtx, jobID, "info",
+			fmt.Sprintf("Cloning %d destination object(s) after copy", len(postClone)))
+		if err := h.cloneApplier.Apply(runCtx, tgtConn, postClone); err != nil {
+			h.failJob(runCtx, jobID, err.Error())
+			return err
+		}
+	}
+
 	_ = h.meta.AppendTransferJobLog(runCtx, jobID, "success",
 		fmt.Sprintf("Transfer completed — %d row(s) across %d table(s)", totalRows, tablesDone))
 	_ = h.meta.SetTransferJobStatus(runCtx, jobID, "completed")

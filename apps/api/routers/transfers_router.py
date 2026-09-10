@@ -43,6 +43,7 @@ class TransferPreflightRequest(BaseModel):
     target_connection_id: UUID
     tables: list[TransferTableIn]
     create_if_missing: bool = False
+    clone_objects: bool = False
 
 
 class TransferCreateRequest(TransferPreflightRequest):
@@ -117,6 +118,7 @@ async def transfer_preflight(req: TransferPreflightRequest, _: dict = require_ro
             target_connection_id=req.target_connection_id,
             tables=_mappings(req.tables),
             create_if_missing=req.create_if_missing,
+            clone_objects=req.clone_objects,
         )
     except Exception as exc:
         _raise(exc)
@@ -154,6 +156,7 @@ async def create_transfer(req: TransferCreateRequest, user: dict = require_role(
             ),
             constraint_plan=req.constraint_plan,
             create_if_missing=req.create_if_missing,
+            clone_objects=req.clone_objects,
             project_id=req.project_id or user.get("project_id"),
         )
     except Exception as exc:
